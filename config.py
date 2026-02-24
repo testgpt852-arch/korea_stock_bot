@@ -85,10 +85,13 @@ DART_KEYWORDS = [
 ]
 
 # ── DART 규모 필터 (v2.1 추가) ───────────────────────────────
-# 배당: 시가배당률 이 값 미만이면 제외 (0 = 필터 비활성)
-DART_DIVIDEND_MIN_RATE = 3      # % — 시가배당률 3% 미만 배당은 제외
-# 수주: 공시 제목에서 금액 파싱 후 이 값 미만이면 제외 (0 = 필터 비활성)
-DART_ORDER_MIN_BILLION = 10     # 억원 — 10억 미만 수주는 제외
+# 배당결정: alotMatter.json dvdnYld (시가배당률) 이 값 미만이면 제외
+DART_DIVIDEND_MIN_RATE    = 3      # % — 시가배당률 3% 미만 배당은 제외
+
+# 단일판매공급계약·수주: piicDecsn.json 기준
+# selfCptlRatio (자기자본대비%) 우선, 없으면 slCtrctAmt (계약금액) 사용
+DART_CONTRACT_MIN_RATIO   = 10     # % — 자기자본대비 10% 미만 계약은 제외
+DART_CONTRACT_MIN_BILLION = 50     # 억원 — 금액 기준 fallback: 50억 미만 제외
 
 # ── 수급 데이터 조회 기간 ────────────────────────────────────
 INSTITUTION_DAYS = 5
