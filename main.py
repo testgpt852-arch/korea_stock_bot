@@ -49,7 +49,7 @@ async def stop_realtime_bot():
         pass
 
 
-def main():
+async def main():
     config.validate_env()
     logger.info("=" * 40)
     logger.info("한국주식 봇 시작")
@@ -85,11 +85,12 @@ def main():
     logger.info(f"  장중봇: 미활성 (4단계 예정)")
 
     try:
-        asyncio.get_event_loop().run_forever()
+        while True:
+            await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):
         logger.info("봇 종료")
         scheduler.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
