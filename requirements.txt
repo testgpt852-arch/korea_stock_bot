@@ -1,6 +1,5 @@
 pykrx
 pandas
-pandas-ta==0.3.14b
 feedparser
 requests
 beautifulsoup4
