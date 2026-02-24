@@ -3,6 +3,10 @@ config.py — 모든 설정값 중앙 관리
 API 키는 절대 이 파일에 직접 입력하지 않는다.
 Railway: 서버 Variables에 입력
 로컬:    .env 파일에 입력 (git 업로드 금지)
+
+[수정이력]
+- v2.1: DART 규모 필터 상수 추가 (DART_DIVIDEND_MIN_RATE, DART_ORDER_MIN_RATIO)
+        미국증시 섹터 연동 매핑 추가 (US_SECTOR_TICKERS, US_SECTOR_KR_MAP)
 """
 
 import os
@@ -20,19 +24,15 @@ KIS_ACCOUNT_NO    = os.environ.get("KIS_ACCOUNT_NO")
 KIS_ACCOUNT_CODE  = os.environ.get("KIS_ACCOUNT_CODE", "01")
 
 # Google AI API (ai_analyzer — Gemma-3-27b-it)
-# 발급: https://aistudio.google.com → Get API Key → 무료
-# 하루 14,400회 가능
 GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
 
-# 네이버 검색 API (리포트·뉴스·시황 요약)
-# 발급: https://developers.naver.com → Application 등록 → 검색 API → 무료
+# 네이버 검색 API
 NAVER_CLIENT_ID     = os.environ.get("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
 
 # ── 시작 시 키 누락 여부 체크 ─────────────────────────────────
 def validate_env():
-    # 필수 키
     required = {
         "TELEGRAM_TOKEN":   TELEGRAM_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
@@ -42,7 +42,6 @@ def validate_env():
     if missing:
         raise EnvironmentError(f"[config] 필수 환경변수 누락: {missing}")
 
-    # 선택 키 안내
     if not GOOGLE_AI_API_KEY:
         print("[config] GOOGLE_AI_API_KEY 없음 — AI 분석 비활성 (aistudio.google.com 무료 발급)")
 
@@ -54,17 +53,17 @@ def validate_env():
 
 
 # ── 장중봇 급등 감지 임계값 ──────────────────────────────────
-VOLUME_SPIKE_RATIO = 10     # 전일 총거래량 대비 누적거래량 (%)
-PRICE_CHANGE_MIN   = 3.0    # 급등 감지 최소 등락률 (%)
-CONFIRM_CANDLES    = 2      # 연속 충족 횟수 (연속 2틱 확인)
-MARKET_CAP_MIN     = 30_000_000_000   # 시총 최소 300억
+VOLUME_SPIKE_RATIO = 10
+PRICE_CHANGE_MIN   = 3.0
+CONFIRM_CANDLES    = 2
+MARKET_CAP_MIN     = 30_000_000_000
 
 # ── 중복 알림 방지 ───────────────────────────────────────────
-ALERT_COOLTIME_MIN = 30     # 동일 종목 재알림 최소 간격 (분)
+ALERT_COOLTIME_MIN = 30
 
 # ── KIS WebSocket ────────────────────────────────────────────
-WS_MAX_RECONNECT   = 3      # 최대 재연결 횟수 (에러 시만)
-WS_RECONNECT_DELAY = 30     # 재연결 대기 시간 (초)
+WS_MAX_RECONNECT   = 3
+WS_RECONNECT_DELAY = 30
 
 # ── 스케줄 시간 ──────────────────────────────────────────────
 TOKEN_REFRESH_TIME = "07:00"
@@ -82,8 +81,38 @@ DART_KEYWORDS = [
     "단일판매공급계약체결",
     "특허",
     "판결",
-    "주요주주",         # 내부자거래 감지
+    "주요주주",
 ]
 
+# ── DART 규모 필터 (v2.1 추가) ───────────────────────────────
+# 배당: 시가배당률 이 값 미만이면 제외 (0 = 필터 비활성)
+DART_DIVIDEND_MIN_RATE = 3      # % — 시가배당률 3% 미만 배당은 제외
+# 수주: 공시 제목에서 금액 파싱 후 이 값 미만이면 제외 (0 = 필터 비활성)
+DART_ORDER_MIN_BILLION = 10     # 억원 — 10억 미만 수주는 제외
+
 # ── 수급 데이터 조회 기간 ────────────────────────────────────
-INSTITUTION_DAYS = 5        # 기관/외인 수급 조회 기간 (일)
+INSTITUTION_DAYS = 5
+
+# ── 미국증시 섹터 ETF → 국내 연동 테마 매핑 (v2.1 추가) ──────
+# yfinance로 섹터 ETF 등락률 수집 → 국내 테마 신호로 변환
+US_SECTOR_TICKERS = {
+    "XLK":  "기술/반도체",    # Technology
+    "XLE":  "에너지/정유",    # Energy
+    "XLB":  "소재/화학",      # Materials
+    "XLI":  "산업재/방산",    # Industrials
+    "XLV":  "바이오/헬스케어",# Health Care
+    "XLF":  "금융",           # Financials
+}
+
+# 국내 연동 종목 힌트 (signal_analyzer에서 관련종목 제안용)
+US_SECTOR_KR_MAP = {
+    "기술/반도체":    ["삼성전자", "SK하이닉스", "한미반도체"],
+    "에너지/정유":    ["SK이노베이션", "S-Oil", "GS칼텍스"],
+    "소재/화학":      ["LG화학", "롯데케미칼", "금호석유"],
+    "산업재/방산":    ["한화에어로스페이스", "현대로템", "LIG넥스원"],
+    "바이오/헬스케어":["삼성바이오로직스", "셀트리온", "유한양행"],
+    "금융":           ["KB금융", "신한지주", "하나금융지주"],
+}
+
+# 섹터 신호 발생 임계값 (등락률 절댓값 이상일 때만 신호 발생)
+US_SECTOR_SIGNAL_MIN = 1.5      # % — 1.5% 이상 변동 시만 신호
