@@ -63,7 +63,7 @@ async def main():
     # 아침봇
     scheduler.add_job(
         run_morning_bot, "cron",
-        hour=7, minute=40,
+        hour=7, minute=45,
         id="morning_bot_1"
     )
     scheduler.add_job(
