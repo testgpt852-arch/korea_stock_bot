@@ -6,13 +6,15 @@ collectors/price_collector.py
 [사용 pykrx 함수 — 실존 확인된 것만]
   get_index_ohlcv_by_date(fromdate, todate, index_code)
   get_market_ohlcv_by_ticker(date, market=market)
-  get_market_trading_value_by_date(fromdate, todate, ticker)  ← 기관/외인 (개별종목)
-  get_market_short_ohlcv_by_date(fromdate, todate, ticker)   ← 공매도 (개별종목)
+  get_market_sector_classifications(date, market)     ← 업종 분류 (v2.3 추가)
+  get_market_trading_value_by_date(fromdate, todate, ticker)  ← 기관/외인
+  get_market_short_ohlcv_by_date(fromdate, todate, ticker)   ← 공매도
 
 [수정이력]
-- v2.2: _fetch_index 단일날짜 조회 버그 수정
-        fromdate==todate 로 조회 시 pykrx가 이전 거래일 비교 없이
-        등락률 0.00% 반환하는 문제 → 7일 범위 조회 후 마지막 행 사용
+- v2.2: _fetch_index 단일날짜 조회 버그 수정 (10일 범위 조회로 변경)
+- v2.3: 업종 분류 수집 추가 (_fetch_sector_map)
+        by_sector 반환 추가: {업종명: [종목entry...]} 등락률 내림차순
+        → signal_analyzer가 실제 시장 데이터로 섹터 대장주를 동적 판별
 """
 
 from datetime import datetime, timedelta
@@ -26,7 +28,7 @@ import config
 
 def collect_daily(target_date: datetime = None) -> dict:
     """
-    당일 전종목 데이터 수집 (마감봇 메인 수집 함수)
+    당일 전종목 데이터 수집
 
     반환: dict {
         "date":         str,
@@ -39,6 +41,7 @@ def collect_daily(target_date: datetime = None) -> dict:
         "short_selling":list,   공매도 상위
         "by_name":      dict,   {종목명: entry}  ← theme_analyzer용
         "by_code":      dict,   {종목코드: entry}
+        "by_sector":    dict,   {업종명: [entry...]} 등락률 내림차순  ← v2.3 추가
     }
     """
     if target_date is None:
@@ -58,6 +61,7 @@ def collect_daily(target_date: datetime = None) -> dict:
         "short_selling": [],
         "by_name":       {},
         "by_code":       {},
+        "by_sector":     {},   # v2.3 추가
     }
 
     # ── 1. 지수 수집 ──────────────────────────────────────────
@@ -88,16 +92,19 @@ def collect_daily(target_date: datetime = None) -> dict:
         f"급락:{len(result['top_losers'])}개"
     )
 
-    # ── 3. 기관/외인 순매수 (상위 급등 종목 개별 조회) ─────────
-    # pykrx에 시장 전체 투자자별 ticker 조회 함수가 버전에 따라 없음
-    # → 상한가 + 급등 상위 종목(최대 30개)에 대해 개별 조회로 대체
+    # ── 3. 업종 분류 수집 (v2.3 신규) ────────────────────────
+    # pykrx 업종분류 + 전종목 등락률 결합 → 업종별 실제 등락률 순위
+    # signal_analyzer가 "구리 강세" 신호 시 실제 전선 업종 상위 종목 동적 조회에 사용
+    result["by_sector"] = _fetch_sector_map(date_str, all_stocks)
+
+    # ── 4. 기관/외인 순매수 (상위 급등 종목 개별 조회) ─────────
     top_tickers = [s["종목코드"] for s in result["upper_limit"][:15]] + \
                   [s["종목코드"] for s in result["top_gainers"][:15]]
     result["institutional"] = _fetch_institutional_by_tickers(
         date_str, top_tickers
     )
 
-    # ── 4. 공매도 (상위 급등 종목 개별 조회) ───────────────────
+    # ── 5. 공매도 (상위 급등 종목 개별 조회) ───────────────────
     result["short_selling"] = _fetch_short_selling(date_str, top_tickers)
 
     return result
@@ -167,15 +174,11 @@ def _fetch_index(target_date: datetime, index_code: str, name: str) -> dict:
     지수 OHLCV + 등락률 수집
 
     [v2.2 버그 수정]
-    기존: get_index_ohlcv_by_date(date_str, date_str, code)
-         → fromdate==todate 단일 날짜 조회 시 pykrx가 이전 거래일을
-           참조하지 못해 등락률 0.00% 반환하는 문제 발생
-    수정: target_date 기준 10 캘린더일 전부터 조회 → 마지막 행 사용
-         (이전 거래일 데이터가 포함되므로 등락률 정상 계산됨)
+    fromdate==todate 단일날짜 조회 시 pykrx가 등락률 0.00% 반환하는 문제
+    → target_date 기준 10 캘린더일 전부터 조회 → 마지막 행 사용
     """
     try:
         date_str  = fmt_ymd(target_date)
-        # 10 캘린더일 전 ~ target_date 범위로 조회 (주말·공휴일 고려)
         from_date = target_date - timedelta(days=10)
         from_str  = fmt_ymd(from_date)
 
@@ -184,7 +187,6 @@ def _fetch_index(target_date: datetime, index_code: str, name: str) -> dict:
             logger.warning(f"[price] {name} 지수 없음 (휴장 또는 데이터 없음)")
             return {}
 
-        # 마지막 행 = target_date (범위 내 마지막 거래일)
         row         = df.iloc[-1]
         close       = float(row.get("종가", 0))
         change_rate = float(row.get("등락률", 0))
@@ -213,20 +215,81 @@ def _fetch_all_stocks(date_str: str) -> dict:
                     "거래량":   int(row.get("거래량", 0)),
                     "종가":     float(row.get("종가", 0)),
                     "시장":     market,
+                    "업종명":   "",   # _fetch_sector_map에서 채워짐
                 }
         except Exception as e:
             logger.warning(f"[price] {market} 전종목 수집 실패: {e}")
     return all_stocks
 
 
+def _fetch_sector_map(date_str: str, all_stocks: dict) -> dict:
+    """
+    업종 분류 수집 → {업종명: [종목entry...]} 등락률 내림차순
+
+    pykrx.get_market_sector_classifications(date, market) 사용
+    반환 컬럼 예시: 종목코드, 종목명, 업종명 (버전마다 다를 수 있음)
+    → 컬럼명은 _find_col_keyword로 유연하게 탐색
+
+    역할:
+      signal_analyzer가 "구리 강세" 신호를 만들 때
+      config.COMMODITY_KR_INDUSTRY["copper"] = ["전기/전선"]로 업종명 키워드 조회
+      → 그날 실제 등락률 상위 종목들을 동적으로 관련종목에 넣음
+    """
+    sector_by_code = {}   # {종목코드: 업종명}
+
+    for market in ["KOSPI", "KOSDAQ"]:
+        try:
+            df = pykrx_stock.get_market_sector_classifications(date_str, market=market)
+            if df.empty:
+                continue
+
+            # 컬럼명 탐색 (pykrx 버전별 차이 대응)
+            code_col   = _find_col(df, ["종목코드", "Code", "ticker"])
+            sector_col = _find_col(df, ["업종명", "sector", "Sector", "SECTOR"])
+
+            if not code_col or not sector_col:
+                logger.warning(
+                    f"[price] {market} 업종분류 컬럼 미확인 "
+                    f"(실제컬럼: {df.columns.tolist()}) — 업종 데이터 스킵"
+                )
+                # 컬럼명 로그 → 첫 실행 후 확인해서 수정 가능
+                continue
+
+            for _, row in df.iterrows():
+                code   = str(row[code_col]).zfill(6)
+                sector = str(row[sector_col])
+                sector_by_code[code] = sector
+
+        except Exception as e:
+            logger.warning(f"[price] {market} 업종분류 수집 실패: {e}")
+
+    if not sector_by_code:
+        logger.warning("[price] 업종분류 전체 실패 — by_sector 빈 상태로 진행")
+        return {}
+
+    # all_stocks에 업종명 주입 (부가 정보)
+    for code, entry in all_stocks.items():
+        entry["업종명"] = sector_by_code.get(code, "기타")
+
+    # 업종별 그룹핑 → 등락률 내림차순 정렬
+    by_sector: dict[str, list] = {}
+    for entry in all_stocks.values():
+        sector = entry.get("업종명", "기타")
+        if not sector or sector == "기타":
+            continue
+        by_sector.setdefault(sector, []).append(entry)
+
+    for sector in by_sector:
+        by_sector[sector].sort(key=lambda x: x["등락률"], reverse=True)
+
+    logger.info(f"[price] 업종분류 완료 — {len(by_sector)}개 업종")
+    return by_sector
+
+
 def _fetch_institutional_by_tickers(
     date_str: str, tickers: list[str], top_n: int = 10
 ) -> list[dict]:
-    """
-    기관/외인 순매수 — 개별 종목 조회 방식
-    pykrx 확인 함수: get_market_trading_value_by_date(fromdate, todate, ticker)
-    반환 컬럼: 기관합계, 외국인합계, 개인, 기타법인 등
-    """
+    """기관/외인 순매수 — 개별 종목 조회"""
     results = []
     for ticker in tickers:
         try:
@@ -239,18 +302,15 @@ def _fetch_institutional_by_tickers(
             inst_col = _find_col(df, ["기관합계", "기관"])
             frgn_col = _find_col(df, ["외국인합계", "외국인"])
 
-            # 컬럼 없으면 최초 1회만 경고
             if not inst_col and not frgn_col:
                 logger.warning(
                     f"[price] 기관/외인 컬럼 없음 "
-                    f"(실제컬럼: {df.columns.tolist()}) — "
-                    f"pykrx 버전 이슈 가능성"
+                    f"(실제컬럼: {df.columns.tolist()}) — pykrx 버전 이슈 가능성"
                 )
-                break  # 다른 종목도 동일할 것이므로 중단
+                break
 
             inst_val = int(row[inst_col]) if inst_col else 0
             frgn_val = int(row[frgn_col]) if frgn_col else 0
-
             name = pykrx_stock.get_market_ticker_name(ticker)
             results.append({
                 "종목코드":     ticker,
@@ -270,10 +330,7 @@ def _fetch_institutional_by_tickers(
 def _fetch_short_selling(
     date_str: str, tickers: list[str], top_n: int = 10
 ) -> list[dict]:
-    """
-    공매도 비중 — 개별 종목 조회
-    pykrx 확인 함수: get_market_short_ohlcv_by_date(fromdate, todate, ticker)
-    """
+    """공매도 비중 — 개별 종목 조회"""
     results = []
     for ticker in tickers:
         try:
