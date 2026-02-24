@@ -1,11 +1,18 @@
 """
 analyzers/signal_analyzer.py
 v6.0 프롬프트 신호 1~5 통합 판단 전담
-- dart, market, news 수집 결과를 받아 신호별로 정리
+- dart, market, news, price 수집 결과를 받아 신호별로 정리
 - 테마 발화 가능성 평가표 생성
 - 수집/발송 로직 없음
+
+[수정이력]
+- v1.0: 신호 1~3, 5 구현
+- v2.1: 신호 4 추가 (전날 급등/상한가 → 순환매 신호)
+        미국증시 섹터 연동 신호 추가 (sectors 데이터 활용)
+        price_data 파라미터 추가
 """
 
+import config
 from utils.logger import logger
 
 
@@ -13,35 +20,27 @@ def analyze(
     dart_data:   list[dict],
     market_data: dict,
     news_data:   dict,
-    theme_data:  dict = None,  # closing_report에서 넘어오는 전날 테마 (없으면 None)
+    price_data:  dict = None,   # v2.1: 전날 가격 데이터 (아침봇에서 직접 주입)
 ) -> dict:
     """
     신호 1~5 통합 분석
     반환: dict
     {
-        "signals": [
-            {
-                "테마명":     str,
-                "발화신호":   str,
-                "강도":       int,   # 1~5
-                "신뢰도":     str,
-                "발화단계":   str,
-                "상태":       str,   # "신규", "진행", "모니터"
-            }
-        ],
-        "market_summary": dict,    # 미국증시 요약
-        "volatility":     str,     # "고변동" or "저변동"
-        "report_picks":   list,    # 리포트 상위 종목
-        "policy_summary": list,    # 정책 뉴스 요약
+        "signals": [...],
+        "market_summary": dict,
+        "commodities":    dict,
+        "volatility":     str,
+        "report_picks":   list,
+        "policy_summary": list,
     }
     """
     logger.info("[signal] 신호 1~5 분석 시작")
 
-    signals       = []
+    signals        = []
     market_summary = market_data.get("us_market", {})
-    commodities   = market_data.get("commodities", {})
+    commodities    = market_data.get("commodities", {})
 
-    # ── 신호 1: DART 공시 ────────────────────────────────
+    # ── 신호 1: DART 공시 ────────────────────────────────────
     for dart in dart_data:
         strength = _dart_strength(dart)
         if strength == 0:
@@ -56,11 +55,11 @@ def analyze(
             "관련종목": [dart["종목명"]],
         })
 
-    # ── 신호 2: 미국증시 + 원자재 ────────────────────────
+    # ── 신호 2: 미국증시 + 원자재 + 섹터 연동 ────────────────
     us_signals = _analyze_us_market(market_summary, commodities)
     signals.extend(us_signals)
 
-    # ── 신호 3: 증권사 리포트 ────────────────────────────
+    # ── 신호 3: 증권사 리포트 ────────────────────────────────
     reports = news_data.get("reports", [])
     for report in reports[:5]:
         if report["액션"] in ["목표가상향", "신규매수"]:
@@ -74,7 +73,15 @@ def analyze(
                 "관련종목": [report["종목명"]],
             })
 
-    # ── 신호 5: 정책·시황 ────────────────────────────────
+    # ── 신호 4: 전날 급등/상한가 순환매 (v2.1 추가) ──────────
+    # price_data가 있을 때만 실행 (아침봇에서 직접 주입)
+    # 마감봇 의존 없이 pykrx로 직접 수집한 전날 데이터 활용
+    if price_data:
+        price_signals = _analyze_prev_price(price_data)
+        signals.extend(price_signals)
+        logger.info(f"[signal] 신호4 (순환매): {len(price_signals)}개 테마 감지")
+
+    # ── 신호 5: 정책·시황 ────────────────────────────────────
     policy = news_data.get("policy_news", [])
     for p in policy[:3]:
         signals.append({
@@ -92,15 +99,170 @@ def analyze(
 
     logger.info(f"[signal] 총 {len(signals)}개 신호 감지")
 
+    # 저변동 판단 (RULE 4)
+    volatility = _judge_volatility(market_summary, price_data)
+
     return {
         "signals":        signals,
         "market_summary": market_summary,
         "commodities":    commodities,
-        "volatility":     _judge_volatility(market_summary),
+        "volatility":     volatility,
         "report_picks":   reports[:5],
         "policy_summary": policy[:3],
     }
 
+
+# ══════════════════════════════════════════════════════════════
+# 신호 4: 전날 급등/상한가 순환매 분석 (v2.1 신규)
+# ══════════════════════════════════════════════════════════════
+
+def _analyze_prev_price(price_data: dict) -> list[dict]:
+    """
+    전날 상한가·급등 종목 → 순환매 신호 생성
+    - 상한가 종목: 강도 5, 대장주 + 소외주 묶음
+    - 급등(7%↑) 종목: 강도 3~4 (등락률 기준)
+    - 저변동 장세(코스피·코스닥 모두 ±1% 미만): 빈 리스트 반환 (RULE 4)
+    """
+    signals = []
+
+    kospi_rate  = price_data.get("kospi",  {}).get("change_rate", 0)
+    kosdaq_rate = price_data.get("kosdaq", {}).get("change_rate", 0)
+    upper_limit = price_data.get("upper_limit", [])
+    top_gainers = price_data.get("top_gainers", [])
+
+    # RULE 4: 저변동 장세 판단
+    is_low_vol = (abs(kospi_rate) < 1.0) and (abs(kosdaq_rate) < 1.0)
+    if is_low_vol:
+        logger.info(
+            f"[signal] 저변동 장세 감지 — 코스피:{kospi_rate:+.2f}% "
+            f"코스닥:{kosdaq_rate:+.2f}% → 신호4 스킵"
+        )
+        return []
+
+    # 상한가 그룹: 강도 5
+    if upper_limit:
+        # 상한가 종목들을 대장(최고등락) + 소외주 구조로 묶음
+        sorted_upper = sorted(upper_limit, key=lambda x: x["등락률"], reverse=True)
+        관련종목 = [s["종목명"] for s in sorted_upper[:10]]
+        signals.append({
+            "테마명":   "상한가 순환매",
+            "발화신호": (
+                f"신호4: 전날 상한가 {len(upper_limit)}종목 "
+                f"[대장:{sorted_upper[0]['종목명']} {sorted_upper[0]['등락률']:+.1f}%|pykrx]"
+            ),
+            "강도":     5,
+            "신뢰도":   "pykrx",
+            "발화단계": "2일차",
+            "상태":     "진행",
+            "관련종목": 관련종목,
+            "ai_memo":  f"전날 상한가 {len(upper_limit)}종목 — 오늘 2·3등주 순환매 주목",
+        })
+
+    # 급등 그룹: 상위 3개 테마로 개별 신호 (등락률 기준 강도 차등)
+    # 상한가와 중복되는 종목 제외
+    upper_names = {s["종목명"] for s in upper_limit}
+    gainers_only = [s for s in top_gainers if s["종목명"] not in upper_names]
+
+    # 급등 종목은 시장별로 분리해서 신호 생성 (KOSPI/KOSDAQ)
+    for market in ["KOSPI", "KOSDAQ"]:
+        market_gainers = [s for s in gainers_only if s.get("시장") == market][:10]
+        if not market_gainers:
+            continue
+
+        top = market_gainers[0]  # 대장주
+        관련종목 = [s["종목명"] for s in market_gainers]
+
+        # 강도: 대장주 등락률 기준
+        rate = top["등락률"]
+        강도 = 5 if rate >= 20 else 4 if rate >= 10 else 3
+
+        signals.append({
+            "테마명":   f"{market} 급등 순환매",
+            "발화신호": (
+                f"신호4: 전날 {market} 급등 {len(market_gainers)}종목 "
+                f"[대장:{top['종목명']} {rate:+.1f}%|pykrx]"
+            ),
+            "강도":     강도,
+            "신뢰도":   "pykrx",
+            "발화단계": "2일차",
+            "상태":     "진행",
+            "관련종목": 관련종목,
+            "ai_memo":  f"전날 대장 {top['종목명']} {rate:+.1f}% — 소외주 오늘 순환매 가능",
+        })
+
+    return signals
+
+
+# ══════════════════════════════════════════════════════════════
+# 신호 2: 미국증시·원자재·섹터 분석
+# ══════════════════════════════════════════════════════════════
+
+def _analyze_us_market(us: dict, commodities: dict) -> list[dict]:
+    """미국증시 섹터 + 원자재 → 국내 연동 테마 시그널"""
+    signals = []
+
+    # 섹터 ETF 연동 신호 (v2.1)
+    sectors = us.get("sectors", {})
+    for sector_name, sector_data in sectors.items():
+        change_str = sector_data.get("change", "N/A")
+        if change_str == "N/A":
+            continue
+
+        try:
+            pct = float(change_str.replace("%", "").replace("+", ""))
+        except ValueError:
+            continue
+
+        # 임계값 이상 변동 시만 신호 발생
+        if abs(pct) < config.US_SECTOR_SIGNAL_MIN:
+            continue
+
+        direction = "강세↑" if pct > 0 else "약세↓"
+        강도 = 4 if abs(pct) >= 3.0 else 3 if abs(pct) >= 2.0 else 2
+        관련종목 = config.US_SECTOR_KR_MAP.get(sector_name, [])
+
+        signals.append({
+            "테마명":   sector_name,
+            "발화신호": f"신호2: 미국 {sector_name} {direction} {change_str} [섹터ETF|전날]",
+            "강도":     강도 if pct > 0 else 1,   # 약세는 강도 1
+            "신뢰도":   sector_data.get("신뢰도", "yfinance"),
+            "발화단계": "불명",
+            "상태":     "모니터" if pct > 0 else "경고",
+            "관련종목": 관련종목,
+        })
+
+    # 구리 강세 → 전선주
+    copper = commodities.get("copper", {})
+    if _is_positive(copper.get("change", "N/A")):
+        signals.append({
+            "테마명":   "전선/구리",
+            "발화신호": f"신호2: 구리 {copper['change']} [LME|전날]",
+            "강도":     3,
+            "신뢰도":   copper.get("신뢰도", "N/A"),
+            "발화단계": "불명",
+            "상태":     "모니터",
+            "관련종목": ["LS전선", "대원전선", "가온전선"],
+        })
+
+    # 은 강세 → 귀금속/태양광
+    silver = commodities.get("silver", {})
+    if _is_positive(silver.get("change", "N/A")):
+        signals.append({
+            "테마명":   "귀금속/태양광",
+            "발화신호": f"신호2: 은 {silver['change']} [COMEX|전날]",
+            "강도":     2,
+            "신뢰도":   silver.get("신뢰도", "N/A"),
+            "발화단계": "불명",
+            "상태":     "모니터",
+            "관련종목": [],
+        })
+
+    return signals
+
+
+# ══════════════════════════════════════════════════════════════
+# 내부 헬퍼
+# ══════════════════════════════════════════════════════════════
 
 def _dart_strength(dart: dict) -> int:
     """공시 종류별 강도 (1~5)"""
@@ -121,7 +283,7 @@ def _dart_strength(dart: dict) -> int:
 
 
 def _dart_to_theme(report_nm: str, stock_nm: str) -> str:
-    """공시 종류 -> 테마명 변환"""
+    """공시 종류 → 테마명 변환"""
     if "수주" in report_nm or "공급계약" in report_nm:
         return f"{stock_nm} 수주"
     if "배당" in report_nm:
@@ -135,39 +297,6 @@ def _dart_to_theme(report_nm: str, stock_nm: str) -> str:
     return f"{stock_nm} 공시"
 
 
-def _analyze_us_market(us: dict, commodities: dict) -> list[dict]:
-    """미국증시·원자재 -> 국내 연동 테마 시그널"""
-    signals = []
-
-    # 구리 강세 -> 전선주
-    copper = commodities.get("copper", {})
-    if _is_positive(copper.get("change", "N/A")):
-        signals.append({
-            "테마명":   "전선/구리",
-            "발화신호": f"신호2: 구리 {copper['change']} [LME|전날]",
-            "강도":     3,
-            "신뢰도":   copper["신뢰도"],
-            "발화단계": "불명",
-            "상태":     "모니터",
-            "관련종목": ["LS전선", "대원전선", "가온전선"],
-        })
-
-    # 은 강세 -> 귀금속/태양광
-    silver = commodities.get("silver", {})
-    if _is_positive(silver.get("change", "N/A")):
-        signals.append({
-            "테마명":   "귀금속/태양광",
-            "발화신호": f"신호2: 은 {silver['change']} [COMEX|전날]",
-            "강도":     2,
-            "신뢰도":   silver["신뢰도"],
-            "발화단계": "불명",
-            "상태":     "모니터",
-            "관련종목": [],
-        })
-
-    return signals
-
-
 def _is_positive(change_str: str) -> bool:
     """등락률 문자열이 양수인지 확인"""
     if change_str in ("N/A", "", None):
@@ -178,12 +307,23 @@ def _is_positive(change_str: str) -> bool:
     )
 
 
-def _judge_volatility(us: dict) -> str:
+def _judge_volatility(us: dict, price_data: dict = None) -> str:
     """
-    미국증시 기준 고변동/저변동 판단
-    실제 코스피/코스닥 등락률은 마감봇에서 판단
-    아침봇에서는 미국 시황 기준으로 예상
+    변동성 판단 (RULE 4 준수)
+    - price_data 있으면 실제 코스피/코스닥 등락률 기준 (정확)
+    - 없으면 미국 나스닥 기준으로 예상 (아침봇 fallback)
     """
+    # 실제 전날 지수 데이터 우선 (신호4에서 주입됨)
+    if price_data:
+        kospi_rate  = price_data.get("kospi",  {}).get("change_rate", None)
+        kosdaq_rate = price_data.get("kosdaq", {}).get("change_rate", None)
+        if kospi_rate is not None and kosdaq_rate is not None:
+            rate = max(abs(kospi_rate), abs(kosdaq_rate))
+            if rate >= 2.0:   return "고변동"
+            elif rate >= 1.0: return "중변동"
+            else:             return "저변동 (순환매 에너지 낮음)"
+
+    # fallback: 미국 나스닥 기준 예상
     nasdaq = us.get("nasdaq", "N/A")
     if nasdaq == "N/A":
         return "판단불가"
