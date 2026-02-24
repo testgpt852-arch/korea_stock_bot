@@ -7,6 +7,11 @@ Railway: 서버 Variables에 입력
 [수정이력]
 - v2.1: DART 규모 필터 상수 추가 (DART_DIVIDEND_MIN_RATE, DART_ORDER_MIN_RATIO)
         미국증시 섹터 연동 매핑 추가 (US_SECTOR_TICKERS, US_SECTOR_KR_MAP)
+- v2.2: 하드코딩 비상장 종목 수정
+          LS전선(비상장) → 대한전선·대원전선·가온전선·LS전선아시아
+          GS칼텍스(비상장) → GS
+        COPPER_KR_STOCKS 상수 신규 추가 (signal_analyzer 참조)
+        US_SECTOR_SIGNAL_MIN 1.5% → 1.0% (신호 감도 향상)
 """
 
 import os
@@ -96,6 +101,12 @@ DART_CONTRACT_MIN_BILLION = 50     # 억원 — 금액 기준 fallback: 50억 �
 # ── 수급 데이터 조회 기간 ────────────────────────────────────
 INSTITUTION_DAYS = 5
 
+# ── 원자재 연동 국내 종목 (v2.2 신규) ────────────────────────
+# 구리 강세 시 순환매 기대 종목 — 상장사만 포함
+# ※ LS전선은 비상장 → 제거. 대한전선·LS전선아시아 로 교체
+# theme_analyzer의 price_data["by_name"] 키와 정확히 일치해야 소외도 계산 가능
+COPPER_KR_STOCKS = ["대한전선", "대원전선", "가온전선", "LS전선아시아"]
+
 # ── 미국증시 섹터 ETF → 국내 연동 테마 매핑 (v2.1 추가) ──────
 # yfinance로 섹터 ETF 등락률 수집 → 국내 테마 신호로 변환
 US_SECTOR_TICKERS = {
@@ -108,9 +119,11 @@ US_SECTOR_TICKERS = {
 }
 
 # 국내 연동 종목 힌트 (signal_analyzer에서 관련종목 제안용)
+# ※ theme_analyzer가 price_data["by_name"]에서 조회하므로 상장사 정확명 필수
+# v2.2: GS칼텍스(비상장) → GS 로 수정
 US_SECTOR_KR_MAP = {
     "기술/반도체":    ["삼성전자", "SK하이닉스", "한미반도체"],
-    "에너지/정유":    ["SK이노베이션", "S-Oil", "GS칼텍스"],
+    "에너지/정유":    ["SK이노베이션", "S-Oil", "GS"],
     "소재/화학":      ["LG화학", "롯데케미칼", "금호석유"],
     "산업재/방산":    ["한화에어로스페이스", "현대로템", "LIG넥스원"],
     "바이오/헬스케어":["삼성바이오로직스", "셀트리온", "유한양행"],
@@ -118,4 +131,5 @@ US_SECTOR_KR_MAP = {
 }
 
 # 섹터 신호 발생 임계값 (등락률 절댓값 이상일 때만 신호 발생)
-US_SECTOR_SIGNAL_MIN = 1.5      # % — 1.5% 이상 변동 시만 신호
+# v2.2: 1.5% → 1.0% (XLK +1.3% 수준의 의미 있는 움직임도 포착)
+US_SECTOR_SIGNAL_MIN = 1.0      # % — 1.0% 이상 변동 시만 신호
