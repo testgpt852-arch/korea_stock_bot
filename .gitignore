@@ -1,0 +1,16 @@
+# 환경변수 파일 (절대 git 업로드 금지)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 로그
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/

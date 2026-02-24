@@ -1,0 +1,13 @@
+pykrx
+pandas
+pandas-ta
+feedparser
+requests
+beautifulsoup4
+apscheduler
+python-telegram-bot
+opendartreader
+python-dotenv
+yfinance
+google-genai
+websockets

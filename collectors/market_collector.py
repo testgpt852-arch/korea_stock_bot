@@ -1,0 +1,150 @@
+"""
+collectors/market_collector.py
+미국증시 + 원자재 데이터 수집 전담
+
+[수정이력]
+- v1.0: 네이버 크롤링 (차단 문제)
+- v1.1: yfinance 교체
+- v1.2: 다우 티커 fallback 추가(^DJI→DIA), summary 길이제한 제거
+"""
+
+import yfinance as yf
+import requests
+from datetime import datetime
+import config
+from utils.logger import logger
+from utils.date_utils import get_prev_trading_day, fmt_kr, get_today
+
+
+# 다우는 ^DJI가 불안정 → DIA(ETF)로 fallback
+US_TICKERS = {
+    "nasdaq": ["^IXIC"],
+    "sp500":  ["^GSPC"],
+    "dow":    ["^DJI", "DIA"],
+}
+COMMODITY_TICKERS = {
+    "copper": "HG=F",
+    "silver": "SI=F",
+    "gas":    "NG=F",
+}
+COMMODITY_UNITS = {
+    "copper": "$/lb",
+    "silver": "$/oz",
+    "gas":    "$/MMBtu",
+}
+
+
+def collect(target_date: datetime = None) -> dict:
+    """
+    반환: dict
+    {
+        "us_market": {"nasdaq": str, "sp500": str, "dow": str,
+                      "summary": str, "신뢰도": str},
+        "commodities": {
+            "copper": {"price": str, "change": str, "unit": str, "신뢰도": str},
+            "silver": {"price": str, "change": str, "unit": str, "신뢰도": str},
+            "gas":    {"price": str, "change": str, "unit": str, "신뢰도": str},
+        }
+    }
+    """
+    if target_date is None:
+        target_date = get_prev_trading_day(get_today())
+    if target_date is None:
+        return _empty_result()
+
+    date_kr = fmt_kr(target_date)
+    logger.info(f"[market] {date_kr} 미국증시·원자재 수집 시작 (yfinance)")
+
+    us          = _collect_us_market()
+    commodities = _collect_commodities()
+    us["summary"] = _collect_summary(date_kr)
+
+    return {"us_market": us, "commodities": commodities}
+
+
+def _fetch_change(tickers: list) -> str:
+    """티커 목록 순서대로 시도, 성공 시 등락률 반환"""
+    for ticker in tickers:
+        try:
+            data = yf.Ticker(ticker).history(period="5d")
+            if len(data) < 2:
+                continue
+            prev  = data["Close"].iloc[-2]
+            last  = data["Close"].iloc[-1]
+            if prev == 0:
+                continue
+            pct  = (last - prev) / prev * 100
+            sign = "+" if pct >= 0 else ""
+            return f"{sign}{pct:.2f}%"
+        except Exception as e:
+            logger.warning(f"[market] {ticker} 실패: {e}")
+    return "N/A"
+
+
+def _collect_us_market() -> dict:
+    result = {"nasdaq": "N/A", "sp500": "N/A", "dow": "N/A", "summary": "", "신뢰도": "N/A"}
+    try:
+        for key, tickers in US_TICKERS.items():
+            result[key] = _fetch_change(tickers)
+        result["신뢰도"] = "yfinance"
+        logger.info(f"[market] 미국증시 — 나스닥:{result['nasdaq']} S&P:{result['sp500']} 다우:{result['dow']}")
+    except Exception as e:
+        logger.warning(f"[market] 미국증시 수집 실패: {e}")
+    return result
+
+
+def _collect_commodities() -> dict:
+    result = {}
+    empty  = {"price": "N/A", "change": "N/A", "unit": "", "신뢰도": "N/A"}
+
+    for key, ticker in COMMODITY_TICKERS.items():
+        try:
+            data = yf.Ticker(ticker).history(period="5d")
+            if len(data) < 2:
+                result[key] = dict(empty)
+                continue
+            prev  = data["Close"].iloc[-2]
+            last  = data["Close"].iloc[-1]
+            pct   = (last - prev) / prev * 100
+            sign  = "+" if pct >= 0 else ""
+            result[key] = {
+                "price":  f"{last:.3f}",
+                "change": f"{sign}{pct:.2f}%",
+                "unit":   COMMODITY_UNITS[key],
+                "신뢰도": "yfinance",
+            }
+            logger.info(f"[market] {key} — {result[key]['price']} {result[key]['change']}")
+        except Exception as e:
+            logger.warning(f"[market] {key} 실패: {e}")
+            result[key] = dict(empty)
+
+    return result
+
+
+def _collect_summary(date_kr: str) -> str:
+    """네이버 뉴스 API로 시황 헤드라인 (키 없으면 빈 문자열)"""
+    if not config.NAVER_CLIENT_ID or not config.NAVER_CLIENT_SECRET:
+        return ""
+    try:
+        import re
+        url  = "https://openapi.naver.com/v1/search/news.json"
+        hdrs = {
+            "X-Naver-Client-Id":     config.NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": config.NAVER_CLIENT_SECRET,
+        }
+        resp  = requests.get(url, headers=hdrs,
+                             params={"query": f"{date_kr} 미국증시 마감", "sort": "date", "display": 3},
+                             timeout=8)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if items:
+            return re.sub(r"<[^>]+>", "", items[0]["title"])  # 길이 제한 없음
+    except Exception as e:
+        logger.warning(f"[market] 시황 요약 실패: {e}")
+    return ""
+
+
+def _empty_result() -> dict:
+    ei = {"nasdaq": "N/A", "sp500": "N/A", "dow": "N/A", "summary": "", "신뢰도": "N/A"}
+    ec = {"price": "N/A", "change": "N/A", "unit": "", "신뢰도": "N/A"}
+    return {"us_market": ei, "commodities": {"copper": dict(ec), "silver": dict(ec), "gas": dict(ec)}}
