@@ -8,6 +8,11 @@ collectors/price_collector.py
   get_market_ohlcv_by_ticker(date, market=market)
   get_market_trading_value_by_date(fromdate, todate, ticker)  ← 기관/외인 (개별종목)
   get_market_short_ohlcv_by_date(fromdate, todate, ticker)   ← 공매도 (개별종목)
+
+[수정이력]
+- v2.2: _fetch_index 단일날짜 조회 버그 수정
+        fromdate==todate 로 조회 시 pykrx가 이전 거래일 비교 없이
+        등락률 0.00% 반환하는 문제 → 7일 범위 조회 후 마지막 행 사용
 """
 
 from datetime import datetime, timedelta
@@ -56,8 +61,8 @@ def collect_daily(target_date: datetime = None) -> dict:
     }
 
     # ── 1. 지수 수집 ──────────────────────────────────────────
-    result["kospi"]  = _fetch_index(date_str, "1001", "KOSPI")
-    result["kosdaq"] = _fetch_index(date_str, "2001", "KOSDAQ")
+    result["kospi"]  = _fetch_index(target_date, "1001", "KOSPI")
+    result["kosdaq"] = _fetch_index(target_date, "2001", "KOSDAQ")
 
     # ── 2. 전종목 등락률 수집 ─────────────────────────────────
     all_stocks = _fetch_all_stocks(date_str)
@@ -157,13 +162,29 @@ def collect_supply(ticker: str, target_date: datetime = None) -> dict:
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────
 
-def _fetch_index(date_str: str, index_code: str, name: str) -> dict:
-    """지수 OHLCV 수집"""
+def _fetch_index(target_date: datetime, index_code: str, name: str) -> dict:
+    """
+    지수 OHLCV + 등락률 수집
+
+    [v2.2 버그 수정]
+    기존: get_index_ohlcv_by_date(date_str, date_str, code)
+         → fromdate==todate 단일 날짜 조회 시 pykrx가 이전 거래일을
+           참조하지 못해 등락률 0.00% 반환하는 문제 발생
+    수정: target_date 기준 10 캘린더일 전부터 조회 → 마지막 행 사용
+         (이전 거래일 데이터가 포함되므로 등락률 정상 계산됨)
+    """
     try:
-        df = pykrx_stock.get_index_ohlcv_by_date(date_str, date_str, index_code)
+        date_str  = fmt_ymd(target_date)
+        # 10 캘린더일 전 ~ target_date 범위로 조회 (주말·공휴일 고려)
+        from_date = target_date - timedelta(days=10)
+        from_str  = fmt_ymd(from_date)
+
+        df = pykrx_stock.get_index_ohlcv_by_date(from_str, date_str, index_code)
         if df.empty:
             logger.warning(f"[price] {name} 지수 없음 (휴장 또는 데이터 없음)")
             return {}
+
+        # 마지막 행 = target_date (범위 내 마지막 거래일)
         row         = df.iloc[-1]
         close       = float(row.get("종가", 0))
         change_rate = float(row.get("등락률", 0))
