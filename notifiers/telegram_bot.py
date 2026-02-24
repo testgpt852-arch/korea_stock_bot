@@ -11,6 +11,8 @@ notifiers/telegram_bot.py
         - 전날 코스피/코스닥 지수 섹션 추가 (prev_kospi/prev_kosdaq)
         - 미국 섹터 연동 신호 표시 (market_summary.sectors)
         - 순환매 지도: 마감봇 의존 메시지 제거 (이제 아침봇 자체 생성)
+- v2.2: 아침봇 — 전날 기관/외인 순매수 섹션 추가 (prev_institutional)
+        섹터 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
 """
 
 import asyncio
@@ -47,17 +49,18 @@ async def send_async(text: str) -> None:
 # ══════════════════════════════════════════════════════════════
 
 def format_morning_report(report: dict) -> str:
-    today_str    = report.get("today_str", "")
-    prev_str     = report.get("prev_str", "")
-    signals      = report.get("signals", [])
-    us           = report.get("market_summary", {})
-    commodities  = report.get("commodities", {})
-    theme_map    = report.get("theme_map", [])
-    volatility   = report.get("volatility", "판단불가")
-    reports      = report.get("report_picks", [])
-    ai_dart      = report.get("ai_dart_results", [])
-    prev_kospi   = report.get("prev_kospi", {})    # v2.1
-    prev_kosdaq  = report.get("prev_kosdaq", {})   # v2.1
+    today_str        = report.get("today_str", "")
+    prev_str         = report.get("prev_str", "")
+    signals          = report.get("signals", [])
+    us               = report.get("market_summary", {})
+    commodities      = report.get("commodities", {})
+    theme_map        = report.get("theme_map", [])
+    volatility       = report.get("volatility", "판단불가")
+    reports          = report.get("report_picks", [])
+    ai_dart          = report.get("ai_dart_results", [])
+    prev_kospi       = report.get("prev_kospi", {})         # v2.1
+    prev_kosdaq      = report.get("prev_kosdaq", {})        # v2.1
+    prev_institutional = report.get("prev_institutional", [])  # v2.2
 
     lines = []
 
@@ -120,7 +123,8 @@ def format_morning_report(report: dict) -> str:
     if summary:
         lines.append(f"  📌 {summary}")
 
-    # ── 미국 섹터 연동 (v2.1 추가) ───────────────────────────
+    # ── 미국 섹터 연동 (v2.1 추가)
+    # v2.2: 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
     sectors = us.get("sectors", {})
     sector_lines = []
     for sector_name, sdata in sectors.items():
@@ -131,7 +135,7 @@ def format_morning_report(report: dict) -> str:
             pct = float(change.replace("%", "").replace("+", ""))
         except ValueError:
             continue
-        if abs(pct) < 1.5:  # 1.5% 미만은 표시 생략
+        if abs(pct) < config.US_SECTOR_SIGNAL_MIN:   # config 상수 사용
             continue
         arrow = "↑" if pct > 0 else "↓"
         sector_lines.append(f"  {arrow} {sector_name}: {change}")
@@ -156,6 +160,34 @@ def format_morning_report(report: dict) -> str:
             lines.append(f"  {name}: {price} {unit}  {change}  [{신뢰도}]")
         else:
             lines.append(f"  {name}: N/A")
+
+    # ── 전날 기관/외인 순매수 (v2.2 신규) ──────────────────────
+    # 전날 기관·외인이 집중 매수한 종목 = 오늘 장에서 추가 매수 가능성 있음
+    # 상한가·급등 종목 대상으로만 조회하므로 모멘텀+수급 교차 확인에 유용
+    if prev_institutional:
+        inst_top = sorted(
+            prev_institutional,
+            key=lambda x: x.get("기관순매수", 0), reverse=True
+        )[:5]
+        frgn_top = sorted(
+            prev_institutional,
+            key=lambda x: x.get("외국인순매수", 0), reverse=True
+        )[:5]
+
+        lines.append(f"\n🏦 <b>전날 기관/외인 순매수 ({prev_str})</b>")
+        lines.append("  ※ 상한가·급등 종목 대상 집계")
+
+        inst_items = [
+            f"{s['종목명']}({s['기관순매수'] // 100_000_000:+,}억)"
+            for s in inst_top if s.get("기관순매수", 0) > 0
+        ]
+        frgn_items = [
+            f"{s['종목명']}({s['외국인순매수'] // 100_000_000:+,}억)"
+            for s in frgn_top if s.get("외국인순매수", 0) > 0
+        ]
+
+        lines.append(f"  기관: {',  '.join(inst_items) if inst_items else 'N/A'}")
+        lines.append(f"  외인: {',  '.join(frgn_items) if frgn_items else 'N/A'}")
 
     # ── 순환매 지도 (v2.1: 마감봇 의존 메시지 제거)
     lines.append("\n🗺️ <b>순환매 지도</b>")
