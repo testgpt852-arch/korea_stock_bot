@@ -10,6 +10,11 @@ v6.0 프롬프트 신호 1~5 통합 판단 전담
 - v2.1: 신호 4 추가 (전날 급등/상한가 → 순환매 신호)
         미국증시 섹터 연동 신호 추가 (sectors 데이터 활용)
         price_data 파라미터 추가
+- v2.2: 전선/구리 하드코딩 종목 → config.COPPER_KR_STOCKS 참조로 변경
+        신호4 저변동 스킵 조건 개선:
+          기존: 지수 ±1% 미만이면 무조건 스킵
+          수정: 실제 상한가·급등 종목이 있으면 지수가 낮아도 계속 진행
+               (지수 0% = pykrx 데이터 이슈일 가능성 있으므로)
 """
 
 import config
@@ -121,7 +126,13 @@ def _analyze_prev_price(price_data: dict) -> list[dict]:
     전날 상한가·급등 종목 → 순환매 신호 생성
     - 상한가 종목: 강도 5, 대장주 + 소외주 묶음
     - 급등(7%↑) 종목: 강도 3~4 (등락률 기준)
-    - 저변동 장세(코스피·코스닥 모두 ±1% 미만): 빈 리스트 반환 (RULE 4)
+
+    [v2.2 저변동 스킵 조건 개선]
+    기존: 코스피·코스닥 모두 ±1% 미만이면 무조건 스킵 (RULE 4)
+    문제: pykrx 단일날짜 조회 버그로 지수 등락률이 0.00% 반환될 때
+          상한가 16개·급등 20개 있어도 신호4 전체가 스킵됨
+    수정: 상한가·급등 종목이 실제 존재하면 지수 등락률과 무관하게 진행
+          → 진짜 저변동(종목도 없는 경우)만 스킵
     """
     signals = []
 
@@ -130,14 +141,27 @@ def _analyze_prev_price(price_data: dict) -> list[dict]:
     upper_limit = price_data.get("upper_limit", [])
     top_gainers = price_data.get("top_gainers", [])
 
+    # 실제 급등·상한가 종목 존재 여부
+    has_movers = bool(upper_limit) or bool(top_gainers)
+
     # RULE 4: 저변동 장세 판단
+    # ─ 지수도 낮고 개별종목도 없으면 → 진짜 저변동, 스킵
+    # ─ 지수는 낮지만 개별종목 있으면 → 지수 데이터 이슈 가능성, 계속 진행
     is_low_vol = (abs(kospi_rate) < 1.0) and (abs(kosdaq_rate) < 1.0)
-    if is_low_vol:
+
+    if is_low_vol and not has_movers:
         logger.info(
             f"[signal] 저변동 장세 감지 — 코스피:{kospi_rate:+.2f}% "
-            f"코스닥:{kosdaq_rate:+.2f}% → 신호4 스킵"
+            f"코스닥:{kosdaq_rate:+.2f}% 급등종목 없음 → 신호4 스킵"
         )
         return []
+
+    if is_low_vol and has_movers:
+        logger.info(
+            f"[signal] 지수 저변동 감지 — 코스피:{kospi_rate:+.2f}% "
+            f"코스닥:{kosdaq_rate:+.2f}% — 그러나 상한가:{len(upper_limit)}개 "
+            f"급등:{len(top_gainers)}개 존재 → 신호4 진행 (지수 데이터 재확인 권장)"
+        )
 
     # 상한가 그룹: 강도 5
     if upper_limit:
@@ -213,7 +237,7 @@ def _analyze_us_market(us: dict, commodities: dict) -> list[dict]:
         except ValueError:
             continue
 
-        # 임계값 이상 변동 시만 신호 발생
+        # 임계값 이상 변동 시만 신호 발생 (config.US_SECTOR_SIGNAL_MIN)
         if abs(pct) < config.US_SECTOR_SIGNAL_MIN:
             continue
 
@@ -232,6 +256,7 @@ def _analyze_us_market(us: dict, commodities: dict) -> list[dict]:
         })
 
     # 구리 강세 → 전선주
+    # v2.2: 하드코딩 제거 → config.COPPER_KR_STOCKS 참조 (상장사만)
     copper = commodities.get("copper", {})
     if _is_positive(copper.get("change", "N/A")):
         signals.append({
@@ -241,7 +266,7 @@ def _analyze_us_market(us: dict, commodities: dict) -> list[dict]:
             "신뢰도":   copper.get("신뢰도", "N/A"),
             "발화단계": "불명",
             "상태":     "모니터",
-            "관련종목": ["LS전선", "대원전선", "가온전선"],
+            "관련종목": list(config.COPPER_KR_STOCKS),  # 상장사만, config에서 관리
         })
 
     # 은 강세 → 귀금속/태양광
