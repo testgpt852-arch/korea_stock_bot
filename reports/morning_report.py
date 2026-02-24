@@ -6,7 +6,7 @@ reports/morning_report.py
 ① dart_collector    → 전날 공시 수집
 ② market_collector  → 미국증시·원자재·섹터 ETF
 ③ news_collector    → 리포트·정책뉴스
-④ price_collector   → 전날 가격 데이터 (상한가·급등 — 순환매 지도용) ← v2.1 추가
+④ price_collector   → 전날 가격 데이터 (상한가·급등·기관/외인) ← v2.1 추가
 ⑤ signal_analyzer   → 신호 1~5 통합 판단 (신호4 price_data 활용)    ← v2.1 변경
 ⑥ ai_analyzer       → 주요 공시 호재/악재 점수화 (GOOGLE_AI_API_KEY 있을 때만)
 ⑦ theme_analyzer    → 순환매 지도 (price_data로 소외도 계산)          ← v2.1 변경
@@ -20,6 +20,8 @@ reports/morning_report.py
         → 순환매 지도가 아침봇 단독으로 작동
         signal_analyzer에 price_data 전달
         theme_analyzer에 price_data["by_name"] 전달
+- v2.2: 전날 기관/외인 순매수 데이터 보고서에 추가
+        (price_data["institutional"] → report["prev_institutional"])
 """
 
 from utils.logger import logger
@@ -52,17 +54,19 @@ async def run() -> None:
         news_data   = news_collector.collect(today)
 
         # ── ② 전날 가격 데이터 수집 (v2.1 추가) ───────────────
-        # 마감봇 의존 없이 직접 pykrx로 전날 상한가·급등 수집
+        # 마감봇 의존 없이 직접 pykrx로 전날 상한가·급등·기관/외인 수집
         # → signal_analyzer 신호4(순환매) + theme_analyzer 소외도 계산에 사용
+        # → 아침봇 기관/외인 섹션에도 활용 (v2.2 추가)
         price_data = None
         if prev:
-            logger.info("[morning] 전날 가격 데이터 수집 중 (순환매 지도용)...")
+            logger.info("[morning] 전날 가격 데이터 수집 중 (순환매 지도 + 기관/외인용)...")
             try:
                 price_data = price_collector.collect_daily(prev)
                 logger.info(
                     f"[morning] 가격 수집 완료 — "
                     f"상한가:{len(price_data.get('upper_limit', []))}개 "
-                    f"급등:{len(price_data.get('top_gainers', []))}개"
+                    f"급등:{len(price_data.get('top_gainers', []))}개 "
+                    f"기관/외인:{len(price_data.get('institutional', []))}종목"
                 )
             except Exception as e:
                 logger.warning(f"[morning] 가격 수집 실패 ({e}) — 순환매 지도 생략")
@@ -91,19 +95,21 @@ async def run() -> None:
 
         # ── ⑥ 보고서 조립 ─────────────────────────────────────
         report = {
-            "today_str":       today_str,
-            "prev_str":        prev_str,
-            "signals":         signal_result["signals"],
-            "market_summary":  signal_result["market_summary"],
-            "commodities":     signal_result["commodities"],
-            "volatility":      signal_result["volatility"],
-            "report_picks":    signal_result["report_picks"],
-            "policy_summary":  signal_result["policy_summary"],
-            "theme_map":       theme_result["theme_map"],
-            "ai_dart_results": ai_dart_results,
+            "today_str":          today_str,
+            "prev_str":           prev_str,
+            "signals":            signal_result["signals"],
+            "market_summary":     signal_result["market_summary"],
+            "commodities":        signal_result["commodities"],
+            "volatility":         signal_result["volatility"],
+            "report_picks":       signal_result["report_picks"],
+            "policy_summary":     signal_result["policy_summary"],
+            "theme_map":          theme_result["theme_map"],
+            "ai_dart_results":    ai_dart_results,
             # v2.1: 전날 지수 정보 추가 (telegram_bot 포맷용)
-            "prev_kospi":      price_data.get("kospi",  {}) if price_data else {},
-            "prev_kosdaq":     price_data.get("kosdaq", {}) if price_data else {},
+            "prev_kospi":         price_data.get("kospi",  {}) if price_data else {},
+            "prev_kosdaq":        price_data.get("kosdaq", {}) if price_data else {},
+            # v2.2: 전날 기관/외인 순매수 추가
+            "prev_institutional": price_data.get("institutional", []) if price_data else [],
         }
 
         # ── ⑦ 텔레그램 발송 ──────────────────────────────────
