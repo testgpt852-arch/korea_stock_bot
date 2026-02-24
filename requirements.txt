@@ -1,6 +1,6 @@
 pykrx
 pandas
-pandas-ta @ git+https://github.com/twopirllc/pandas-ta.git@development
+pandas-ta==0.3.14b
 feedparser
 requests
 beautifulsoup4
