@@ -68,7 +68,7 @@ async def main():
     )
     scheduler.add_job(
         run_morning_bot, "cron",
-        hour=8, minute=40,
+        hour=8, minute=48,
         id="morning_bot_2"
     )
 
