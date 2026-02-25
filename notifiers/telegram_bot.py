@@ -13,6 +13,7 @@ notifiers/telegram_bot.py
         - 순환매 지도: 마감봇 의존 메시지 제거 (이제 아침봇 자체 생성)
 - v2.2: 아침봇 — 전날 기관/외인 순매수 섹션 추가 (prev_institutional)
 - v2.8: format_realtime_alert/ai — 직전대비(1분 추가 상승률) 표시 추가
+- v2.9: format_realtime_alert/ai — 감지소스 배지 추가 (거래량포착/등락률포착)
         섹터 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
 """
 
@@ -359,8 +360,9 @@ def format_closing_report(report: dict) -> str:
 
 def format_realtime_alert(analysis: dict) -> str:
     직전대비 = analysis.get("직전대비", 0.0)
+    소스배지  = "📊 거래량포착" if analysis.get("감지소스") == "volume" else "📈 등락률포착"
     return (
-        f"🚨 <b>급등 감지</b>\n"
+        f"🚨 <b>급등 감지</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
         f"등락률: +{analysis['등락률']:.1f}%  <b>(1분 +{직전대비:.1f}%)</b>\n"
         f"거래량(1분): 전일 대비 {analysis['거래량배율']:.1f}배\n"
@@ -372,8 +374,9 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
     판단  = ai_result.get("판단", "판단불가")
     이모지 = {"진짜급등": "✅", "작전주의심": "⚠️", "판단불가": "❓"}.get(판단, "❓")
     직전대비 = analysis.get("직전대비", 0.0)
+    소스배지  = "📊 거래량포착" if analysis.get("감지소스") == "volume" else "📈 등락률포착"
     return (
-        f"🚨 <b>급등 감지 + AI 분석</b>\n"
+        f"🚨 <b>급등 감지 + AI 분석</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
         f"등락률: +{analysis['등락률']:.1f}%  <b>(1분 +{직전대비:.1f}%)</b>\n"
         f"거래량(1분): 전일 대비 {analysis['거래량배율']:.1f}배\n\n"
