@@ -222,8 +222,7 @@ async def main():
             f"  강제청산: 매일 14:50 (Phase 4, 모드: {config.TRADING_MODE}) ✅ 활성"
         )
     else:
-        logger.info("  강제청산: 매일 14:50 (Phase 4)
-  원칙추출: 매주 일요일 03:00 (Phase 5) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
+        logger.info("  강제청산: 매일 14:50 (Phase 4)\n  원칙추출: 매주 일요일 03:00 (Phase 5) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
 
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()
