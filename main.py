@@ -11,6 +11,9 @@ main.py
 - v2.6.1: _maybe_start_now() 시간 비교를 KST 기준으로 수정
           기존: datetime.now() → Railway 서버 UTC 반환 → 장중 판단 오류
           수정: datetime.now(ZoneInfo("Asia/Seoul")) → KST 기준 정확한 판단
+- v3.3:  Phase 3 — DB init_db() 기동 시 1회 호출
+         18:45 수익률 추적 배치(performance_tracker.run_batch) 스케줄 추가
+         매주 월요일 아침봇 직후 주간 성과 리포트(weekly_report) 발송 스케줄 추가
 """
 
 import asyncio
@@ -43,6 +46,28 @@ async def run_closing_bot():
     from reports.closing_report import run
     await run()
 
+
+
+async def run_performance_batch():
+    """18:45 수익률 추적 배치 (Phase 3, v3.3)"""
+    if not is_market_open(get_today()):
+        logger.info("[main] 휴장일 — 수익률 배치 건너뜀")
+        return
+    loop = asyncio.get_event_loop()
+    from tracking.performance_tracker import run_batch
+    await loop.run_in_executor(None, run_batch)
+
+
+async def run_weekly_report():
+    """매주 월요일 아침봇 직후 주간 성과 리포트 (Phase 3, v3.3)"""
+    now = datetime.now(KST)
+    if now.weekday() != 0:   # 0 = 월요일
+        return               # 월요일 아니면 조용히 패스
+    if not is_market_open(get_today()):
+        logger.info("[main] 휴장일 — 주간 리포트 건너뜀")
+        return
+    from reports.weekly_report import run
+    await run()
 
 async def start_realtime_bot():
     """09:00 장중봇 시작 — KIS REST 폴링"""
@@ -89,6 +114,10 @@ async def _maybe_start_now():
 
 async def main():
     config.validate_env()
+
+    # Phase 3: DB 초기화 (테이블 없으면 생성)
+    from tracking.db_schema import init_db
+    init_db()
     logger.info("=" * 40)
     logger.info("한국주식 봇 시작")
     logger.info("=" * 40)
@@ -106,11 +135,19 @@ async def main():
     # 마감봇
     scheduler.add_job(run_closing_bot, "cron", hour=18, minute=30, id="closing_bot")
 
+    # Phase 3: 수익률 추적 배치 (v3.3)
+    scheduler.add_job(run_performance_batch, "cron", hour=18, minute=45, id="perf_batch")
+
+    # Phase 3: 주간 성과 리포트 — 매주 월요일 08:45 (아침봇 완료 후) (v3.3)
+    scheduler.add_job(run_weekly_report, "cron", hour=8, minute=45, id="weekly_report")
+
     scheduler.start()
     logger.info("스케줄 등록 완료")
     logger.info("  아침봇: 매일 08:30 / 07:59")
     logger.info("  장중봇: 매일 09:00~15:30 (KIS REST 폴링)")
     logger.info("  마감봇: 매일 18:30")
+    logger.info("  수익률배치: 매일 18:45 (Phase 3)")
+    logger.info("  주간리포트: 매주 월요일 08:45 (Phase 3)")
 
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()

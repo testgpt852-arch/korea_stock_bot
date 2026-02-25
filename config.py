@@ -111,6 +111,11 @@ VOLUME_FLAT_TOP_N      = 7     # 횡보 거래량 상위 N 종목
 FUND_INFLOW_CAP_MIN    = 100_000_000_000  # 최소 시가총액 (1000억원, 극소형주 제외)
 FUND_INFLOW_TOP_N      = 7     # 시총 대비 자금유입 상위 N 종목
 
+# ── Phase 3: SQLite DB 경로 (v3.3 신규) ─────────────────────
+# Railway 배포 환경에서 재시작 시에도 유지되려면 /data 마운트 권장.
+# Railway Volume 미사용 시 /tmp/bot_data (재시작 시 초기화 주의).
+DB_PATH = os.environ.get("DB_PATH", "/data/bot_db.sqlite")
+
 # ── 스케줄 시간 ──────────────────────────────────────────────
 TOKEN_REFRESH_TIME = "07:00"
 MORNING_TIME       = "08:30"

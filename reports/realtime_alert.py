@@ -31,6 +31,7 @@ import analyzers.volume_analyzer as volume_analyzer
 import analyzers.ai_analyzer     as ai_analyzer
 import notifiers.telegram_bot    as telegram_bot
 from kis.websocket_client import ws_client
+import tracking.alert_recorder   as alert_recorder   # v3.3: Phase 3 DB 기록
 import config
 
 _poll_task: asyncio.Task | None = None
@@ -190,6 +191,8 @@ async def _dispatch_alerts(analysis: dict) -> None:
         f"[realtime] 1차 알림: {analysis['종목명']}  "
         f"+{analysis['등락률']:.1f}%  소스:{analysis.get('감지소스','?')}"
     )
+    # Phase 3: DB 기록 (v3.3) — 실패해도 알림 흐름 중단 없음
+    alert_recorder.record_alert(analysis)
     asyncio.create_task(_send_ai_followup(analysis))
 
 

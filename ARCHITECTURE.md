@@ -72,10 +72,13 @@ korea_stock_bot/
 │   └── news_collector.py    ← 리포트·뉴스 (네이버 검색 API)
 │
 ├── analyzers/
-│   ├── volume_analyzer.py   ← 장중 급등 감지 (KIS REST 실시간)
-│   ├── theme_analyzer.py    ← 테마 그룹핑, 순환매 소외도
-│   ├── signal_analyzer.py   ← 신호 1~5
-│   └── ai_analyzer.py       ← Gemma-3-27b-it 2차 분석
+│   ├── volume_analyzer.py        ← 장중 급등 감지 (KIS REST 실시간) + T2 갭상승
+│   ├── theme_analyzer.py         ← 테마 그룹핑, 순환매 소외도
+│   ├── signal_analyzer.py        ← 신호 1~5
+│   ├── ai_analyzer.py            ← Gemma-3-27b-it 2차 분석
+│   ├── closing_strength.py       ← [v3.2] T5 마감 강도 트리거 (마감봇용, pykrx)
+│   ├── volume_flat.py            ← [v3.2] T6 횡보 거래량 급증 (마감봇용, pykrx)
+│   └── fund_inflow_analyzer.py   ← [v3.2] T3 시총 대비 자금유입 (마감봇용, pykrx)
 │
 ├── notifiers/
 │   └── telegram_bot.py      ← 텔레그램 포맷 + 발송
@@ -83,7 +86,8 @@ korea_stock_bot/
 ├── reports/
 │   ├── morning_report.py    ← 아침봇 08:30
 │   ├── closing_report.py    ← 마감봇 18:30
-│   └── realtime_alert.py    ← 장중봇 (KIS REST 폴링 60초)
+│   ├── realtime_alert.py    ← 장중봇 (KIS REST 폴링 60초)
+│   └── weekly_report.py     ← [v3.3] 주간 성과 리포트 (월요일 08:45)
 │
 ├── kis/
 │   ├── auth.py              ← 토큰 발급·갱신
@@ -94,7 +98,13 @@ korea_stock_bot/
     ├── logger.py
     ├── date_utils.py        ← is_market_open() 포함
     ├── state_manager.py     ← 쿨타임·중복 알림 방지
-    └── watchlist_state.py   ← 아침봇→장중봇 WebSocket 워치리스트 공유 (v3.1)
+    ├── watchlist_state.py   ← 아침봇↔장중봇↔마감봇 WebSocket 워치리스트 공유 (v3.1/v3.2)
+    └── rate_limiter.py      ← [v3.2] KIS API Rate Limiter (초당 19회 제한)
+│
+└── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
+    ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
+    ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
+    └── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
 ```
 
 ---
@@ -118,8 +128,17 @@ signal_analyzer.py        → morning_report
 ai_analyzer.py            → morning_report, closing_report, realtime_alert
 telegram_bot.py           → morning_report, closing_report, realtime_alert
 kis/auth.py               → kis/rest_client, kis/websocket_client
-kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 제공)
+kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 + 시가 제공)
 kis/websocket_client.py   → (향후 확장용 보존)
+utils/rate_limiter.py     → kis/rest_client (API 호출 보호)
+analyzers/closing_strength.py → reports/closing_report (T5 마감 강도)
+analyzers/volume_flat.py  → reports/closing_report (T6 횡보 거래량)
+analyzers/fund_inflow_analyzer.py → reports/closing_report (T3 시총 자금유입)
+tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
+tracking/alert_recorder.py        ← reports/realtime_alert (유일 호출처)
+tracking/performance_tracker.py   ← main.py (18:45 cron), reports/weekly_report
+reports/weekly_report.py          ← main.py (월요일 08:45 cron)
+reports/weekly_report.py          → tracking/performance_tracker, notifiers/telegram_bot
 ```
 
 ---
@@ -236,7 +255,23 @@ graph TD
        price_collector → 마감 확정치
        ai_analyzer.analyze_closing()
        theme_analyzer → 순환매 지도
-       telegram_bot 발송
+       [v3.2 추가] closing_strength → T5 마감 강도 상위 종목
+       [v3.2 추가] volume_flat     → T6 횡보 거래량 급증 종목
+       [v3.2 추가] fund_inflow_analyzer → T3 시총 대비 자금유입 종목
+       [v3.2 추가] watchlist_state 보강: T5+T6 종목 → 내일 WebSocket 워치리스트 추가
+       telegram_bot 발송 (T3/T5/T6 섹션 포함)
+
+18:45  ─── 수익률 추적 배치 (Phase 3, v3.3) ────────────────────
+       performance_tracker.run_batch()
+       → done_Xd=0 미추적 행 조회 (1/3/7일 전 발송 알림)
+       → pykrx 마감 확정치 전종목 종가 일괄 조회
+       → 수익률 계산 → performance_tracker UPDATE
+       → 트리거별 승률 로그 출력
+
+매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3) ────────
+       performance_tracker.get_weekly_stats() → 지난 7일 DB 조회
+       telegram_bot.format_weekly_report() → 메시지 포맷
+       → 텔레그램 발송 (트리거별 승률 + 상위/하위 종목)
 
 ───────────────────── v3.1 방법B+A 하이브리드 ──────────────────────
 08:30  아침봇 완료 후 ⑧ 추가:
@@ -284,6 +319,24 @@ WS_RECONNECT_DELAY   = 30
 # deprecated v2.8 (하위 호환 보존만)
 VOLUME_SPIKE_RATIO   = 10       # deprecated: 누적 거래량 배율
 PRICE_CHANGE_MIN     = 3.0      # deprecated: 누적 등락률
+
+# v3.2: KIS API Rate Limit (python-kis 스펙 참조)
+KIS_RATE_LIMIT_REAL    = 19     # 초당 최대 호출 횟수 (실전)
+KIS_RATE_LIMIT_VIRTUAL = 2      # 초당 최대 호출 횟수 (모의)
+WS_RECONNECT_DELAY     = 5      # v3.2: 30초 → 5초 (무한 재연결 간격)
+
+# v3.3: Phase 3 DB
+DB_PATH = "/data/bot_db.sqlite"  # 환경변수 DB_PATH 로 오버라이드 가능
+
+# v3.2: Phase 2 트리거 임계값
+GAP_UP_MIN             = 1.0    # T2 갭업 최소 비율 (%)
+CLOSING_STRENGTH_MIN   = 0.75   # T5 마감 강도 최소값 (0~1)
+CLOSING_STRENGTH_TOP_N = 7
+VOLUME_FLAT_CHANGE_MAX = 5.0    # T6 횡보 인정 등락률 절대값 상한 (%)
+VOLUME_FLAT_SURGE_MIN  = 50.0   # T6 거래량 급증 최소 비율 (%)
+VOLUME_FLAT_TOP_N      = 7
+FUND_INFLOW_CAP_MIN    = 100_000_000_000  # T3 최소 시가총액 (1000억)
+FUND_INFLOW_TOP_N      = 7
 ```
 
 ### 반환값 규격 (인터페이스 계약)
@@ -298,7 +351,7 @@ PRICE_CHANGE_MIN     = 3.0      # deprecated: 누적 등락률
  "직전대비": float,               # v2.8 신규: 1분간 추가 상승률 (핵심)
  "거래량배율": float,             # v2.8 변경: 1분간 Δvol / 전일거래량
  "조건충족": bool, "감지시각": str,
- "감지소스": str}                 # v2.9 신규: "volume"(거래량) | "rate"(등락률)
+ "감지소스": str}                 # v2.9: "volume"(거래량)|"rate"(등락률) / v3.2: "gap_up"(T2 갭상승)
 
 # dart_collector.collect() → list[dict]
 {"종목명": str, "종목코드": str, "공시종류": str,
@@ -370,6 +423,20 @@ gemini-2.5-flash   20회/일   ❌ 부족
 [종목명 하드코딩 금지]
 12. config.py 에 종목명 직접 쓰지 않음 (업종명 키워드만)
 13. 대장주는 signal_analyzer가 by_sector에서 동적 결정
+
+[Phase 2 트리거 규칙 — v3.2 추가]
+14. T5(마감강도)/T6(횡보거래량)/T3(시총자금유입): 마감봇 전용 — pykrx 허용 (확정치)
+15. T2(갭상승모멘텀): 장중봇 전용 — KIS REST 실시간만 (pykrx 장중 사용 금지)
+16. T5/T6/T3 분석기는 closing_report.py 에서만 호출 (morning_report에서 호출 금지)
+17. rate_limiter.acquire()는 kis/rest_client.py 내부에서만 호출 (외부에서 중복 호출 금지)
+
+[Phase 3 DB 규칙 — v3.3 추가]
+18. tracking/ 모듈은 DB 기록·조회만 담당 — 분석·발송·수집 로직 절대 금지
+19. alert_recorder.record_alert()는 realtime_alert._dispatch_alerts()에서만 호출
+    (morning_report, closing_report 등 다른 모듈 호출 금지)
+20. performance_tracker.run_batch()는 main.py 18:45 cron에서만 호출
+    (장중 직접 호출 금지 — pykrx 당일 미확정 데이터 방지)
+21. DB 파일 경로는 config.DB_PATH 단일 상수로 관리 (경로 하드코딩 금지)
 ```
 
 ---
@@ -412,6 +479,29 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | API 호출: 사이클당 2회 → 4회 (분당 8회, KIS 제한 여유 있음) |
 | v3.0 | 2026-02-25 | **등락률 순위 필터 전면 개편 — 초기 급등 조기 포착** |
 | v3.1 | 2026-02-25 | **방법B+A 하이브리드 — WebSocket 고정구독 + REST 폴링 단축** |
+| v3.2 | 2026-02-26 | **Phase 1+2 병렬 업그레이드 (python-kis + prism-insight 흡수)** |
+| v3.3 | 2026-02-26 | **Phase 3 — DB + 성과 추적 시스템 (prism-insight analysis_performance_tracker 흡수)** |
+|      |            | tracking/db_schema.py 신규: SQLite DDL (alert_history, performance_tracker, trading_history, trigger_stats 뷰) |
+|      |            | tracking/alert_recorder.py 신규: 장중봇 알림 발송 시 DB 기록 (동기 함수) |
+|      |            | tracking/performance_tracker.py 신규: 1/3/7일 수익률 배치 + 주간 통계 조회 |
+|      |            | reports/weekly_report.py 신규: 주간 성과 리포트 (월요일 08:45, 트리거별 승률+상위/하위 종목) |
+|      |            | config.py: DB_PATH 상수 추가 (환경변수 DB_PATH 오버라이드 가능) |
+|      |            | main.py: init_db() 기동 시 1회 호출, 18:45 perf_batch, 월요일 08:45 weekly_report 스케줄 추가 |
+|      |            | reports/realtime_alert.py: _dispatch_alerts()에 alert_recorder.record_alert() 추가 |
+|      |            | notifiers/telegram_bot.py: format_weekly_report() 추가 |
+|      |            | 절대 금지 규칙 18~21 추가 (tracking 모듈 규칙) |
+|      |            | config: WS_WATCHLIST_MAX 50→40 (KIS 실제 한도, python-kis 확인) |
+|      |            | utils/rate_limiter.py 신규: KIS API 초당 19회 제한 (python-kis 구조 이식) |
+|      |            | kis/rest_client.py: rate_limiter.acquire() 전 API 호출 전 삽입 |
+|      |            | kis/rest_client.py: get_stock_price()에 시가(stck_oprc) 필드 추가 (T2용) |
+|      |            | kis/websocket_client.py: 무한 재연결 (MAX 3회 제한 제거, 5초 간격) |
+|      |            | analyzers/closing_strength.py 신규: T5 마감 강도 (pykrx, 마감봇용) |
+|      |            | analyzers/volume_flat.py 신규: T6 횡보 거래량 급증 (pykrx, 마감봇용) |
+|      |            | analyzers/fund_inflow_analyzer.py 신규: T3 시총 대비 자금유입 (pykrx, 마감봇용) |
+|      |            | analyzers/volume_analyzer.py: T2 갭 상승 모멘텀 감지 추가 (장중봇, KIS REST) |
+|      |            | reports/closing_report.py: T3/T5/T6 분석 통합 + watchlist 마감봇 보강 |
+|      |            | notifiers/telegram_bot.py: gap_up 배지 + T5/T6/T3 마감 리포트 섹션 추가 |
+|      |            | 감지소스 확장: volume/rate/websocket/gap_up 4종 체계 완성 |
 |      |            | utils/watchlist_state.py 신규 — 아침봇→장중봇 공유 상태 |
 |      |            | morning_report: _build_ws_watchlist() 추가 (상한가+급등+기관+신호) |
 |      |            | realtime_alert: _ws_loop() 추가 (방법B), POLL_INTERVAL_SEC 10s |
@@ -448,6 +538,10 @@ KIS_APP_KEY=
 KIS_APP_SECRET=
 KIS_ACCOUNT_NO=
 KIS_ACCOUNT_CODE=01
+
+# Phase 3: DB 경로 (선택 — 미설정 시 /data/bot_db.sqlite)
+# Railway Volume 마운트 시 /data 경로 권장 (재시작 후에도 데이터 유지)
+DB_PATH=/data/bot_db.sqlite
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*

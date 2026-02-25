@@ -438,3 +438,78 @@ def _split_message(text: str, limit: int = 4096) -> list[str]:
         chunks.append(text[:limit])
         text = text[limit:]
     return chunks
+
+def format_weekly_report(stats: dict) -> str:
+    """
+    주간 성과 리포트 텔레그램 메시지 포맷 (Phase 3, v3.3)
+
+    Args:
+        stats: performance_tracker.get_weekly_stats() 반환값
+
+    Returns:
+        HTML 포맷 텔레그램 메시지
+    """
+    period        = stats.get("period", "N/A")
+    total_alerts  = stats.get("total_alerts", 0)
+    trigger_stats = stats.get("trigger_stats", [])
+    top_picks     = stats.get("top_picks", [])
+    miss_picks    = stats.get("miss_picks", [])
+
+    lines = [
+        f"📊 <b>주간 알림 성과 리포트</b>",
+        f"📅 기간: {period}",
+        f"📬 총 알림: {total_alerts}건",
+        "",
+    ]
+
+    # ── 트리거별 승률 ─────────────────────────────────────────
+    if trigger_stats:
+        lines.append("🏆 <b>트리거별 7일 승률</b>")
+        source_emoji = {
+            "volume":    "📊 거래량급증",
+            "rate":      "📈 등락률포착",
+            "websocket": "🎯 워치리스트",
+            "gap_up":    "⚡ 갭상승",
+        }
+        for t in trigger_stats:
+            ttype    = t.get("trigger_type", "?")
+            label    = source_emoji.get(ttype, ttype)
+            n        = t.get("tracked_7d", 0)
+            win_rate = t.get("win_rate_7d", 0.0)
+            avg_ret  = t.get("avg_return_7d", 0.0)
+            avg_sign = "+" if avg_ret >= 0 else ""
+            if n == 0:
+                lines.append(f"  {label}: 추적 데이터 없음")
+            else:
+                lines.append(
+                    f"  {label}: 승률 <b>{win_rate:.0f}%</b> "
+                    f"(n={n}) / 평균 {avg_sign}{avg_ret:.1f}%"
+                )
+        lines.append("")
+
+    # ── 수익률 상위 종목 ──────────────────────────────────────
+    if top_picks:
+        lines.append("✅ <b>7일 수익률 상위</b>")
+        for p in top_picks:
+            ret  = p.get("return_7d", 0.0)
+            name = p.get("name", p.get("ticker", "?"))
+            src  = p.get("source", "?")
+            lines.append(f"  {name}  <b>+{ret:.1f}%</b>  [{src}]")
+        lines.append("")
+
+    # ── 수익률 하위 종목 ──────────────────────────────────────
+    if miss_picks and miss_picks[0].get("return_7d", 0) < 0:
+        lines.append("⚠️ <b>7일 수익률 하위</b>")
+        for p in miss_picks:
+            ret  = p.get("return_7d", 0.0)
+            name = p.get("name", p.get("ticker", "?"))
+            src  = p.get("source", "?")
+            sign = "+" if ret >= 0 else ""
+            lines.append(f"  {name}  <b>{sign}{ret:.1f}%</b>  [{src}]")
+        lines.append("")
+
+    if not trigger_stats and not top_picks:
+        lines.append("📭 아직 7일치 추적 데이터가 없습니다.")
+        lines.append("(봇 운영 1주일 후부터 승률 집계 시작)")
+
+    return "\n".join(lines)
