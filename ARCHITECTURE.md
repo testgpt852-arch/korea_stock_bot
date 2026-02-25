@@ -116,7 +116,7 @@ signal_analyzer.py        → morning_report
 ai_analyzer.py            → morning_report, closing_report, realtime_alert
 telegram_bot.py           → morning_report, closing_report, realtime_alert
 kis/auth.py               → kis/rest_client, kis/websocket_client
-kis/rest_client.py        → volume_analyzer (거래량 순위 제공)
+kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 제공)
 kis/websocket_client.py   → (향후 확장용 보존)
 ```
 
@@ -203,15 +203,18 @@ graph TD
        asyncio.create_task(_poll_loop()) 백그라운드 시작
        ↓ POLL_INTERVAL_SEC(60초)마다:
            volume_analyzer.poll_all_markets()
-               → KIS REST get_volume_ranking("J") 코스피 상위 100
-                   (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="0001")
-               → KIS REST get_volume_ranking("Q") 코스닥 상위 100
-                   (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="1001")
+               [v2.9 듀얼 소스 병합]
+               → KIS REST get_volume_ranking("J"/"Q") 거래량 순위 각 30종목
+                   대형주·테마 대장주 포착 (거래량 많은 종목)
+               → KIS REST get_rate_ranking("J"/"Q")   등락률 순위 각 30종목
+                   소형주·디모아형 포착 (거래량 적어도 등락률 높은 종목)
+               → 종목코드 기준 중복 제거 → 최대 60종목 델타 감지
                [v2.8 델타 기준 감지]
                → 첫 사이클: 워밍업 (스냅샷 저장만, 알림 없음)
                → 이후 사이클: 직전 poll 대비 1분간 변화량 판단
                  Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
                  × CONFIRM_CANDLES(2)회 연속 충족 → 알림
+               → 알림 포맷: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착)
            → can_alert() 쿨타임 확인
            → 1차 알림 즉시 발송
            → ai_analyzer.analyze_spike() 비동기
@@ -261,7 +264,8 @@ PRICE_CHANGE_MIN     = 3.0      # deprecated: 누적 등락률
 {"종목코드": str, "종목명": str, "등락률": float,
  "직전대비": float,               # v2.8 신규: 1분간 추가 상승률 (핵심)
  "거래량배율": float,             # v2.8 변경: 1분간 Δvol / 전일거래량
- "조건충족": bool, "감지시각": str}
+ "조건충족": bool, "감지시각": str,
+ "감지소스": str}                 # v2.9 신규: "volume"(거래량) | "rate"(등락률)
 
 # dart_collector.collect() → list[dict]
 {"종목명": str, "종목코드": str, "공시종류": str,
@@ -283,7 +287,8 @@ PRICE_CHANGE_MIN     = 3.0      # deprecated: 누적 등락률
 tr_id            함수명                   용도
 ─────────────────────────────────────────────────
 FHKST01010100    get_stock_price()        단일 종목 현재가
-FHPST01710000    get_volume_ranking()     거래량 순위 (장중봇 핵심)
+FHPST01710000    get_volume_ranking()     거래량 순위 (대형주·테마 대장주)
+FHPST01700000    get_rate_ranking()       등락률 순위 (v2.9 신규 — 소형주 포착)
 ```
 
 ### 데이터 소스 선택 기준
@@ -363,6 +368,13 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | 반환값: "직전대비" key 추가 (1분간 추가 상승률) |
 |      |            | config: PRICE_DELTA_MIN(1%), VOLUME_DELTA_MIN(5%) 신규 추가 |
 |      |            | telegram_bot: 알림 포맷에 "1분 +X.X%" 표시 추가 |
+| v2.9 | 2026-02-25 | **장중봇 감지 커버리지 2배 확장 — 등락률 순위 API 병행** |
+|      |            | rest_client: get_rate_ranking() 신규 (tr_id: FHPST01700000) |
+|      |            | volume_analyzer: 거래량TOP30 + 등락률TOP30 병합, 중복제거 후 감지 |
+|      |            | 소형주·디모아형(거래량 적음, 등락률 높음) 포착 가능 |
+|      |            | 반환값: "감지소스" key 추가 ("volume" or "rate") |
+|      |            | telegram_bot: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착) |
+|      |            | API 호출: 사이클당 2회 → 4회 (분당 8회, KIS 제한 여유 있음) |
 | v2.7 | 2026-02-25 | **장중봇 KIS API 파라미터 버그 수정** |
 |      |            | rest_client.get_volume_ranking(): FID_COND_MRKT_DIV_CODE 항상 "J" 고정 |
 |      |            | (기존 "Q" 사용 시 → OPSQ2001 ERROR INVALID FID_COND_MRKT_DIV_CODE) |
@@ -392,4 +404,4 @@ KIS_ACCOUNT_NO=
 KIS_ACCOUNT_CODE=01
 ```
 
-*v2.8 | 2026-02-25 | 장중봇 감지 방식 전환: 누적→델타(1분 변화량) 기반 실시간 급등 포착*
+*v2.9 | 2026-02-25 | 장중봇 커버리지 확장: 거래량+등락률 듀얼 소스 병합 감지*
