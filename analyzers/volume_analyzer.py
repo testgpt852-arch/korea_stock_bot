@@ -4,7 +4,7 @@ analyzers/volume_analyzer.py
 
 반환값 규격 (ARCHITECTURE.md 계약):
 {"종목코드": str, "종목명": str, "등락률": float, "직전대비": float,
- "거래량배율": float, "조건충족": bool, "감지시각": str}
+ "거래량배율": float, "조건충족": bool, "감지시각": str, "감지소스": str}
 
 [수정이력]
 - v1.3: CONFIRM_CANDLES 미사용 버그 수정 — 연속 N틱 카운터 구현
@@ -12,6 +12,9 @@ analyzers/volume_analyzer.py
 - v2.4: poll_all_markets() 신규 — pykrx REST 전 종목 폴링
 - v2.5: 데이터 소스를 pykrx → KIS REST 실시간으로 전환
 - v2.8: [핵심 변경] 누적 기준 → 델타(1분 변화량) 기준으로 전환
+- v2.9: 등락률 순위 API 병행 조회 추가 (get_rate_ranking)
+        거래량 TOP 30 + 등락률 TOP 30 → 중복 제거 → 최대 60종목 델타 감지
+        디모아형(거래량 적음, 등락률 높음) 소형주 포착 커버리지 확장
         문제: 전일종가 대비 누적 등락률/거래량 조건
               → 재시작 시 이미 올라간 종목 전부 한번에 감지 (폭탄 알림)
         해결: _prev_snapshot 캐시 도입
@@ -51,7 +54,7 @@ def poll_all_markets() -> list[dict]:
                × CONFIRM_CANDLES회 연속 충족 시 알림
     """
     global _prev_snapshot
-    from kis.rest_client import get_volume_ranking
+    from kis.rest_client import get_volume_ranking, get_rate_ranking
 
     current_snapshot: dict[str, dict] = {}
     alerted:          list[dict]      = []
@@ -59,10 +62,29 @@ def poll_all_markets() -> list[dict]:
 
     for market_code in ["J", "Q"]:
         market_name = "코스피" if market_code == "J" else "코스닥"
-        rows = get_volume_ranking(market_code)
+
+        # ── 거래량 순위 + 등락률 순위 병합 (중복 제거) ──────────
+        # 거래량 TOP 30: 대형주·테마 대장주 포착
+        # 등락률 TOP 30: 거래량 적어도 급등하는 소형주(디모아형) 포착
+        vol_rows  = get_volume_ranking(market_code)
+        rate_rows = get_rate_ranking(market_code)
+
+        # 종목코드 기준 중복 제거 (거래량 순위 우선)
+        seen: dict[str, dict] = {}
+        for row in vol_rows:
+            seen[row["종목코드"]] = {**row, "_source": "volume"}
+        for row in rate_rows:
+            if row["종목코드"] not in seen:
+                seen[row["종목코드"]] = {**row, "_source": "rate"}
+
+        rows = list(seen.values())
         if not rows:
             logger.debug(f"[volume] {market_name} 순위 없음")
             continue
+        logger.info(
+            f"[volume] {market_name} 합산: 거래량{len(vol_rows)}+등락률{len(rate_rows)}"
+            f"→ 중복제거 후 {len(rows)}종목"
+        )
 
         for row in rows:
             ticker = row["종목코드"]
@@ -106,6 +128,7 @@ def poll_all_markets() -> list[dict]:
                     "거래량배율": round(delta_vol_ratio / 100, 2),   # 1분간 Δvol / prdy_vol
                     "조건충족":   True,
                     "감지시각":   datetime.now().strftime("%H:%M:%S"),
+                    "감지소스":   row.get("_source", "volume"),      # "volume" or "rate"
                 })
 
     _prev_snapshot = current_snapshot
@@ -155,6 +178,7 @@ def analyze(tick: dict) -> dict:
         "거래량배율": round(volume_ratio / 100, 2),
         "조건충족":   confirmed,
         "감지시각":   datetime.now().strftime("%H:%M:%S"),
+        "감지소스":   "volume",
     }
 
 
