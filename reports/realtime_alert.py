@@ -48,6 +48,7 @@ from utils.state_manager import can_alert, mark_alerted, reset as reset_alerts
 import utils.watchlist_state    as watchlist_state
 import analyzers.volume_analyzer as volume_analyzer
 import analyzers.ai_analyzer     as ai_analyzer
+import tracking.ai_context        as ai_context        # v3.5 Phase 5
 import notifiers.telegram_bot    as telegram_bot
 from kis.websocket_client import ws_client
 import tracking.alert_recorder   as alert_recorder   # v3.3: Phase 3 DB 기록
@@ -221,7 +222,15 @@ async def _dispatch_alerts(analysis: dict) -> None:
 
 async def _send_ai_followup(analysis: dict) -> None:
     try:
-        ai_result = ai_analyzer.analyze_spike(analysis)
+        # ── v3.5 Phase 5: AI 컨텍스트 빌드 ───────────────────
+        # DB에서 트리거 승률 + 종목 이력 + 매매 원칙 조회 → 프롬프트에 주입
+        loop   = asyncio.get_event_loop()
+        ticker = analysis.get("종목코드", "")
+        source = analysis.get("감지소스", "unknown")
+        ctx    = await loop.run_in_executor(
+            None, lambda: ai_context.build_spike_context(ticker, source)
+        )
+        ai_result = ai_analyzer.analyze_spike(analysis, ai_context=ctx)
         msg_2nd   = telegram_bot.format_realtime_alert_ai(analysis, ai_result)
         await telegram_bot.send_async(msg_2nd)
         logger.info(
