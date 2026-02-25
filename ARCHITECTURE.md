@@ -207,7 +207,11 @@ graph TD
                    (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="0001")
                → KIS REST get_volume_ranking("Q") 코스닥 상위 100
                    (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="1001")
-               → 등락률 ≥ 3% AND 거래량배율 ≥ 10% AND 2회 연속 충족
+               [v2.8 델타 기준 감지]
+               → 첫 사이클: 워밍업 (스냅샷 저장만, 알림 없음)
+               → 이후 사이클: 직전 poll 대비 1분간 변화량 판단
+                 Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
+                 × CONFIRM_CANDLES(2)회 연속 충족 → 알림
            → can_alert() 쿨타임 확인
            → 1차 알림 즉시 발송
            → ai_analyzer.analyze_spike() 비동기
@@ -232,13 +236,18 @@ graph TD
 ### config.py 상수 목록
 
 ```python
-VOLUME_SPIKE_RATIO   = 10       # 전일 거래량 대비 오늘 누적 (%)
-PRICE_CHANGE_MIN     = 3.0      # 최소 등락률 (%)
+# v2.8: 델타 기준 (감지 조건)
+PRICE_DELTA_MIN      = 1.0      # 1분간 최소 추가 등락률 (%)
+VOLUME_DELTA_MIN     = 5        # 1분간 최소 추가 거래량 (전일 거래량 대비 %)
 CONFIRM_CANDLES      = 2        # 연속 충족 횟수
 POLL_INTERVAL_SEC    = 60       # KIS REST 폴링 간격 (초)
 ALERT_COOLTIME_MIN   = 30       # 중복 알림 방지 쿨타임
 WS_MAX_RECONNECT     = 3
 WS_RECONNECT_DELAY   = 30
+
+# deprecated v2.8 (하위 호환 보존만)
+VOLUME_SPIKE_RATIO   = 10       # deprecated: 누적 거래량 배율
+PRICE_CHANGE_MIN     = 3.0      # deprecated: 누적 등락률
 ```
 
 ### 반환값 규격 (인터페이스 계약)
@@ -250,7 +259,9 @@ WS_RECONNECT_DELAY   = 30
 
 # volume_analyzer.poll_all_markets() → list[dict]
 {"종목코드": str, "종목명": str, "등락률": float,
- "거래량배율": float, "조건충족": bool, "감지시각": str}
+ "직전대비": float,               # v2.8 신규: 1분간 추가 상승률 (핵심)
+ "거래량배율": float,             # v2.8 변경: 1분간 Δvol / 전일거래량
+ "조건충족": bool, "감지시각": str}
 
 # dart_collector.collect() → list[dict]
 {"종목명": str, "종목코드": str, "공시종류": str,
@@ -342,6 +353,16 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | main.py: _maybe_start_now() 추가 |
 |      |            | 시작 시 09:00~15:30 + 개장일이면 즉시 start_realtime_bot() 호출 |
 |      |            | _realtime_started 플래그로 cron과 즉시 실행 중복 방지 |
+| v2.7 | 2026-02-25 | **KIS volume-rank API 파라미터 버그 수정** |
+|      |            | rest_client: FID_COND_MRKT_DIV_CODE 항상 "J" 고정 |
+|      |            | 코스피/코스닥 구분: FID_INPUT_ISCD "0001"/"1001" 으로 전환 |
+| v2.8 | 2026-02-25 | **장중봇 감지 방식 전면 전환 — 누적→델타** |
+|      |            | volume_analyzer: _prev_snapshot 캐시 도입 |
+|      |            | 감지 조건: 누적 등락률/거래량 → 1분간 변화량(Δ)으로 전환 |
+|      |            | 첫 사이클=워밍업(알림없음), 이후 "지금 막 터지는" 종목만 포착 |
+|      |            | 반환값: "직전대비" key 추가 (1분간 추가 상승률) |
+|      |            | config: PRICE_DELTA_MIN(1%), VOLUME_DELTA_MIN(5%) 신규 추가 |
+|      |            | telegram_bot: 알림 포맷에 "1분 +X.X%" 표시 추가 |
 | v2.7 | 2026-02-25 | **장중봇 KIS API 파라미터 버그 수정** |
 |      |            | rest_client.get_volume_ranking(): FID_COND_MRKT_DIV_CODE 항상 "J" 고정 |
 |      |            | (기존 "Q" 사용 시 → OPSQ2001 ERROR INVALID FID_COND_MRKT_DIV_CODE) |
@@ -371,4 +392,4 @@ KIS_ACCOUNT_NO=
 KIS_ACCOUNT_CODE=01
 ```
 
-*v2.7 | 2026-02-25 | KIS volume-rank API 파라미터 버그 수정 (FID_INPUT_ISCD 시장구분)*
+*v2.8 | 2026-02-25 | 장중봇 감지 방식 전환: 누적→델타(1분 변화량) 기반 실시간 급등 포착*
