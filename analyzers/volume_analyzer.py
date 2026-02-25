@@ -31,8 +31,10 @@ from utils.logger import logger
 import config
 
 # ── 모듈 레벨 상태 ────────────────────────────────────────────
-_prev_snapshot:  dict[str, dict] = {}  # {종목코드: row} 직전 poll 스냅샷
-_confirm_count:  dict[str, int]  = {}  # {종목코드: 연속충족횟수}
+_prev_snapshot:  dict[str, dict] = {}  # {종목코드: row} 직전 poll 스냅샷 (REST용)
+_confirm_count:  dict[str, int]  = {}  # {종목코드: 연속충족횟수} (REST용)
+# v3.1: WebSocket 전용 상태 — REST _confirm_count와 분리
+_ws_alerted_tickers: set[str] = set()  # 이미 WS 알림 발송된 종목 (쿨타임은 state_manager에 위임)
 
 
 # ── REST 폴링 전 종목 분석 ──────────────────────────────────
@@ -187,4 +189,53 @@ def reset() -> None:
     global _prev_snapshot
     _prev_snapshot = {}
     _confirm_count.clear()
-    logger.info("[volume] 스냅샷·확인카운터 초기화 완료")
+    _ws_alerted_tickers.clear()   # v3.1: WS 상태도 초기화
+    logger.info("[volume] 스냅샷·확인카운터·WS상태 초기화 완료")
+
+
+# ── WebSocket 틱 기반 분석 (v3.1 신규 — 방법 B) ──────────────
+
+def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
+    """
+    KIS WebSocket 실시간 체결 틱 → 급등 조건 판단 (v3.1)
+
+    [REST 폴링과의 차이]
+    REST  : 직전 poll 대비 Δ등락률/Δ거래량 (변화량 기준) → 신규 종목 발굴
+    WS    : 누적 등락률 >= PRICE_CHANGE_MIN(3%) (절대값 기준) → 워치리스트 즉시 감지
+
+    [중복 알림 방지]
+    실제 발송 제어는 state_manager.can_alert()에 위임 (30분 쿨타임).
+    이 함수는 조건 판단만 담당.
+
+    Args:
+        tick:     _parse_tick()이 반환한 실시간 틱 dict
+                  {"종목코드", "등락률", "누적거래량", "체결시각", "종목명"(보강)}
+        prdy_vol: 전일거래량 (watchlist_state에서 전달)
+
+    Returns:
+        조건 충족 시 알림 dict, 미충족 시 None
+    """
+    rate = tick.get("등락률", 0.0)
+
+    # 누적 등락률이 임계값 미달 → 조건 미충족
+    if rate < config.PRICE_CHANGE_MIN:
+        return None
+
+    acml_vol     = tick.get("누적거래량", 0)
+    volume_ratio = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
+
+    ticker = tick.get("종목코드", "")
+    체결시각 = tick.get("체결시각", "")
+    if len(체결시각) == 6:   # HHMMSS → HH:MM:SS
+        체결시각 = f"{체결시각[:2]}:{체결시각[2:4]}:{체결시각[4:]}"
+
+    return {
+        "종목코드":   ticker,
+        "종목명":     tick.get("종목명", ticker),
+        "등락률":     rate,
+        "직전대비":   0.0,         # WS 틱은 누적값 — "직전대비" 개념 없음
+        "거래량배율": round(volume_ratio, 2),
+        "조건충족":   True,
+        "감지시각":   체결시각 or datetime.now().strftime("%H:%M:%S"),
+        "감지소스":   "websocket",
+    }

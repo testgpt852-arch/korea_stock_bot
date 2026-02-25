@@ -242,25 +242,45 @@ def _is_ack(data: dict, ticker: str) -> bool:
 
 
 def _parse_tick(raw: str | bytes) -> dict | None:
-    """실시간 체결 데이터 파싱"""
+    """
+    KIS H0STCNT0 실시간 체결 데이터 파싱 (v3.1 필드 수정)
+
+    KIS 파이프 형식: type|tr_id|cnt|data
+    data 필드 (^구분):
+      [0]  종목코드   [1] 체결시각(HHMMSS)  [2] 현재가
+      [3]  전일대비부호               [4] 전일대비(등락폭)
+      [5]  전일대비율(등락률%)        ← v3.1: 기존 [12] 오류 → [5] 정정
+      [6]  가중평균가  [7] 시가  [8] 고가  [9] 저가
+      [10] 매도호가1  [11] 매수호가1
+      [12] 체결거래량(이 틱)
+      [13] 누적거래량(당일 누적)      ← v3.1 신규: analyze_ws_tick RVOL용
+      [14] 누적거래대금
+    """
     try:
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
-        # KIS 실시간 데이터는 '|' 구분 파이프 형식
-        # 예: 0|H0STCNT0|001|005930^...^체결가^...
         parts = raw.split("|")
         if len(parts) < 4:
             return None
         if parts[0] == "0":   # 실시간 데이터
             fields = parts[3].split("^")
-            if len(fields) < 13:
+            if len(fields) < 14:
                 return None
+
+            def safe_int(v: str) -> int:
+                return int(v) if v and v.lstrip("-").isdigit() else 0
+
+            def safe_float(v: str) -> float:
+                try:    return float(v) if v else 0.0
+                except: return 0.0
+
             return {
-                "종목코드": fields[0],
-                "체결가":   int(fields[2])   if fields[2].isdigit()  else 0,
-                "등락률":   float(fields[12]) if fields[12]           else 0.0,
-                "거래량":   int(fields[13])   if len(fields) > 13     else 0,
-                "체결시각": fields[1],
+                "종목코드":   fields[0],
+                "체결가":     safe_int(fields[2]),
+                "등락률":     safe_float(fields[5]),    # v3.1 정정: 전일대비율
+                "체결거래량": safe_int(fields[12]),     # 이 틱 거래량
+                "누적거래량": safe_int(fields[13]),     # v3.1 신규: 당일 누적
+                "체결시각":   fields[1],                # HHMMSS
             }
     except Exception:
         pass

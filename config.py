@@ -68,18 +68,23 @@ VOLUME_DELTA_MIN   = 5       # 1분간 최소 추가 거래량 (전일 거래량
 CONFIRM_CANDLES    = 1       # 연속 충족 폴링 횟수 (허위신호 방지)
 MARKET_CAP_MIN     = 30_000_000_000
 
-# ⚠️ deprecated v2.8 — 하위 호환성 보존만 (감지 로직에서 제거됨)
-VOLUME_SPIKE_RATIO = 10      # deprecated: 누적 거래량 배율
-PRICE_CHANGE_MIN   = 3.0     # deprecated: 누적 등락률
+# v3.1: PRICE_CHANGE_MIN — WebSocket 틱 기반 감지 임계값으로 재활성
+# (방법B: 워치리스트 종목의 누적 등락률이 이 값 이상이면 WS 알림)
+VOLUME_SPIKE_RATIO = 10      # deprecated (v2.8): 누적 거래량 배율 — REST 미사용
+PRICE_CHANGE_MIN   = 3.0     # WebSocket 감지 임계값 (누적 등락률 %, v3.1 재활성)
 
 # ── 장중봇 REST 폴링 간격 (v2.4 추가) ───────────────────────
 # pykrx REST 전 종목 조회 주기 (초)
 # 60초 × CONFIRM_CANDLES(2) = 조건 충족 후 최대 2분 내 알림
 # KIS WebSocket 미사용 → 차단 위험 없음, 전 종목(코스피+코스닥) 커버
-POLL_INTERVAL_SEC  = 30
+POLL_INTERVAL_SEC  = 10      # v3.1: 30→10초 단축 (방법A 개선)
 
 # ── 중복 알림 방지 ───────────────────────────────────────────
 ALERT_COOLTIME_MIN = 30
+
+# ── WebSocket 워치리스트 (v3.1 추가) ────────────────────────
+# 아침봇이 선별한 최대 구독 종목 수 (KIS 차단 방지 — 한번에 너무 많이 구독 금지)
+WS_WATCHLIST_MAX   = 50
 
 # ── KIS WebSocket (websocket_client.py 재연결 로직용 — 장중봇과 무관) ─
 WS_MAX_RECONNECT   = 3

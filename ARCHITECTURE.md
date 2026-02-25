@@ -93,7 +93,8 @@ korea_stock_bot/
 └── utils/
     ├── logger.py
     ├── date_utils.py        ← is_market_open() 포함
-    └── state_manager.py     ← 쿨타임·중복 알림 방지
+    ├── state_manager.py     ← 쿨타임·중복 알림 방지
+    └── watchlist_state.py   ← 아침봇→장중봇 WebSocket 워치리스트 공유 (v3.1)
 ```
 
 ---
@@ -105,6 +106,7 @@ korea_stock_bot/
 ─────────────────────────────────────────────────────────────
 config.py                 → 모든 파일
 date_utils.py             → dart_collector, morning_report, closing_report, main
+watchlist_state.py        → morning_report (write), realtime_alert (read)
 state_manager.py          → realtime_alert
 dart_collector.py         → morning_report, signal_analyzer
 price_collector.py        → closing_report, morning_report, signal_analyzer
@@ -171,6 +173,9 @@ graph TD
     RA --> VA & SM & AI
     VA --> KR
     KA --> KR & KW
+    WLS[watchlist_state]
+    MR --> WLS
+    RA --> WLS
     MR & CR & RA --> TB
 ```
 
@@ -232,6 +237,32 @@ graph TD
        ai_analyzer.analyze_closing()
        theme_analyzer → 순환매 지도
        telegram_bot 발송
+
+───────────────────── v3.1 방법B+A 하이브리드 ──────────────────────
+08:30  아침봇 완료 후 ⑧ 추가:
+       _build_ws_watchlist(price_data, signal_result)
+         ① 전날 상한가 전체 (우선순위1)
+         ② 전날 급등 상위 20 (우선순위2)
+         ③ 기관 순매수 상위 10 (우선순위3)
+         ④ 신호 관련종목 각 3개 (우선순위4)
+       → 종목코드 기준 중복 제거 → 최대 50개 → watchlist_state 저장
+
+09:00  장중봇 start() 에서 2개 Task 병렬 시작:
+
+  [방법 B] WebSocket 고정 구독 (_ws_loop)
+       ws_client.connect() → watchlist 50종목 subscribe (1회, 변경 없음)
+       H0STCNT0 틱 수신 → volume_analyzer.analyze_ws_tick(tick, prdy_vol)
+       조건: 누적 등락률 >= PRICE_CHANGE_MIN(3.0%)
+       → 즉시(0초 지연) 알림
+
+  [방법 A] REST 폴링 (_poll_loop) — 간격 30s→10s 단축
+       기존 로직 동일 (Δ등락률+Δ거래량 기준)
+       역할: 워치리스트 外 당일 신규 테마 종목 커버
+
+  [쿨타임 공유] state_manager.can_alert() — WS/REST 공통 30분 쿨타임
+       WS가 먼저 감지하면 REST는 30분간 같은 종목 알림 억제
+
+15:30  ws_client.disconnect() → REST 폴링 cancel → watchlist_state.clear()
 ```
 
 ---
@@ -380,6 +411,15 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | telegram_bot: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착) |
 |      |            | API 호출: 사이클당 2회 → 4회 (분당 8회, KIS 제한 여유 있음) |
 | v3.0 | 2026-02-25 | **등락률 순위 필터 전면 개편 — 초기 급등 조기 포착** |
+| v3.1 | 2026-02-25 | **방법B+A 하이브리드 — WebSocket 고정구독 + REST 폴링 단축** |
+|      |            | utils/watchlist_state.py 신규 — 아침봇→장중봇 공유 상태 |
+|      |            | morning_report: _build_ws_watchlist() 추가 (상한가+급등+기관+신호) |
+|      |            | realtime_alert: _ws_loop() 추가 (방법B), POLL_INTERVAL_SEC 10s |
+|      |            | volume_analyzer: analyze_ws_tick() 추가 (누적 등락률 기준) |
+|      |            | websocket_client: _parse_tick() 필드 수정 ([12]→[5] 등락률, [13] 누적거래량) |
+|      |            | config: POLL_INTERVAL_SEC 30→10, WS_WATCHLIST_MAX=50 추가 |
+|      |            | config: PRICE_CHANGE_MIN deprecated→WebSocket 감지 임계값으로 재활성 |
+|      |            | telegram_bot: "websocket" 소스 배지 추가 (🎯 워치리스트) |
 |      |            | rest_client: get_rate_ranking() 개편 |
 |      |            | 종목코드 필드 버그 수정: mksc_shrn_iscd → stck_shrn_iscd |
 |      |            | 코스닥(Q): 모든 노이즈 제외 (FID_TRGT_EXLS_CLS_CODE="1111111") |
