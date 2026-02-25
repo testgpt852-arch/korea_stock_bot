@@ -76,7 +76,7 @@ async def _maybe_start_now():
     if not is_market_open(get_today()):
         return
 
-    now = datetime.now()
+    now = datetime.now(KST)
     market_open  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
