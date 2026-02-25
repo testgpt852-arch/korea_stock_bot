@@ -65,7 +65,7 @@ def validate_env():
 # 변경: 직전 poll 대비 1분간 변화량(델타) 조건 → "지금 막 터지는" 종목만 포착
 PRICE_DELTA_MIN    = 1.0     # 1분간 최소 추가 등락률 (%) — 핵심 조건
 VOLUME_DELTA_MIN   = 5       # 1분간 최소 추가 거래량 (전일 거래량 대비 %)
-CONFIRM_CANDLES    = 2       # 연속 충족 폴링 횟수 (허위신호 방지)
+CONFIRM_CANDLES    = 1       # 연속 충족 폴링 횟수 (허위신호 방지)
 MARKET_CAP_MIN     = 30_000_000_000
 
 # ⚠️ deprecated v2.8 — 하위 호환성 보존만 (감지 로직에서 제거됨)
