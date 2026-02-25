@@ -2,15 +2,11 @@
 kis/rest_client.py
 KIS REST API 호출 전담
 
-[ARCHITECTURE 의존성]
-rest_client → auth.py
-
 [수정이력]
-- v2.5: get_volume_ranking() 추가
-- v2.5.1: get_volume_ranking() API URL 경로 수정
-          기존: /uapi/domestic-stock/v1/ranking/volume        → 404
-          수정: /uapi/domestic-stock/v1/quotations/volume-rank → 정상
-          Content-Type 헤더 추가 (KIS API 필수)
+- v2.5:   get_volume_ranking() 추가
+- v2.5.1: URL 수정 → /uapi/domestic-stock/v1/quotations/volume-rank
+- v2.5.2: logger.debug → logger.info (Railway 로그 가시성 확보)
+          응답 rt_cd/msg_cd 진단 로그 추가
 """
 
 import requests
@@ -22,15 +18,9 @@ _BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 
 def get_stock_price(ticker: str) -> dict:
-    """
-    단일 종목 현재가 조회
-
-    반환: {"현재가": int, "등락률": float, "거래량": int} or {}
-    """
     token = get_access_token()
     if not token:
         return {}
-
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
         "Authorization":  f"Bearer {token}",
@@ -43,7 +33,6 @@ def get_stock_price(ticker: str) -> dict:
         "FID_COND_MRKT_DIV_CODE": "J",
         "FID_INPUT_ISCD":         ticker,
     }
-
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=5)
         resp.raise_for_status()
@@ -60,21 +49,17 @@ def get_stock_price(ticker: str) -> dict:
 
 def get_volume_ranking(market_code: str) -> list[dict]:
     """
-    KIS 거래량 순위 조회 (v2.5)
+    KIS 거래량 순위 조회
     tr_id: FHPST01710000
-    URL:   /uapi/domestic-stock/v1/quotations/volume-rank  ← v2.5.1 수정
-
-    Args:
-        market_code: "J" = 코스피, "Q" = 코스닥
-
-    반환: list[dict]
-        [{"종목코드": str, "종목명": str, "등락률": float,
-          "누적거래량": int, "전일거래량": int, "현재가": int}, ...]
+    URL:   /uapi/domestic-stock/v1/quotations/volume-rank
     """
     token = get_access_token()
     if not token:
         logger.warning("[rest] 토큰 없음 — 거래량 순위 조회 불가")
         return []
+
+    market_name = "코스피" if market_code == "J" else "코스닥"
+    logger.info(f"[rest] {market_name} 거래량 순위 조회 시작...")
 
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/volume-rank"
     headers = {
@@ -86,9 +71,9 @@ def get_volume_ranking(market_code: str) -> list[dict]:
         "Content-Type":   "application/json; charset=utf-8",
     }
     params = {
-        "FID_COND_MRKT_DIV_CODE":   market_code,   # J=코스피, Q=코스닥
+        "FID_COND_MRKT_DIV_CODE":   market_code,
         "FID_COND_SCR_DIV_CODE":    "20171",
-        "FID_INPUT_ISCD":           "0000",         # 전 종목
+        "FID_INPUT_ISCD":           "0000",
         "FID_DIV_CLS_CODE":         "0",
         "FID_BLNG_CLS_CODE":        "0",
         "FID_TRGT_CLS_CODE":        "111111111",
@@ -102,7 +87,14 @@ def get_volume_ranking(market_code: str) -> list[dict]:
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         resp.raise_for_status()
-        raw_list = resp.json().get("output1", [])
+        body     = resp.json()
+        raw_list = body.get("output1", [])
+        rt_cd    = body.get("rt_cd",  "?")
+        msg_cd   = body.get("msg_cd", "?")
+        msg1     = body.get("msg1",   "")
+
+        # 응답 진단 로그 (정상 확인 후 제거 가능)
+        logger.info(f"[rest] {market_name} 응답: rt_cd={rt_cd} msg_cd={msg_cd} msg={msg1} 항목={len(raw_list)}")
 
         result = []
         for item in raw_list:
@@ -122,7 +114,7 @@ def get_volume_ranking(market_code: str) -> list[dict]:
             except (ValueError, TypeError):
                 continue
 
-        logger.debug(f"[rest] 거래량 순위 {market_code} — {len(result)}종목 수신")
+        logger.info(f"[rest] {market_name} 파싱 완료 — {len(result)}종목")
         return result
 
     except Exception as e:
