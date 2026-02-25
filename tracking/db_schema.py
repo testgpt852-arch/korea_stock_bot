@@ -1,6 +1,6 @@
 """
 tracking/db_schema.py
-SQLite DB 스키마 정의 + 초기화 (Phase 3, v3.3 신규 / v3.4 업데이트)
+SQLite DB 스키마 정의 + 초기화 (Phase 3, v3.3 신규 / v3.4 업데이트 / v3.5 업데이트)
 
 [역할]
 DDL(테이블·인덱스·뷰 생성) + init_db() + get_conn() 만 담당.
@@ -12,6 +12,7 @@ main.py 시작 시 init_db() 1회 호출.
   performance_tracker    ← 알림 후 1/3/7일 수익률 추적 행 (performance_tracker 배치 UPDATE)
   trading_history        ← Phase 4 모의투자 매매 이력 (position_manager가 기록)
   positions              ← [v3.4] 현재 오픈 포지션 (position_manager 전용)
+  trading_principles     ← [v3.5] AI 학습용 매매 원칙 DB (principles_extractor가 기록)
 
 [뷰]
   trigger_stats          ← 트리거별 7일 승률 집계 (weekly_report 조회용)
@@ -20,6 +21,7 @@ main.py 시작 시 init_db() 1회 호출.
 db_schema ← tracking/alert_recorder   (get_conn 사용)
 db_schema ← tracking/performance_tracker (get_conn 사용)
 db_schema ← traders/position_manager  (get_conn 사용)
+db_schema ← tracking/principles_extractor (get_conn 사용)  ← v3.5 추가
 db_schema ← main.py  (init_db 1회 호출)
 db_schema → (없음, 최하위 모듈)
 
@@ -131,7 +133,27 @@ def init_db() -> None:
             )
         """)
 
-        # ── 5. 트리거별 승률 뷰 ────────────────────────────────
+        # ── 5. 매매 원칙 DB (Phase 5, v3.5 신규) ──────────────
+        # principles_extractor.py가 거래 완료 후 패턴을 추출해 INSERT.
+        # ai_context.py가 조회해 AI 프롬프트에 주입.
+        # 주간 배치(매주 일요일 03:00)에서 high_conf 원칙 추출.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS trading_principles (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT    NOT NULL,   -- ISO 8601 KST
+                condition_desc  TEXT    NOT NULL,   -- 발동 조건 (예: "마감 강도 0.85↑ + 거래량 50%↑")
+                action          TEXT    NOT NULL,   -- 행동 (buy / hold / skip)
+                result_summary  TEXT,               -- 결과 요약 (예: "7/9 성공")
+                win_count       INTEGER DEFAULT 0,  -- 성공 횟수
+                total_count     INTEGER DEFAULT 0,  -- 총 발생 횟수
+                win_rate        REAL    DEFAULT 0.0, -- 승률 (%)
+                confidence      TEXT    DEFAULT 'low', -- low / medium / high
+                trigger_source  TEXT,               -- 어떤 트리거에서 파생됐는지
+                last_updated    TEXT                -- 마지막 업데이트 KST
+            )
+        """)
+
+        # ── 6. 트리거별 승률 뷰 ────────────────────────────────
         c.execute("""
             CREATE VIEW IF NOT EXISTS trigger_stats AS
             SELECT
@@ -150,7 +172,7 @@ def init_db() -> None:
             GROUP BY ah.source
         """)
 
-        # ── 6. 인덱스 ─────────────────────────────────────────
+        # ── 7. 인덱스 ─────────────────────────────────────────
         c.execute("""
             CREATE INDEX IF NOT EXISTS idx_alert_date
             ON alert_history(alert_date)
@@ -166,6 +188,10 @@ def init_db() -> None:
         c.execute("""
             CREATE INDEX IF NOT EXISTS idx_trading_hist_date
             ON trading_history(buy_time)
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_principles_confidence
+            ON trading_principles(confidence, trigger_source)
         """)
 
         conn.commit()
