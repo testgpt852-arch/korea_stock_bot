@@ -1,4 +1,4 @@
-# 🇰🇷 한국주식 봇 — 아키텍처 설계 문서 v2.6
+# 🇰🇷 한국주식 봇 — 아키텍처 설계 문서 v2.7
 
 > **이 문서의 목적**: AI에게 유지보수 요청 시 반드시 이 문서를 첨부할 것.
 > AI가 전체 구조를 파악하고 엉뚱한 파일을 건드리는 할루시네이션을 방지한다.
@@ -204,7 +204,9 @@ graph TD
        ↓ POLL_INTERVAL_SEC(60초)마다:
            volume_analyzer.poll_all_markets()
                → KIS REST get_volume_ranking("J") 코스피 상위 100
+                   (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="0001")
                → KIS REST get_volume_ranking("Q") 코스닥 상위 100
+                   (내부: FID_COND_MRKT_DIV_CODE="J", FID_INPUT_ISCD="1001")
                → 등락률 ≥ 3% AND 거래량배율 ≥ 10% AND 2회 연속 충족
            → can_alert() 쿨타임 확인
            → 1차 알림 즉시 발송
@@ -340,6 +342,12 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | main.py: _maybe_start_now() 추가 |
 |      |            | 시작 시 09:00~15:30 + 개장일이면 즉시 start_realtime_bot() 호출 |
 |      |            | _realtime_started 플래그로 cron과 즉시 실행 중복 방지 |
+| v2.7 | 2026-02-25 | **장중봇 KIS API 파라미터 버그 수정** |
+|      |            | rest_client.get_volume_ranking(): FID_COND_MRKT_DIV_CODE 항상 "J" 고정 |
+|      |            | (기존 "Q" 사용 시 → OPSQ2001 ERROR INVALID FID_COND_MRKT_DIV_CODE) |
+|      |            | 코스피/코스닥 구분: FID_INPUT_ISCD "0001"/"1001" 으로 전환 |
+|      |            | (기존 "0000" 전체조회 → rt_cd=0이지만 항목 0개 반환) |
+|      |            | volume_analyzer.py 호출 인터페이스("J"/"Q") 유지 |
 
 ---
 
@@ -363,4 +371,4 @@ KIS_ACCOUNT_NO=
 KIS_ACCOUNT_CODE=01
 ```
 
-*v2.6 | 2026-02-25 | 장중 재배포 시 즉시 실행 (_maybe_start_now)*
+*v2.7 | 2026-02-25 | KIS volume-rank API 파라미터 버그 수정 (FID_INPUT_ISCD 시장구분)*
