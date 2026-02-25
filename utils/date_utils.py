@@ -4,14 +4,24 @@ utils/date_utils.py
 - PREV(전 거래일) 계산
 - 휴장일 판단
 - 날짜 포맷 변환
+
+[수정이력]
+- v1.0: 기본 구조
+- v1.1: get_today() — KST 타임존 명시 적용 (Railway UTC 서버 대응)
+        Railway 서버는 UTC 기준이라 datetime.now()가 UTC를 반환.
+        한국 시간 07:30 KST = UTC 22:30 전날 → today가 하루 전으로 잡히는 버그 수정.
+        해결: timezone(timedelta(hours=9)) 적용 → 항상 KST 기준 반환.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from utils.logger import logger
+
+KST = timezone(timedelta(hours=9))
 
 
 def get_today() -> datetime:
-    return datetime.now()
+    """현재 시각 KST로 반환. Railway는 UTC 서버이므로 반드시 KST 명시."""
+    return datetime.now(KST)
 
 
 def get_prev_trading_day(today: datetime = None) -> datetime:
