@@ -16,6 +16,13 @@ KIS REST API 호출 전담
 - v2.9:   get_rate_ranking() 신규 추가 (tr_id: FHPST01700000)
           등락률 순위 TOP 30 조회 — 거래량 적어도 급등하는 소형주 포착
           반환값 규격: get_volume_ranking()과 동일 (volume_analyzer 호환)
+- v3.0:   [get_rate_ranking 전면 개편]
+          종목코드 필드 버그 수정: mksc_shrn_iscd → stck_shrn_iscd
+          코스닥(Q): 모든 노이즈 제외 (관리/경고/위험/우선주/스팩/ETF/ETN, 1111111)
+          코스피(J): 중형+소형 2회 호출 후 합산 → 대형주 사실상 제외
+          등락률 범위 0~10% (FID_RSFL_RATE2="10") — 초기 급등 조기 포착
+          FID_COND_MRKT_DIV_CODE 항상 "J" 고정 (rate API도 J 통일)
+          내부 헬퍼 _fetch_rate_once() 분리
 """
 
 import requests
@@ -156,19 +163,24 @@ def get_volume_ranking(market_code: str) -> list[dict]:
 
 def get_rate_ranking(market_code: str) -> list[dict]:
     """
-    KIS 등락률 순위 조회 (v2.9 신규)
+    KIS 등락률 순위 조회 (v2.9 신규 / v3.0 개편)
     tr_id: FHPST01700000
     URL:   /uapi/domestic-stock/v1/ranking/fluctuation
 
     market_code: "J" = 코스피, "Q" = 코스닥
 
-    반환값 규격: get_volume_ranking()과 동일
-    → volume_analyzer가 두 리스트를 그대로 합칠 수 있음
+    [v3.0 개편 내용]
+    - 종목코드 필드 버그 수정: mksc_shrn_iscd → stck_shrn_iscd
+    - 코스닥 (Q): 모든 노이즈 제외 (FID_TRGT_EXLS_CLS_CODE="1111111")
+      관리·경고·위험·우선주·스팩·ETF·ETN/ELW 전부 제외
+    - 코스피 (J): 중형(FID_BLNG_CLS_CODE="2") + 소형("3") 각각 호출 후
+      종목코드 기준 중복 제거 → 대형주 사실상 제외
+    - 등락률 범위 0~10% (FID_RSFL_RATE1="0", FID_RSFL_RATE2="10")
+      → 이미 폭발한 상한가 제외, 초기 급등 종목 조기 포착
+    - FID_COND_MRKT_DIV_CODE: 항상 "J" 고정 (rate API도 "J" 통일)
+    - 결과 등락률 내림차순 정렬 후 반환
 
-    [추가 배경]
-    거래량 순위(TOP 30)에는 대형주·테마 대장주만 잡힘.
-    거래량이 적어도 등락률이 높은 소형주(디모아형) 포착을 위해 추가.
-    두 API를 합산하면 실질적으로 감지 커버리지가 2배로 확장됨.
+    반환값 규격: get_volume_ranking()과 동일
     """
     token = get_access_token()
     if not token:
@@ -177,8 +189,36 @@ def get_rate_ranking(market_code: str) -> list[dict]:
 
     market_name = "코스피" if market_code == "J" else "코스닥"
     input_iscd  = _MARKET_INPUT_ISCD.get(market_code, "0001")
-    logger.info(f"[rest] {market_name} 등락률 순위 조회 시작...")
 
+    if market_code == "Q":
+        # 코스닥: 단일 호출, 모든 노이즈 제외
+        rows = _fetch_rate_once(token, market_name, input_iscd,
+                                blng_cls="0", exls_cls="1111111")
+    else:
+        # 코스피: 중형 + 소형 각각 호출 후 합산 → 대형주 제외 효과
+        mid   = _fetch_rate_once(token, market_name + "[중형]", input_iscd,
+                                 blng_cls="2", exls_cls="0001111")
+        small = _fetch_rate_once(token, market_name + "[소형]", input_iscd,
+                                 blng_cls="3", exls_cls="0001111")
+        seen, rows = set(), []
+        for r in mid + small:
+            key = r["종목코드"] or r["종목명"]
+            if key and key not in seen:
+                seen.add(key)
+                rows.append(r)
+
+    rows.sort(key=lambda x: x["등락률"], reverse=True)
+    result = rows[:30]
+    logger.info(f"[rest] {market_name} 등락률 파싱 완료 — {len(result)}종목")
+    return result
+
+
+def _fetch_rate_once(token: str, label: str, input_iscd: str,
+                     blng_cls: str, exls_cls: str) -> list[dict]:
+    """
+    등락률 순위 단일 호출 헬퍼 (get_rate_ranking 내부 전용)
+    등락률 범위: 0~10% (초기 급등 조기 포착)
+    """
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/ranking/fluctuation"
     headers = {
         "Authorization":  f"Bearer {token}",
@@ -189,19 +229,21 @@ def get_rate_ranking(market_code: str) -> list[dict]:
         "Content-Type":   "application/json; charset=utf-8",
     }
     params = {
-        "FID_COND_MRKT_DIV_CODE":  market_code,   # 등락률API는 "J"/"Q" 모두 지원
+        "FID_COND_MRKT_DIV_CODE":  "J",       # 항상 "J" 고정 (v3.0)
         "FID_COND_SCR_DIV_CODE":   "20170",
         "FID_INPUT_ISCD":          input_iscd,
-        "FID_RANK_SORT_CLS_CODE":  "0",            # 0: 상승률 순
+        "FID_RANK_SORT_CLS_CODE":  "0",        # 상승률순
         "FID_INPUT_CNT_1":         "0",
         "FID_PRC_CLS_CODE":        "0",
         "FID_INPUT_PRICE_1":       "0",
         "FID_INPUT_PRICE_2":       "0",
-        "FID_VOL_CNT":             "30",
+        "FID_VOL_CNT":             "100",
         "FID_TRGT_CLS_CODE":       "0",
-        "FID_TRGT_EXLS_CLS_CODE":  "0",
+        "FID_TRGT_EXLS_CLS_CODE":  exls_cls,
         "FID_DIV_CLS_CODE":        "0",
-        "FID_BLNG_CLS_CODE":       "0",
+        "FID_BLNG_CLS_CODE":       blng_cls,
+        "FID_RSFL_RATE1":          "0",        # 등락률 하한 0% (v3.0)
+        "FID_RSFL_RATE2":          "10",       # 등락률 상한 10% (v3.0)
     }
 
     try:
@@ -211,23 +253,22 @@ def get_rate_ranking(market_code: str) -> list[dict]:
         rt_cd  = body.get("rt_cd",  "?")
         msg_cd = body.get("msg_cd", "?")
         msg1   = body.get("msg1",   "")
-
         raw_list = body.get("output1") or body.get("output") or body.get("output2") or []
 
         logger.info(
-            f"[rest] {market_name} 등락률 응답: rt_cd={rt_cd} msg_cd={msg_cd} "
+            f"[rest] {label} 등락률 응답: rt_cd={rt_cd} msg_cd={msg_cd} "
             f"msg={msg1} 항목={len(raw_list)}"
         )
 
         result = []
         for item in raw_list:
             try:
-                prdy_vol = int(item.get("prdy_vol", 0))
                 acml_vol = int(item.get("acml_vol", 0))
+                prdy_vol = int(item.get("prdy_vol", 0))
                 if acml_vol <= 0:
                     continue
                 result.append({
-                    "종목코드":   item.get("mksc_shrn_iscd", ""),
+                    "종목코드":   item.get("stck_shrn_iscd", ""),   # v3.0 버그수정
                     "종목명":     item.get("hts_kor_isnm", ""),
                     "현재가":     int(item.get("stck_prpr", 0)),
                     "등락률":     float(item.get("prdy_ctrt", 0.0)),
@@ -237,9 +278,8 @@ def get_rate_ranking(market_code: str) -> list[dict]:
             except (ValueError, TypeError):
                 continue
 
-        logger.info(f"[rest] {market_name} 등락률 파싱 완료 — {len(result)}종목")
         return result
 
     except Exception as e:
-        logger.warning(f"[rest] 등락률 순위 조회 실패 ({market_code}): {e}")
+        logger.warning(f"[rest] 등락률 순위 단일 호출 실패 ({label}): {e}")
         return []

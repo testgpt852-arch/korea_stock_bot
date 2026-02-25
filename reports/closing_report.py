@@ -99,10 +99,26 @@ def _resolve_target_date(today: datetime) -> datetime | None:
       - 주말·공휴일           → 전 거래일
       - 평일 16:00 이후       → 오늘 (장 마감 데이터 확정)
       - 평일 16:00 이전(새벽) → 전 거래일
+
+    [수정 이유 v3.1]
+    is_market_open()은 "현재 장이 열려있는지(실시간 개폐 여부)"를 반환.
+    18:30 실행 시 장이 닫혀있으므로 False → 주말/공휴일 분기로 빠져
+    오늘(거래일)임에도 전 거래일을 반환하는 버그 발생.
+
+    [해결책]
+    get_prev_trading_day(today).date() < today.date() 이면 오늘이 거래일.
+    → is_market_open() 의존 제거, 거래일 여부를 날짜 비교로만 판단.
     """
-    if not is_market_open(today):
-        return get_prev_trading_day(today)
-    return today if today.hour >= 16 else get_prev_trading_day(today)
+    prev = get_prev_trading_day(today)
+
+    # 전 거래일 < 오늘 날짜 → 오늘은 거래일
+    today_is_trading_day = prev.date() < today.date()
+
+    if not today_is_trading_day:
+        return prev  # 주말·공휴일 → 전 거래일
+
+    # 거래일: 장 마감 확정(16:00↑)이면 오늘, 그 이전이면 전 거래일
+    return today if today.hour >= 16 else prev
 
 
 def _fallback_signals(price_result: dict) -> list[dict]:
