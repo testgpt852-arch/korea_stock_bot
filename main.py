@@ -14,6 +14,9 @@ main.py
 - v3.3:  Phase 3 — DB init_db() 기동 시 1회 호출
          18:45 수익률 추적 배치(performance_tracker.run_batch) 스케줄 추가
          매주 월요일 아침봇 직후 주간 성과 리포트(weekly_report) 발송 스케줄 추가
+- v3.4:  Phase 4 — 자동매매 강제청산 스케줄 추가
+         14:50 run_force_close() — 미청산 포지션 전부 시장가 매도
+         AUTO_TRADE_ENABLED=false 시 스케줄 등록 자체를 건너뜀
 """
 
 import asyncio
@@ -47,7 +50,6 @@ async def run_closing_bot():
     await run()
 
 
-
 async def run_performance_batch():
     """18:45 수익률 추적 배치 (Phase 3, v3.3)"""
     if not is_market_open(get_today()):
@@ -68,6 +70,37 @@ async def run_weekly_report():
         return
     from reports.weekly_report import run
     await run()
+
+
+async def run_force_close():
+    """
+    14:50 강제 청산 (Phase 4, v3.4)
+    미청산 포지션 전부 시장가 매도.
+    AUTO_TRADE_ENABLED=false 이면 아무것도 하지 않음.
+    """
+    if not config.AUTO_TRADE_ENABLED:
+        return
+    if not is_market_open(get_today()):
+        return
+
+    loop = asyncio.get_event_loop()
+    from traders.position_manager import force_close_all
+    import notifiers.telegram_bot as telegram_bot
+
+    closed_list = await loop.run_in_executor(None, force_close_all)
+    if not closed_list:
+        logger.info("[main] 강제청산 — 미청산 포지션 없음")
+        return
+
+    for closed in closed_list:
+        try:
+            msg = telegram_bot.format_trade_closed(closed)
+            await telegram_bot.send_async(msg)
+        except Exception as e:
+            logger.warning(f"[main] 강제청산 알림 발송 실패: {e}")
+
+    logger.info(f"[main] 강제청산 완료 — {len(closed_list)}종목")
+
 
 async def start_realtime_bot():
     """09:00 장중봇 시작 — KIS REST 폴링"""
@@ -141,6 +174,9 @@ async def main():
     # Phase 3: 주간 성과 리포트 — 매주 월요일 08:45 (아침봇 완료 후) (v3.3)
     scheduler.add_job(run_weekly_report, "cron", hour=8, minute=45, id="weekly_report")
 
+    # Phase 4: 강제 청산 — 14:50 (v3.4, AUTO_TRADE_ENABLED=true 시에만 의미 있음)
+    scheduler.add_job(run_force_close, "cron", hour=14, minute=50, id="force_close")
+
     scheduler.start()
     logger.info("스케줄 등록 완료")
     logger.info("  아침봇: 매일 08:30 / 07:59")
@@ -148,6 +184,12 @@ async def main():
     logger.info("  마감봇: 매일 18:30")
     logger.info("  수익률배치: 매일 18:45 (Phase 3)")
     logger.info("  주간리포트: 매주 월요일 08:45 (Phase 3)")
+    if config.AUTO_TRADE_ENABLED:
+        logger.info(
+            f"  강제청산: 매일 14:50 (Phase 4, 모드: {config.TRADING_MODE}) ✅ 활성"
+        )
+    else:
+        logger.info("  강제청산: 매일 14:50 (Phase 4) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
 
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()

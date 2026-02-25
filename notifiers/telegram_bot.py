@@ -18,6 +18,9 @@ notifiers/telegram_bot.py
         섹터 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
 - v3.2: format_realtime_alert — "gap_up" 소스 배지 추가 (⚡ 갭상승)
         format_closing_report — T5 마감강도/T6 횡보급증/T3 시총자금유입 섹션 추가
+- v3.4: Phase 4 — 자동매매 알림 포맷 추가
+        format_trade_executed() — 모의/실전 매수 체결 알림
+        format_trade_closed()   — 포지션 청산 알림 (익절/손절/강제청산)
 """
 
 import asyncio
@@ -427,6 +430,89 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
         f"거래량(1분): 전일 대비 {analysis['거래량배율']:.1f}배\n\n"
         f"{이모지} AI 판단: <b>{판단}</b>\n"
         f"이유: {ai_result.get('이유', 'N/A')}"
+    )
+
+
+def format_trade_executed(
+    ticker: str, name: str,
+    buy_price: int, qty: int, total_amt: int,
+    source: str, mode: str = "VTS"
+) -> str:
+    """
+    자동매수 체결 알림 포맷 (Phase 4, v3.4 신규)
+
+    Args:
+        ticker:    종목코드
+        name:      종목명
+        buy_price: 매수가 (원)
+        qty:       체결 수량
+        total_amt: 총 매수 금액 (원)
+        source:    감지 소스 (volume / rate / websocket / gap_up)
+        mode:      "VTS"(모의) / "REAL"(실전)
+    """
+    import config
+    mode_badge = "📋 모의투자" if mode == "VTS" else "💰 실전투자"
+    source_badge = (
+        "⚡ 갭상승모멘텀" if source == "gap_up"
+        else "📊 거래량포착" if source == "volume"
+        else "🎯 워치리스트" if source == "websocket"
+        else "📈 등락률포착"
+    )
+    tp1 = round(buy_price * (1 + config.TAKE_PROFIT_1 / 100))
+    tp2 = round(buy_price * (1 + config.TAKE_PROFIT_2 / 100))
+    sl  = round(buy_price * (1 + config.STOP_LOSS / 100))
+
+    return (
+        f"📈 <b>자동매수 체결</b>  {mode_badge}\n"
+        f"종목: <b>{name}</b> ({ticker})\n"
+        f"체결가: {buy_price:,}원  수량: {qty}주\n"
+        f"총 매수금액: {total_amt:,}원\n"
+        f"감지 트리거: {source_badge}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"목표1: <b>{tp1:,}원</b> (+{config.TAKE_PROFIT_1:.0f}%)\n"
+        f"목표2: <b>{tp2:,}원</b> (+{config.TAKE_PROFIT_2:.0f}%)\n"
+        f"손절:  <b>{sl:,}원</b> ({config.STOP_LOSS:.0f}%)"
+    )
+
+
+def format_trade_closed(closed: dict) -> str:
+    """
+    포지션 청산 알림 포맷 (Phase 4, v3.4 신규)
+
+    Args:
+        closed: position_manager.close_position() 반환값
+                {ticker, name, buy_price, sell_price, qty,
+                 profit_rate, profit_amount, reason, mode}
+    """
+    ticker        = closed.get("ticker", "")
+    name          = closed.get("name", ticker)
+    buy_price     = closed.get("buy_price", 0)
+    sell_price    = closed.get("sell_price", 0)
+    qty           = closed.get("qty", 0)
+    profit_rate   = closed.get("profit_rate", 0.0)
+    profit_amount = closed.get("profit_amount", 0)
+    reason        = closed.get("reason", "unknown")
+    mode          = closed.get("mode", "VTS")
+
+    mode_badge = "📋 모의투자" if mode == "VTS" else "💰 실전투자"
+
+    reason_map = {
+        "take_profit_1": ("✅", "1차 익절"),
+        "take_profit_2": ("🏆", "2차 익절"),
+        "stop_loss":     ("🔴", "손절"),
+        "force_close":   ("⏰", "강제청산"),
+        "manual":        ("🖐", "수동청산"),
+    }
+    emoji, label = reason_map.get(reason, ("❓", reason))
+    sign = "+" if profit_rate >= 0 else ""
+    amt_sign = "+" if profit_amount >= 0 else ""
+
+    return (
+        f"{emoji} <b>포지션 청산</b>  {mode_badge}  [{label}]\n"
+        f"종목: <b>{name}</b> ({ticker})\n"
+        f"매수가: {buy_price:,}원 → 매도가: {sell_price:,}원  ({qty}주)\n"
+        f"수익률: <b>{sign}{profit_rate:.2f}%</b>  "
+        f"손익: <b>{amt_sign}{profit_amount:,}원</b>"
     )
 
 

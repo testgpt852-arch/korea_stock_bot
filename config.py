@@ -14,6 +14,10 @@ Railway: 서버 Variables에 입력
         → signal_analyzer가 price_data["by_sector"]에서 실제 등락률 상위 종목을 동적으로 조회
         ※ 이 파일에는 업종명 키워드만 관리. 종목명은 절대 직접 쓰지 않는다.
 - v2.4: POLL_INTERVAL_SEC 추가 — 장중봇 REST 폴링 방식 전환 (전 종목 커버)
+- v3.4: Phase 4 — 자동매매(모의투자) 설정 추가
+        TRADING_MODE, AUTO_TRADE_ENABLED
+        KIS VTS 인증 (실전과 앱키 분리)
+        포지션 관리 상수 (POSITION_MAX, BUY_AMOUNT, TAKE_PROFIT, STOP_LOSS 등)
 """
 
 import os
@@ -57,6 +61,14 @@ def validate_env():
 
     if not KIS_APP_KEY or not KIS_APP_SECRET or not KIS_ACCOUNT_NO:
         print(f"[config] KIS 미설정 — 장중봇 비활성 (4단계)")
+
+    if AUTO_TRADE_ENABLED and TRADING_MODE == "VTS":
+        if not KIS_VTS_APP_KEY or not KIS_VTS_APP_SECRET or not KIS_VTS_ACCOUNT_NO:
+            print("[config] ⚠️  AUTO_TRADE_ENABLED=true이지만 KIS_VTS_* 환경변수 미설정"
+                  " — 자동매매 비활성화됨")
+
+    if AUTO_TRADE_ENABLED and TRADING_MODE == "REAL":
+        print("[config] ⚠️  TRADING_MODE=REAL: 실전 자동매매 활성화됨! 신중하게 운영할 것.")
 
 
 # ── 장중봇 급등 감지 임계값 (v2.8: 델타 기준으로 전환) ──────────
@@ -115,6 +127,39 @@ FUND_INFLOW_TOP_N      = 7     # 시총 대비 자금유입 상위 N 종목
 # Railway 배포 환경에서 재시작 시에도 유지되려면 /data 마운트 권장.
 # Railway Volume 미사용 시 /tmp/bot_data (재시작 시 초기화 주의).
 DB_PATH = os.environ.get("DB_PATH", "/data/bot_db.sqlite")
+
+# ── Phase 4: 자동매매(모의투자) 설정 (v3.4 신규) ─────────────
+# 매매 모드: "VTS"=모의투자 / "REAL"=실전 (REAL 사용 시 극도로 주의)
+TRADING_MODE = os.environ.get("TRADING_MODE", "VTS")
+
+# 자동매매 활성화 플래그 (기본 False — 명시적으로 "true" 설정 시에만 활성)
+# Railway Variables: AUTO_TRADE_ENABLED=true (소문자 필수)
+AUTO_TRADE_ENABLED = os.environ.get("AUTO_TRADE_ENABLED", "false").lower() == "true"
+
+# VTS 모의투자 전용 KIS 앱키/계좌 (실전 키와 분리 권장)
+# 미설정 시 실전 키(KIS_APP_KEY/SECRET)를 VTS 토큰 발급에도 사용
+# (KIS 모의투자 앱키가 실전 앱키와 다른 경우 반드시 별도 설정)
+KIS_VTS_APP_KEY     = os.environ.get("KIS_VTS_APP_KEY",    os.environ.get("KIS_APP_KEY"))
+KIS_VTS_APP_SECRET  = os.environ.get("KIS_VTS_APP_SECRET", os.environ.get("KIS_APP_SECRET"))
+KIS_VTS_ACCOUNT_NO  = os.environ.get("KIS_VTS_ACCOUNT_NO", os.environ.get("KIS_ACCOUNT_NO"))
+KIS_VTS_ACCOUNT_CODE = os.environ.get("KIS_VTS_ACCOUNT_CODE", "01")
+
+# 포지션 관리 파라미터
+POSITION_MAX        = int(os.environ.get("POSITION_MAX", "3"))          # 동시 보유 한도 (종목 수)
+POSITION_BUY_AMOUNT = int(os.environ.get("POSITION_BUY_AMOUNT", "1000000"))  # 1회 매수 금액 (원)
+
+# 익절/손절 기준 (%)
+TAKE_PROFIT_1   = 5.0    # 1차 익절 기준 — 도달 시 절반 매도 or 전량 매도
+TAKE_PROFIT_2   = 10.0   # 2차 익절 기준 — 전량 매도
+STOP_LOSS       = -3.0   # 손절 기준 — 전량 매도
+DAILY_LOSS_LIMIT = -3.0  # 당일 누적 손실 한도 (%) — 초과 시 신규 매수 중단
+
+# 매수 진입 등락률 범위 (이 범위를 벗어나면 매수 안 함)
+MIN_ENTRY_CHANGE = 3.0   # 최소 등락률 (%) — 이하면 진입 신호 약함
+MAX_ENTRY_CHANGE = 10.0  # 최대 등락률 (%) — 초과 시 이미 늦음, 추격 금지
+
+# 강제 청산 시각 (HH:MM, KST) — 미청산 포지션 전부 시장가 매도
+FORCE_CLOSE_TIME = "14:50"
 
 # ── 스케줄 시간 ──────────────────────────────────────────────
 TOKEN_REFRESH_TIME = "07:00"

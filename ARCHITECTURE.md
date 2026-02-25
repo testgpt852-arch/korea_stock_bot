@@ -90,9 +90,10 @@ korea_stock_bot/
 │   └── weekly_report.py     ← [v3.3] 주간 성과 리포트 (월요일 08:45)
 │
 ├── kis/
-│   ├── auth.py              ← 토큰 발급·갱신
+│   ├── auth.py              ← 토큰 발급·갱신 (실전 + v3.4 VTS 분리)
 │   ├── websocket_client.py  ← 향후 확장용 보존 (현재 미사용)
-│   └── rest_client.py       ← 현재가, 거래량 순위 조회
+│   ├── rest_client.py       ← 현재가, 거래량 순위 조회
+│   └── order_client.py      ← [v3.4] 모의/실전 매수·매도·잔고 (Phase 4 신규)
 │
 └── utils/
     ├── logger.py
@@ -102,9 +103,12 @@ korea_stock_bot/
     └── rate_limiter.py      ← [v3.2] KIS API Rate Limiter (초당 19회 제한)
 │
 └── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
-    ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
-    ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
-    └── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
+│   ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
+│   ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
+│   └── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
+│
+└── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
+    └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록
 ```
 
 ---
@@ -134,6 +138,13 @@ utils/rate_limiter.py     → kis/rest_client (API 호출 보호)
 analyzers/closing_strength.py → reports/closing_report (T5 마감 강도)
 analyzers/volume_flat.py  → reports/closing_report (T6 횡보 거래량)
 analyzers/fund_inflow_analyzer.py → reports/closing_report (T3 시총 자금유입)
+kis/order_client.py       → kis/auth (get_vts_access_token / get_access_token)
+kis/order_client.py       → utils/rate_limiter (API 호출 보호)
+traders/position_manager.py → tracking/db_schema (get_conn)
+traders/position_manager.py → kis/order_client (buy, sell, get_current_price)
+traders/position_manager.py → notifiers/telegram_bot (format_trade_executed, format_trade_closed)
+traders/position_manager.py ← reports/realtime_alert (can_buy, open_position, check_exit)
+traders/position_manager.py ← main.py (force_close_all 14:50 cron)
 tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
 tracking/alert_recorder.py        ← reports/realtime_alert (유일 호출처)
 tracking/performance_tracker.py   ← main.py (18:45 cron), reports/weekly_report
@@ -178,6 +189,11 @@ graph TD
         KA["auth.py"]
         KR["rest_client\n거래량순위 실시간"]
         KW["websocket_client\n향후 확장용"]
+        KO["order_client\n매수·매도·잔고 (v3.4)"]
+    end
+
+    subgraph "🤖 traders/"
+        PM["position_manager\n진입·청산·조건검사 (v3.4)"]
     end
 
     SM["state_manager"]
@@ -241,10 +257,27 @@ graph TD
                  Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
                  × CONFIRM_CANDLES(2)회 연속 충족 → 알림
                → 알림 포맷: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착)
+               [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true 시:
+               position_manager.check_exit() — 익절/손절 조건 검사
+               → TAKE_PROFIT_1(+5%) / TAKE_PROFIT_2(+10%) / STOP_LOSS(-3%) 충족 시
+                 order_client.sell() → position_manager.close_position() → 텔레그램 청산 알림
+
            → can_alert() 쿨타임 확인
            → 1차 알림 즉시 발송
            → ai_analyzer.analyze_spike() 비동기
            → 2차 AI 알림
+           [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true + AI판단=='진짜급등' 시:
+           등락률 3~10% 구간 필터 → position_manager.can_buy() 검사
+           → order_client.buy() 매수 → position_manager.open_position() DB 기록
+           → 텔레그램 매수 체결 알림
+           ※ 10% 초과 종목: 추격 금지, 패스
+
+14:50  ─── 강제청산 (Phase 4, v3.4) ─────────────────────────
+       AUTO_TRADE_ENABLED=true 일 때만 실행
+       position_manager.force_close_all()
+       → positions 테이블에서 미청산 전종목 시장가 매도
+       → trading_history UPDATE (close_reason="force_close")
+       → 텔레그램 청산 알림 발송
 
 15:30  ─── 장중봇 종료 ──────────────────────────────────────
        _poll_task.cancel()
@@ -325,8 +358,22 @@ KIS_RATE_LIMIT_REAL    = 19     # 초당 최대 호출 횟수 (실전)
 KIS_RATE_LIMIT_VIRTUAL = 2      # 초당 최대 호출 횟수 (모의)
 WS_RECONNECT_DELAY     = 5      # v3.2: 30초 → 5초 (무한 재연결 간격)
 
-# v3.3: Phase 3 DB
-DB_PATH = "/data/bot_db.sqlite"  # 환경변수 DB_PATH 로 오버라이드 가능
+# v3.4: Phase 4 자동매매 설정
+TRADING_MODE         = "VTS"          # "VTS"=모의 / "REAL"=실전 (환경변수 TRADING_MODE)
+AUTO_TRADE_ENABLED   = False          # 기본 False (환경변수 AUTO_TRADE_ENABLED="true")
+KIS_VTS_APP_KEY      = ...            # 환경변수 (없으면 KIS_APP_KEY 폴백)
+KIS_VTS_APP_SECRET   = ...            # 환경변수 (없으면 KIS_APP_SECRET 폴백)
+KIS_VTS_ACCOUNT_NO   = ...            # 환경변수 (없으면 KIS_ACCOUNT_NO 폴백)
+KIS_VTS_ACCOUNT_CODE = "01"
+POSITION_MAX         = 3              # 동시 보유 한도 (환경변수 POSITION_MAX)
+POSITION_BUY_AMOUNT  = 1_000_000      # 1회 매수 금액 원 (환경변수 POSITION_BUY_AMOUNT)
+TAKE_PROFIT_1        = 5.0            # 1차 익절 기준 (%)
+TAKE_PROFIT_2        = 10.0           # 2차 익절 기준 (%)
+STOP_LOSS            = -3.0           # 손절 기준 (%)
+DAILY_LOSS_LIMIT     = -3.0           # 당일 누적 손실 한도 (%)
+MIN_ENTRY_CHANGE     = 3.0            # 매수 진입 최소 등락률 (%)
+MAX_ENTRY_CHANGE     = 10.0           # 추격 금지 상한 등락률 (%)
+FORCE_CLOSE_TIME     = "14:50"        # 강제 청산 시각
 
 # v3.2: Phase 2 트리거 임계값
 GAP_UP_MIN             = 1.0    # T2 갭업 최소 비율 (%)
@@ -363,8 +410,24 @@ FUND_INFLOW_TOP_N      = 7
  "institutional": list, "short_selling": list,
  "by_name": dict, "by_code": dict, "by_sector": dict}
 
-# ai_analyzer.analyze_spike() → dict
-{"판단": str, "이유": str}   # 진짜급등 | 작전주의심 | 판단불가
+# order_client.buy() → dict
+{"success": bool, "order_no": str|None, "ticker": str, "name": str,
+ "qty": int, "buy_price": int, "total_amt": int, "mode": str, "message": str}
+
+# order_client.sell() → dict
+{"success": bool, "order_no": str|None, "ticker": str, "name": str,
+ "qty": int, "sell_price": int, "mode": str, "message": str}
+
+# order_client.get_balance() → dict
+{"holdings": list[{ticker,name,qty,avg_price,current_price,profit_rate}],
+ "available_cash": int, "total_eval": int, "total_profit": float}
+
+# position_manager.can_buy() → (bool, str)
+(True, "OK") | (False, "사유 메시지")
+
+# position_manager.close_position() → dict | None
+{"ticker": str, "name": str, "buy_price": int, "sell_price": int,
+ "qty": int, "profit_rate": float, "profit_amount": int, "reason": str, "mode": str}
 ```
 
 ### KIS REST API 구현 현황
@@ -377,6 +440,15 @@ FHPST01710000    get_volume_ranking()     거래량 순위 (대형주·테마 �
 FHPST01700000    get_rate_ranking()       등락률 순위 (v2.9 신규 / v3.0 개편)
                                           코스닥: 모든 노이즈 제외, 등락률 0~10%
                                           코스피: 중형+소형 합산, 등락률 0~10%
+
+[order_client.py — v3.4 신규]
+VTTC0012U/TTTC0012U  buy()              시장가 매수 (VTS/REAL)
+VTTC0011U/TTTC0011U  sell()             시장가 매도 (VTS/REAL)
+VTTC8434R/TTTC8434R  get_balance()      잔고 조회  (VTS/REAL)
+
+[Base URL 분기]
+REAL: https://openapi.koreainvestment.com:9443
+VTS:  https://openapivts.koreainvestment.com:29443
 ```
 
 ### 데이터 소스 선택 기준
@@ -437,6 +509,19 @@ gemini-2.5-flash   20회/일   ❌ 부족
 20. performance_tracker.run_batch()는 main.py 18:45 cron에서만 호출
     (장중 직접 호출 금지 — pykrx 당일 미확정 데이터 방지)
 21. DB 파일 경로는 config.DB_PATH 단일 상수로 관리 (경로 하드코딩 금지)
+
+[Phase 4 자동매매 규칙 — v3.4 추가]
+22. kis/order_client.py는 주문·잔고 조회만 담당 — 포지션 관리·알림·DB 기록 금지
+    모든 order 함수는 동기(sync) 함수 — asyncio.run() 내부 호출 금지
+23. traders/position_manager.py는 포지션 관리만 담당 — 급등 감지·AI 분석·텔레그램 직접 포맷 생성 금지
+    모든 함수는 동기(sync) — realtime_alert / main.py 에서 run_in_executor 경유 호출
+24. position_manager.can_buy() / open_position() → realtime_alert._send_ai_followup() 에서만 호출
+25. position_manager.check_exit() → realtime_alert._poll_loop() 매 사이클에서만 호출
+26. position_manager.force_close_all() → main.py 14:50 cron에서만 호출
+27. TRADING_MODE="REAL" 전환 시 반드시 KIS_APP_KEY/SECRET와 별개의 실전 계좌 키 사용
+    VTS 테스트 없이 REAL 모드 운영 금지
+28. AUTO_TRADE_ENABLED 는 Railway Variables에서 명시적 "true" 설정 시에만 활성
+    기본값 false — 의도치 않은 자동매매 방지
 ```
 
 ---
@@ -480,7 +565,20 @@ gemini-2.5-flash   20회/일   ❌ 부족
 | v3.0 | 2026-02-25 | **등락률 순위 필터 전면 개편 — 초기 급등 조기 포착** |
 | v3.1 | 2026-02-25 | **방법B+A 하이브리드 — WebSocket 고정구독 + REST 폴링 단축** |
 | v3.2 | 2026-02-26 | **Phase 1+2 병렬 업그레이드 (python-kis + prism-insight 흡수)** |
-| v3.3 | 2026-02-26 | **Phase 3 — DB + 성과 추적 시스템 (prism-insight analysis_performance_tracker 흡수)** |
+| v3.4 | 2026-02-26 | **Phase 4 — 자동매매(모의투자) 연동** |
+|      |            | kis/order_client.py 신규: VTS/REAL 시장가 매수·매도·잔고조회 |
+|      |            | kis/auth.py: get_vts_access_token() 추가 (실전 토큰과 완전 분리) |
+|      |            | traders/position_manager.py 신규: 포지션 진입·청산·조건 검사 |
+|      |            | tracking/db_schema.py: positions 테이블 추가 (오픈 포지션 전용) |
+|      |            | trading_history: profit_amount/close_reason 컬럼 추가 |
+|      |            | config.py: TRADING_MODE/AUTO_TRADE_ENABLED/POSITION_MAX/BUY_AMOUNT/TAKE_PROFIT/STOP_LOSS 등 추가 |
+|      |            | reports/realtime_alert.py: _send_ai_followup()에 자동매매 필터 체인 추가 |
+|      |            | _poll_loop()에 position_manager.check_exit() 추가 |
+|      |            | _handle_trade_signal() / _check_positions() / _handle_exit_results() 신규 |
+|      |            | notifiers/telegram_bot.py: format_trade_executed() / format_trade_closed() 추가 |
+|      |            | main.py: 14:50 run_force_close() 스케줄 추가 |
+|      |            | 절대 금지 규칙 22~28 추가 (Phase 4 자동매매 규칙) |
+|      |            | 환경변수: TRADING_MODE/AUTO_TRADE_ENABLED/POSITION_MAX/POSITION_BUY_AMOUNT/KIS_VTS_* |
 |      |            | tracking/db_schema.py 신규: SQLite DDL (alert_history, performance_tracker, trading_history, trigger_stats 뷰) |
 |      |            | tracking/alert_recorder.py 신규: 장중봇 알림 발송 시 DB 기록 (동기 함수) |
 |      |            | tracking/performance_tracker.py 신규: 1/3/7일 수익률 배치 + 주간 통계 조회 |
@@ -542,6 +640,17 @@ KIS_ACCOUNT_CODE=01
 # Phase 3: DB 경로 (선택 — 미설정 시 /data/bot_db.sqlite)
 # Railway Volume 마운트 시 /data 경로 권장 (재시작 후에도 데이터 유지)
 DB_PATH=/data/bot_db.sqlite
+
+# Phase 4: 자동매매 (선택 — 미설정 시 자동매매 비활성)
+TRADING_MODE=VTS                    # VTS=모의투자(기본) / REAL=실전 (극도 주의)
+AUTO_TRADE_ENABLED=false            # true로 변경 시 자동매매 활성화
+POSITION_MAX=3                      # 동시 보유 한도 (기본 3)
+POSITION_BUY_AMOUNT=1000000         # 1회 매수 금액 (원, 기본 100만원)
+# VTS 모의투자 전용 앱키 (미설정 시 KIS_APP_KEY/SECRET 폴백)
+# KIS 모의투자 앱키가 실전과 다른 경우 반드시 별도 설정
+KIS_VTS_APP_KEY=
+KIS_VTS_APP_SECRET=
+KIS_VTS_ACCOUNT_NO=
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*
