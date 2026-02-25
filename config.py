@@ -13,6 +13,7 @@ Railway: 서버 Variables에 입력
         COMMODITY_KR_INDUSTRY 신규 추가
         → signal_analyzer가 price_data["by_sector"]에서 실제 등락률 상위 종목을 동적으로 조회
         ※ 이 파일에는 업종명 키워드만 관리. 종목명은 절대 직접 쓰지 않는다.
+- v2.4: POLL_INTERVAL_SEC 추가 — 장중봇 REST 폴링 방식 전환 (전 종목 커버)
 """
 
 import os
@@ -59,15 +60,21 @@ def validate_env():
 
 
 # ── 장중봇 급등 감지 임계값 ──────────────────────────────────
-VOLUME_SPIKE_RATIO = 10
-PRICE_CHANGE_MIN   = 3.0
-CONFIRM_CANDLES    = 2
+VOLUME_SPIKE_RATIO = 10      # 전일 총거래량 대비 당일 누적거래량 (%)
+PRICE_CHANGE_MIN   = 3.0     # 급등 감지 최소 등락률 (%)
+CONFIRM_CANDLES    = 2       # 연속 충족 폴링 횟수 (허위신호 방지)
 MARKET_CAP_MIN     = 30_000_000_000
+
+# ── 장중봇 REST 폴링 간격 (v2.4 추가) ───────────────────────
+# pykrx REST 전 종목 조회 주기 (초)
+# 60초 × CONFIRM_CANDLES(2) = 조건 충족 후 최대 2분 내 알림
+# KIS WebSocket 미사용 → 차단 위험 없음, 전 종목(코스피+코스닥) 커버
+POLL_INTERVAL_SEC  = 60
 
 # ── 중복 알림 방지 ───────────────────────────────────────────
 ALERT_COOLTIME_MIN = 30
 
-# ── KIS WebSocket ────────────────────────────────────────────
+# ── KIS WebSocket (websocket_client.py 재연결 로직용 — 장중봇과 무관) ─
 WS_MAX_RECONNECT   = 3
 WS_RECONNECT_DELAY = 30
 
