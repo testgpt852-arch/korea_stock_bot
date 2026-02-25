@@ -105,7 +105,9 @@ korea_stock_bot/
 └── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
 │   ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
 │   ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
-│   └── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
+│   ├── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
+│   ├── ai_context.py        ← [v3.5] AI 프롬프트 컨텍스트 조회 전담 (Phase 5 신규)
+│   └── principles_extractor.py ← [v3.5] 매매 원칙 추출 배치 (Phase 5 신규)
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
     └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록
@@ -266,11 +268,26 @@ graph TD
            → 1차 알림 즉시 발송
            → ai_analyzer.analyze_spike() 비동기
            → 2차 AI 알림
+           [v3.5 Phase 5 추가] AI 판단 전 컨텍스트 주입:
+           ai_context.build_spike_context(ticker, source) — 동기, run_in_executor
+           → trigger_stats 뷰: 트리거별 7일 승률 (tracked >= 5건)
+           → trading_history: 해당 종목 과거 거래 최대 3건 이력
+           → trading_principles: confidence='high' 원칙 최대 3개
+           → ai_analyzer.analyze_spike(analysis, ai_context=ctx) 에 주입
+           → Gemma가 과거 데이터를 참고해 판단 정확도 향상
+
            [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true + AI판단=='진짜급등' 시:
            등락률 3~10% 구간 필터 → position_manager.can_buy() 검사
            → order_client.buy() 매수 → position_manager.open_position() DB 기록
            → 텔레그램 매수 체결 알림
            ※ 10% 초과 종목: 추격 금지, 패스
+
+03:00  ─── 매매 원칙 추출 (Phase 5, v3.5, 매주 일요일) ───────────
+       principles_extractor.run_weekly_extraction()
+       → trading_history 집계 → trigger_source별 승률 계산
+       → trading_principles 신규 INSERT / 기존 UPDATE
+       → win_rate >= 65% → confidence='high' (AI 프롬프트 주입 대상)
+       → 텔레그램 원칙 DB 업데이트 요약 알림
 
 14:50  ─── 강제청산 (Phase 4, v3.4) ─────────────────────────
        AUTO_TRADE_ENABLED=true 일 때만 실행
@@ -522,6 +539,15 @@ gemini-2.5-flash   20회/일   ❌ 부족
     VTS 테스트 없이 REAL 모드 운영 금지
 28. AUTO_TRADE_ENABLED 는 Railway Variables에서 명시적 "true" 설정 시에만 활성
     기본값 false — 의도치 않은 자동매매 방지
+
+[Phase 5 AI 학습 피드백 규칙 — v3.5 추가]
+29. tracking/ai_context.py는 DB 조회 + 문자열 반환만 담당
+    AI API 호출·텔레그램 발송·매수 로직 절대 금지
+    모든 함수는 동기(sync) — realtime_alert에서 run_in_executor 경유 호출
+30. tracking/principles_extractor.py는 trading_principles 갱신 배치만 담당
+    AI API 호출·텔레그램 직접 발송·매수 로직 절대 금지
+    main.py 매주 일요일 03:00 cron에서만 호출
+    데이터 부족(total < 5건) 시 원칙 등록 건너뜀 — 신뢰도 없는 원칙 방지
 ```
 
 ---
@@ -566,6 +592,14 @@ gemini-2.5-flash   20회/일   ❌ 부족
 | v3.1 | 2026-02-25 | **방법B+A 하이브리드 — WebSocket 고정구독 + REST 폴링 단축** |
 | v3.2 | 2026-02-26 | **Phase 1+2 병렬 업그레이드 (python-kis + prism-insight 흡수)** |
 | v3.4 | 2026-02-26 | **Phase 4 — 자동매매(모의투자) 연동** |
+| v3.5 | 2026-02-26 | **날짜버그 수정 + Phase 5 — AI 학습 피드백 루프** |
+|      |            | utils/date_utils.py: get_today() KST 타임존 명시 (Railway UTC 서버 버그 수정) |
+|      |            | tracking/ai_context.py 신규: AI 프롬프트 컨텍스트 조회 (트리거 승률+종목 이력+원칙) |
+|      |            | tracking/principles_extractor.py 신규: 매매 원칙 추출 배치 (매주 일요일 03:00) |
+|      |            | tracking/db_schema.py: trading_principles 테이블 추가 |
+|      |            | analyzers/ai_analyzer.py: analyze_spike() ai_context 파라미터 추가 |
+|      |            | reports/realtime_alert.py: _send_ai_followup()에서 ai_context 빌드 후 주입 |
+|      |            | main.py: run_principles_extraction() 추가, 일요일 03:00 스케줄 등록 |
 |      |            | kis/order_client.py 신규: VTS/REAL 시장가 매수·매도·잔고조회 |
 |      |            | kis/auth.py: get_vts_access_token() 추가 (실전 토큰과 완전 분리) |
 |      |            | traders/position_manager.py 신규: 포지션 진입·청산·조건 검사 |
