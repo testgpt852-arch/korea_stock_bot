@@ -17,8 +17,12 @@ from datetime import datetime
 from utils.logger import logger
 from utils.date_utils import get_today, get_prev_trading_day, fmt_kr, is_market_open
 import collectors.price_collector as price_collector
-import analyzers.theme_analyzer   as theme_analyzer
-import analyzers.ai_analyzer      as ai_analyzer
+import analyzers.theme_analyzer        as theme_analyzer
+import analyzers.ai_analyzer           as ai_analyzer
+import analyzers.closing_strength      as closing_strength    # v3.2: T5 마감 강도
+import analyzers.volume_flat           as volume_flat         # v3.2: T6 횡보 거래량
+import analyzers.fund_inflow_analyzer  as fund_inflow_analyzer  # v3.2: T3 시총 자금유입
+import utils.watchlist_state           as watchlist_state     # v3.2: 마감봇→장중봇 워치리스트
 import notifiers.telegram_bot     as telegram_bot
 
 
@@ -165,3 +169,55 @@ def _judge_volatility(price_result: dict) -> str:
     if rate >= 2.0:   return "고변동"
     elif rate >= 1.0: return "중변동"
     else:             return "저변동"   # v6.0 RULE 4: 순환매 에너지 없음
+
+def _update_watchlist_from_closing(
+    closing_strength_result: list,
+    volume_flat_result: list,
+    price_result: dict,
+) -> None:
+    """
+    마감봇 T5/T6 결과로 내일 워치리스트 보강 (v3.2 신규)
+    아침봇(morning_report)이 생성한 워치리스트에 마감봇 발견 종목을 추가한다.
+
+    [우선순위]
+    - T5 마감 강도 상위 종목: 우선순위 5 (강봉 → 내일 추가 상승 가능성)
+    - T6 횡보 거래량 상위 종목: 우선순위 6 (세력 매집 패턴)
+    단, 워치리스트 한도(WS_WATCHLIST_MAX=40) 초과 시 기존 항목 유지 우선
+    """
+    import config
+    current = watchlist_state.get_watchlist()
+    additions = {}
+
+    # T5 마감 강도 종목 추가
+    for s in closing_strength_result:
+        ticker = s["종목코드"]
+        if ticker not in current and len(current) + len(additions) < config.WS_WATCHLIST_MAX:
+            by_code = price_result.get("by_code", {})
+            prdy_vol = by_code.get(ticker, {}).get("거래량", 1)
+            additions[ticker] = {
+                "종목명":   s["종목명"],
+                "전일거래량": prdy_vol,
+                "우선순위":   5,
+            }
+
+    # T6 횡보 거래량 종목 추가
+    for s in volume_flat_result:
+        ticker = s["종목코드"]
+        if ticker not in current and ticker not in additions:
+            if len(current) + len(additions) < config.WS_WATCHLIST_MAX:
+                additions[ticker] = {
+                    "종목명":   s["종목명"],
+                    "전일거래량": s.get("거래량", 1),
+                    "우선순위":   6,
+                }
+
+    if additions:
+        merged = {**current, **additions}
+        watchlist_state.set_watchlist(merged)
+        logger.info(
+            f"[closing] 마감봇 워치리스트 보강: "
+            f"T5 {len(closing_strength_result)}종목 + T6 {len(volume_flat_result)}종목 "
+            f"→ {len(additions)}종목 추가 (총 {len(merged)}종목)"
+        )
+    else:
+        logger.info("[closing] 워치리스트 추가 없음 (한도 초과 또는 이미 포함)")

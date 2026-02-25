@@ -16,6 +16,8 @@ notifiers/telegram_bot.py
 - v2.9: format_realtime_alert/ai — 감지소스 배지 추가 (거래량포착/등락률포착)
 - v3.1: format_realtime_alert/ai — "websocket" 소스 배지 추가 (🎯 워치리스트)
         섹터 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
+- v3.2: format_realtime_alert — "gap_up" 소스 배지 추가 (⚡ 갭상승)
+        format_closing_report — T5 마감강도/T6 횡보급증/T3 시총자금유입 섹션 추가
 """
 
 import asyncio
@@ -349,6 +351,38 @@ def format_closing_report(report: dict) -> str:
     else:
         lines.append("  상한가·급등 테마 데이터 없음")
 
+    # ── [v3.2] T5 마감 강도 상위 ────────────────────────────
+    closing_strength_result = report.get("closing_strength", [])
+    if closing_strength_result:
+        lines.append(f"\n💪 <b>마감강도 상위 (T5) — 내일 추가 상승 후보</b>")
+        for s in closing_strength_result[:5]:
+            vol_str = f"+{s['거래량증가율']:.0f}%거래량" if s.get("거래량증가율", 0) > 0 else ""
+            lines.append(
+                f"  • <b>{s['종목명']}</b>  강도:{s['마감강도']:.2f}  "
+                f"{s['등락률']:+.1f}%  {vol_str}"
+            )
+
+    # ── [v3.2] T6 횡보 거래량 급증 ───────────────────────────
+    volume_flat_result = report.get("volume_flat", [])
+    if volume_flat_result:
+        lines.append(f"\n🔮 <b>횡보 거래량 급증 (T6) — 세력 매집 의심</b>")
+        for s in volume_flat_result[:5]:
+            lines.append(
+                f"  • <b>{s['종목명']}</b>  등락:{s['등락률']:+.1f}%  "
+                f"거래량+{s['거래량증가율']:.0f}%"
+            )
+
+    # ── [v3.2] T3 시총 대비 자금 유입 ────────────────────────
+    fund_inflow_result = report.get("fund_inflow", [])
+    if fund_inflow_result:
+        lines.append(f"\n💰 <b>시총 대비 집중 자금 유입 (T3)</b>")
+        for s in fund_inflow_result[:5]:
+            cap_str = f"{s['시가총액']//100_000_000:,}억"
+            lines.append(
+                f"  • <b>{s['종목명']}</b>  자금비율:{s['자금유입비율']:.2f}%  "
+                f"시총:{cap_str}  {s['등락률']:+.1f}%"
+            )
+
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ 투자 판단은 본인 책임. 참고용 정보입니다.")
 
@@ -362,7 +396,8 @@ def format_closing_report(report: dict) -> str:
 def format_realtime_alert(analysis: dict) -> str:
     직전대비 = analysis.get("직전대비", 0.0)
     소스배지  = (
-        "📊 거래량포착" if analysis.get("감지소스") == "volume"
+        "⚡ 갭상승모멘텀" if analysis.get("감지소스") == "gap_up"
+        else "📊 거래량포착" if analysis.get("감지소스") == "volume"
         else "🎯 워치리스트" if analysis.get("감지소스") == "websocket"
         else "📈 등락률포착"
     )
@@ -380,7 +415,8 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
     이모지 = {"진짜급등": "✅", "작전주의심": "⚠️", "판단불가": "❓"}.get(판단, "❓")
     직전대비 = analysis.get("직전대비", 0.0)
     소스배지  = (
-        "📊 거래량포착" if analysis.get("감지소스") == "volume"
+        "⚡ 갭상승모멘텀" if analysis.get("감지소스") == "gap_up"
+        else "📊 거래량포착" if analysis.get("감지소스") == "volume"
         else "🎯 워치리스트" if analysis.get("감지소스") == "websocket"
         else "📈 등락률포착"
     )

@@ -23,10 +23,14 @@ KIS REST API 호출 전담
           등락률 범위 0~10% (FID_RSFL_RATE2="10") — 초기 급등 조기 포착
           FID_COND_MRKT_DIV_CODE 항상 "J" 고정 (rate API도 J 통일)
           내부 헬퍼 _fetch_rate_once() 분리
+- v3.2:   [P1-2] KIS API Rate Limiter 적용 (python-kis 스펙: 실전 초당 19회)
+          모든 API 호출 전 kis_rate_limiter.acquire() 호출
+          get_stock_price() 응답에 시가(stck_oprc) 필드 추가 (T2 갭 상승 지원)
 """
 
 import requests
 from utils.logger import logger
+from utils.rate_limiter import kis_rate_limiter
 from kis.auth import get_access_token
 import config
 
@@ -41,9 +45,14 @@ _MARKET_INPUT_ISCD = {
 
 
 def get_stock_price(ticker: str) -> dict:
+    """
+    단일 종목 현재가 조회
+    v3.2: rate_limiter 적용 + 시가(stck_oprc) 추가 (T2 갭 상승 감지용)
+    """
     token = get_access_token()
     if not token:
         return {}
+    kis_rate_limiter.acquire()   # v3.2: Rate Limit 보호
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
         "Authorization":  f"Bearer {token}",
@@ -62,6 +71,7 @@ def get_stock_price(ticker: str) -> dict:
         out = resp.json().get("output", {})
         return {
             "현재가": int(out.get("stck_prpr", 0)),
+            "시가":   int(out.get("stck_oprc", 0)),    # v3.2 신규: T2 갭 상승 감지용
             "등락률": float(out.get("prdy_ctrt", 0)),
             "거래량": int(out.get("acml_vol", 0)),
         }
@@ -91,6 +101,7 @@ def get_volume_ranking(market_code: str) -> list[dict]:
     input_iscd  = _MARKET_INPUT_ISCD.get(market_code, "0001")
     logger.info(f"[rest] {market_name} 거래량 순위 조회 시작...")
 
+    kis_rate_limiter.acquire()   # v3.2: Rate Limit 보호
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/volume-rank"
     headers = {
         "Authorization":  f"Bearer {token}",
@@ -218,7 +229,9 @@ def _fetch_rate_once(token: str, label: str, input_iscd: str,
     """
     등락률 순위 단일 호출 헬퍼 (get_rate_ranking 내부 전용)
     등락률 범위: 0~10% (초기 급등 조기 포착)
+    v3.2: rate_limiter 적용
     """
+    kis_rate_limiter.acquire()   # v3.2: Rate Limit 보호
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/ranking/fluctuation"
     headers = {
         "Authorization":  f"Bearer {token}",

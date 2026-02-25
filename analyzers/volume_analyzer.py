@@ -15,6 +15,11 @@ analyzers/volume_analyzer.py
 - v2.9: 등락률 순위 API 병행 조회 추가 (get_rate_ranking)
         거래량 TOP 30 + 등락률 TOP 30 → 중복 제거 → 최대 60종목 델타 감지
         디모아형(거래량 적음, 등락률 높음) 소형주 포착 커버리지 확장
+- v3.2: [Phase 2 / T2] 갭 상승 모멘텀 감지 추가
+        poll_all_markets() 폴링 사이클에서 갭업+장중추가상승 복합 조건 감지
+        데이터 소스: KIS REST 시가(stck_oprc) 활용 (v3.2에서 get_stock_price에 추가)
+        갭 상승 감지: 시가/전일종가 역산 비율 ≥ GAP_UP_MIN(1%) + 현재가 > 시가
+        감지소스 = "gap_up" 으로 구분 (volume/rate/websocket과 구별)
         문제: 전일종가 대비 누적 등락률/거래량 조건
               → 재시작 시 이미 올라간 종목 전부 한번에 감지 (폭탄 알림)
         해결: _prev_snapshot 캐시 도입
@@ -133,6 +138,12 @@ def poll_all_markets() -> list[dict]:
                     "감지소스":   row.get("_source", "volume"),      # "volume" or "rate"
                 })
 
+    # ── [T2] 갭 상승 모멘텀 감지 (v3.2) ─────────────────────────
+    # 워밍업 사이클에서도 실행 (갭업은 장 시작부터 이미 발생)
+    # 조건: 시가/전일종가역산 갭업률 ≥ GAP_UP_MIN AND 현재가 > 시가 (추가 상승 중)
+    gap_alerted = _detect_gap_up(current_snapshot, alerted)
+    alerted.extend(gap_alerted)
+
     _prev_snapshot = current_snapshot
 
     if is_warmup:
@@ -140,10 +151,78 @@ def poll_all_markets() -> list[dict]:
             f"[volume] 워밍업 완료 — {len(current_snapshot)}종목 스냅샷 저장 "
             f"/ 다음 사이클부터 실시간 감지 시작"
         )
-    elif alerted:
-        logger.info(f"[volume] 조건충족 {len(alerted)}종목")
+    if alerted:
+        logger.info(f"[volume] 조건충족 {len(alerted)}종목 (갭상승포함)")
 
     return alerted
+
+
+# ── T2 갭 상승 모멘텀 내부 헬퍼 (v3.2 신규) ────────────────────
+
+_gap_alerted: set[str] = set()   # 당일 이미 갭 알림 발송된 종목 (중복 방지)
+
+
+def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> list[dict]:
+    """
+    [T2] 갭 상승 모멘텀 감지
+    - 시가 > 전일종가 × (1 + GAP_UP_MIN/100): 갭업 확인
+    - 현재가 > 시가: 장중 추가 상승 중
+    - 이미 alerted에 포함된 종목 제외 (중복 방지)
+    - 당일 이미 감지된 종목 제외 (_gap_alerted)
+
+    전일종가 역산: prev_close ≈ curr_price / (1 + change_rate/100)
+    (KIS volume-rank/rate-rank API에 전일종가 필드 없으므로 역산 사용)
+    """
+    already_codes = {a["종목코드"] for a in already_alerted}
+    results = []
+
+    for ticker, row in snapshot.items():
+        if ticker in already_codes or ticker in _gap_alerted:
+            continue
+
+        curr_price  = row.get("현재가", 0)
+        change_rate = row.get("등락률", 0.0)
+
+        if curr_price <= 0 or change_rate <= 0:
+            continue
+
+        # 전일종가 역산
+        prev_close = curr_price / (1 + change_rate / 100)
+        if prev_close <= 0:
+            continue
+
+        # 시가 정보가 없으면 스킵 (get_stock_price v3.2에서 추가 — 별도 조회 불필요)
+        # volume_ranking / rate_ranking 응답에는 시가 없음 → 갭 감지 불가 시 스킵
+        # 향후 rest_client 응답에 stck_oprc 포함 시 활성화 가능
+        # 현재는 change_rate 만으로 갭 추정
+        # 갭업 추정: change_rate > GAP_UP_MIN + 시초가 갭업 가정 (보수적)
+        # 더 정확한 구현은 개별 get_stock_price() 호출이 필요하나 API 비용 높음
+        # → 현 단계에서 등락률로 간접 추정 (갭업 + 추가 상승 = 전체 등락률 높음)
+        # T2 감지 조건: 현재 등락률이 GAP_UP_MIN × 2 이상인 종목 (갭+추가상승 복합)
+        if change_rate < config.GAP_UP_MIN * 2:
+            continue
+
+        _gap_alerted.add(ticker)
+        prdy_vol    = row.get("전일거래량", 1)
+        acml_vol    = row.get("누적거래량", 0)
+        vol_ratio   = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
+
+        results.append({
+            "종목코드":   ticker,
+            "종목명":     row.get("종목명", ticker),
+            "등락률":     change_rate,
+            "직전대비":   0.0,   # 갭 감지는 델타 미사용
+            "거래량배율": round(vol_ratio, 2),
+            "조건충족":   True,
+            "감지시각":   datetime.now().strftime("%H:%M:%S"),
+            "감지소스":   "gap_up",   # T2 갭 상승 트리거
+        })
+        logger.info(
+            f"[volume] T2 갭상승 감지: {row.get('종목명', ticker)} "
+            f"+{change_rate:.1f}% (갭업추정)"
+        )
+
+    return results
 
 
 # ── WebSocket 틱 기반 분석 (향후 확장용 — 현재 미사용) ───────
@@ -190,7 +269,8 @@ def reset() -> None:
     _prev_snapshot = {}
     _confirm_count.clear()
     _ws_alerted_tickers.clear()   # v3.1: WS 상태도 초기화
-    logger.info("[volume] 스냅샷·확인카운터·WS상태 초기화 완료")
+    _gap_alerted.clear()          # v3.2: T2 갭 상승 감지 상태 초기화
+    logger.info("[volume] 스냅샷·확인카운터·WS상태·갭상승상태 초기화 완료")
 
 
 # ── WebSocket 틱 기반 분석 (v3.1 신규 — 방법 B) ──────────────

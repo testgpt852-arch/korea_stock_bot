@@ -15,7 +15,9 @@ KIS 실시간 체결 WebSocket 수신 전담 (4단계)
 - connect()   → 장 시작(09:00) 1회만 호출. 이미 연결된 경우 즉시 return.
 - disconnect()→ 장 마감(15:30) 1회만 호출. 모든 구독 해제 후 종료.
 - subscribe() → 이미 구독 중이면 skip. 구독 후 ack 대기.
-- reconnect   → 네트워크 에러 시만. MAX 3회, 30초 간격.
+- reconnect   → 네트워크 에러 시만. 5초 간격, 회수 제한 없음 (v3.2).
+               [이전 v3.1: MAX 3회, 30초 간격 → Railway 네트워크 끊김 대응 실패]
+               [변경 v3.2: 무한 재시도, 5초 간격 (python-kis reconnect_interval=5 참조)]
 ═══════════════════════════════════════════════════════════════
 
 [ARCHITECTURE 의존성]
@@ -163,33 +165,52 @@ class KISWebSocketClient:
             logger.error(f"[ws] 수신 루프 오류: {e}")
             self.connected = False
 
-    # ── 6. 에러 재연결 (네트워크 에러 시만) ─────────────────
+    # ── 6. 에러 재연결 (네트워크 에러 시만, v3.2: 무한 재시도) ──
 
     async def _reconnect_with_backoff(self) -> None:
         """
-        네트워크 에러로 연결이 끊겼을 때만 재연결 허용
-        의도적인 연결/종료 반복 절대 금지
+        네트워크 에러로 연결이 끊겼을 때만 재연결 허용.
+        의도적인 연결/종료 반복 절대 금지.
+
+        [v3.2 변경]
+        이전: MAX 3회, 30초 간격 → Railway 간헐적 끊김 시 3회 실패 후 WS 완전 사망
+        변경: 회수 제한 없음, 5초 간격 (네트워크 복구될 때까지 계속 재시도)
+             python-kis reconnect_interval=5 참조
         """
-        if self._reconnect_count >= config.WS_MAX_RECONNECT:
-            logger.error(f"[ws] 재연결 {config.WS_MAX_RECONNECT}회 초과 — 중단")
-            return
+        attempt = 0
+        while True:
+            attempt += 1
+            logger.info(
+                f"[ws] 재연결 시도 {attempt}회 "
+                f"({config.WS_RECONNECT_DELAY}초 후)..."
+            )
+            await asyncio.sleep(config.WS_RECONNECT_DELAY)
 
-        self._reconnect_count += 1
-        delay = config.WS_RECONNECT_DELAY * self._reconnect_count
-        logger.info(f"[ws] 재연결 시도 {self._reconnect_count}/{config.WS_MAX_RECONNECT} "
-                    f"({delay}초 후)")
-        await asyncio.sleep(delay)
+            try:
+                # connect()는 내부에서 self.connected 체크 → 중복 연결 방지
+                self.connected = False   # 강제로 False 설정해야 connect() 진행됨
+                await self.connect()
+                if not self.connected:
+                    logger.warning(f"[ws] 재연결 실패 ({attempt}회) — 재시도 예정")
+                    continue
 
-        try:
-            await self.connect()
-            # 재연결 후 기존 구독 종목 복원
-            prev_tickers = list(self.subscribed_tickers)
-            self.subscribed_tickers.clear()
-            for ticker in prev_tickers:
-                await self.subscribe(ticker)
-            logger.info(f"[ws] 재연결 완료 — {len(prev_tickers)}종목 재구독")
-        except Exception as e:
-            logger.error(f"[ws] 재연결 실패: {e}")
+                # 재연결 성공 → 기존 구독 종목 복원
+                prev_tickers = list(self.subscribed_tickers)
+                self.subscribed_tickers.clear()
+                for ticker in prev_tickers:
+                    await self.subscribe(ticker)
+                logger.info(
+                    f"[ws] 재연결 완료 ({attempt}회 시도) — "
+                    f"{len(self.subscribed_tickers)}/{len(prev_tickers)}종목 재구독"
+                )
+                self._reconnect_count = 0
+                return   # 성공 시 루프 탈출
+
+            except asyncio.CancelledError:
+                logger.info("[ws] 재연결 루프 취소 (CancelledError) — 장 마감으로 판단")
+                return
+            except Exception as e:
+                logger.warning(f"[ws] 재연결 예외: {e} — {attempt}회 시도 후 재시도")
 
     # ── 7. ack 대기 (수신 검증) ──────────────────────────────
 

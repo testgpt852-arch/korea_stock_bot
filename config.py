@@ -82,13 +82,34 @@ POLL_INTERVAL_SEC  = 10      # v3.1: 30→10초 단축 (방법A 개선)
 # ── 중복 알림 방지 ───────────────────────────────────────────
 ALERT_COOLTIME_MIN = 30
 
-# ── WebSocket 워치리스트 (v3.1 추가) ────────────────────────
-# 아침봇이 선별한 최대 구독 종목 수 (KIS 차단 방지 — 한번에 너무 많이 구독 금지)
-WS_WATCHLIST_MAX   = 50
+# ── WebSocket 워치리스트 (v3.1 추가 / v3.2 수정) ────────────
+# KIS 공식 스펙: WebSocket 동시 구독 한도 40개 (python-kis WEBSOCKET_MAX_SUBSCRIPTIONS=40 확인)
+# 기존 50 → 40 수정 (50 설정 시 KIS 서버가 40개 초과분 무시 또는 에러 반환)
+WS_WATCHLIST_MAX   = 40   # v3.2: 50 → 40 (KIS 스펙 준수)
 
-# ── KIS WebSocket (websocket_client.py 재연결 로직용 — 장중봇과 무관) ─
-WS_MAX_RECONNECT   = 3
-WS_RECONNECT_DELAY = 30
+# ── KIS WebSocket 재연결 (v3.2: 무한재연결 방식으로 변경) ─────
+# WS_MAX_RECONNECT 제한 없음 — 네트워크 복구될 때까지 계속 재시도
+# Railway 서버 간헐적 네트워크 끊김 대응
+WS_RECONNECT_DELAY = 5    # v3.2: 30초 → 5초 (python-kis reconnect_interval=5 참조)
+
+# ── KIS API Rate Limiter (v3.2: python-kis 참조 추가) ─────────
+# 실전: 초당 19회 / 모의: 초당 2회 (python-kis REAL_API_REQUEST_PER_SECOND = 20-1)
+KIS_RATE_LIMIT_REAL    = 19   # 초당 최대 호출 횟수 (실전)
+KIS_RATE_LIMIT_VIRTUAL = 2    # 초당 최대 호출 횟수 (모의)
+
+# ── Phase 2 트리거 임계값 (v3.2 신규) ─────────────────────────
+# T2: 갭 상승 모멘텀
+GAP_UP_MIN         = 1.0    # 갭업 최소 비율 (%) — 시가/전일종가 기준
+# T5: 마감 강도
+CLOSING_STRENGTH_MIN  = 0.75   # 마감 강도 최소값 (0~1, 1=고가=종가)
+CLOSING_STRENGTH_TOP_N = 7     # 마감 강도 상위 N 종목
+# T6: 횡보 거래량 급증
+VOLUME_FLAT_CHANGE_MAX = 5.0   # 횡보 인정 등락률 절대값 상한 (%)
+VOLUME_FLAT_SURGE_MIN  = 50.0  # 전일 대비 거래량 급증 최소 비율 (%)
+VOLUME_FLAT_TOP_N      = 7     # 횡보 거래량 상위 N 종목
+# T3: 시총 대비 자금 유입
+FUND_INFLOW_CAP_MIN    = 100_000_000_000  # 최소 시가총액 (1000억원, 극소형주 제외)
+FUND_INFLOW_TOP_N      = 7     # 시총 대비 자금유입 상위 N 종목
 
 # ── 스케줄 시간 ──────────────────────────────────────────────
 TOKEN_REFRESH_TIME = "07:00"
