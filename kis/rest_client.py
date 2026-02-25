@@ -91,15 +91,15 @@ def get_volume_ranking(market_code: str) -> list[dict]:
         "Content-Type":   "application/json; charset=utf-8",
     }
     params = {
-        "FID_COND_MRKT_DIV_CODE":   "J",           # 항상 "J" 고정 (v2.7 수정)
+        "FID_COND_MRKT_DIV_CODE":   "J",           # 항상 "J" 고정 (v2.7)
         "FID_COND_SCR_DIV_CODE":    "20171",
-        "FID_INPUT_ISCD":           input_iscd,     # "0001" or "1001" (v2.7 수정)
-        "FID_DIV_CLS_CODE":         "0",
-        "FID_BLNG_CLS_CODE":        "0",
-        "FID_TRGT_CLS_CODE":        "111111111",
-        "FID_TRGT_EXLS_CLS_CODE":   "000000",
-        "FID_INPUT_PRICE_1":        "",
-        "FID_INPUT_PRICE_2":        "",
+        "FID_INPUT_ISCD":           input_iscd,     # "0001"=코스피 / "1001"=코스닥 (v2.7)
+        "FID_DIV_CLS_CODE":         "0",            # 0:전체
+        "FID_BLNG_CLS_CODE":        "0",            # 0:전체 (1~7 업종별)
+        "FID_TRGT_CLS_CODE":        "111111111",    # 전체 종목 대상
+        "FID_TRGT_EXLS_CLS_CODE":   "000000",       # 제외 없음
+        "FID_INPUT_PRICE_1":        "0",            # 가격 하한 (빈값→0)
+        "FID_INPUT_PRICE_2":        "0",            # 가격 상한 (빈값→0, 0=제한없음)
         "FID_VOL_CNT":              "100",
         "FID_INPUT_DATE_1":         "",
     }
@@ -107,14 +107,24 @@ def get_volume_ranking(market_code: str) -> list[dict]:
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         resp.raise_for_status()
-        body     = resp.json()
-        raw_list = body.get("output1", [])
-        rt_cd    = body.get("rt_cd",  "?")
-        msg_cd   = body.get("msg_cd", "?")
-        msg1     = body.get("msg1",   "")
+        body   = resp.json()
+        rt_cd  = body.get("rt_cd",  "?")
+        msg_cd = body.get("msg_cd", "?")
+        msg1   = body.get("msg1",   "")
 
-        # 응답 진단 로그 (정상 확인 후 제거 가능)
-        logger.info(f"[rest] {market_name} 응답: rt_cd={rt_cd} msg_cd={msg_cd} msg={msg1} 항목={len(raw_list)}")
+        # output 키 자동 탐지: output1 → output → output2 순서로 시도
+        raw_list = body.get("output1") or body.get("output") or body.get("output2") or []
+
+        # 응답 진단 로그 — rt_cd=0인데 항목=0이면 응답 키 목록도 출력
+        logger.info(
+            f"[rest] {market_name} 응답: rt_cd={rt_cd} msg_cd={msg_cd} "
+            f"msg={msg1} 항목={len(raw_list)}"
+        )
+        if rt_cd == "0" and len(raw_list) == 0:
+            logger.warning(
+                f"[rest] {market_name} 응답 키 목록: {list(body.keys())} "
+                f"| FID_INPUT_ISCD={input_iscd}"
+            )
 
         result = []
         for item in raw_list:
