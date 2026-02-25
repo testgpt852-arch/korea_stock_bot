@@ -10,6 +10,8 @@ Google AI (Gemma-3-27b-it) 2차 분석 전담 (5단계)
 - v2.0: google.generativeai(deprecated) → google.genai(신패키지) 교체
 - v2.1: 대장주 선정 버그 수정 — 등락률 1위를 관련종목[0]으로 프롬프트 강화
         테마 그룹핑 정확도 개선 프롬프트 추가
+- v3.5: analyze_spike() ai_context 파라미터 추가 (Phase 5 AI 학습 피드백)
+        트리거 승률 / 종목 이력 / 매매 원칙을 프롬프트에 주입해 판단 정확도 향상
 
 [ARCHITECTURE 의존성]
 ai_analyzer → morning_report, closing_report, realtime_alert
@@ -113,9 +115,21 @@ def _parse_dart_result(raw: str, dart_list: list[dict]) -> list[dict]:
 # ② analyze_spike — 장중봇: 급등 진짜/작전 판단
 # ══════════════════════════════════════════════════════════════
 
-def analyze_spike(analysis: dict, news_context: str = "") -> dict:
+def analyze_spike(
+    analysis: dict,
+    news_context: str = "",
+    ai_context: str = "",
+) -> dict:
     """
     급등 종목 → 진짜급등 / 작전주 판단
+
+    Args:
+        analysis:     급등 분석 데이터 dict (종목명, 등락률, 거래량배율 등)
+        news_context: 관련 뉴스 텍스트 (선택)
+        ai_context:   [v3.5 Phase 5] DB 기반 컨텍스트 문자열
+                      tracking/ai_context.build_spike_context() 반환값.
+                      트리거 승률 / 종목 이력 / 매매 원칙이 담긴다.
+                      빈 문자열이면 기존 방식대로 판단.
 
     반환: dict {"판단": str, "이유": str}
     판단: "진짜급등" | "작전주의심" | "판단불가"
@@ -123,17 +137,21 @@ def analyze_spike(analysis: dict, news_context: str = "") -> dict:
     if not _CLIENT:
         return {"판단": "판단불가", "이유": "AI 미설정"}
 
-    news_line = f"\n관련뉴스: {news_context}" if news_context else ""
+    news_line    = f"\n관련뉴스: {news_context}" if news_context else ""
+    context_line = f"\n\n[과거 데이터 참고]\n{ai_context}" if ai_context else ""
+
     prompt = f"""한국 주식 급등 분석 전문가다.
 
 종목: {analysis.get('종목명','N/A')} ({analysis.get('종목코드','N/A')})
 등락률: +{analysis.get('등락률',0):.1f}%
 거래량: 전일 대비 {analysis.get('거래량배율',0):.1f}배
-감지시각: {analysis.get('감지시각','N/A')}{news_line}
+감지시각: {analysis.get('감지시각','N/A')}{news_line}{context_line}
 
 진짜급등: 실적/공시/리포트 근거, 거래량 자연스러운 증가
 작전주의심: 이유 없음, 거래량 폭발적 단기 급등
 판단불가: 정보 부족
+
+과거 데이터가 있다면 트리거 승률, 종목 이력, 매매 원칙을 판단에 참고하라.
 
 JSON만 출력:
 {{"판단": "진짜급등", "이유": "20자 이내 이유"}}"""
