@@ -5,6 +5,8 @@ reports/realtime_alert.py
 [수정이력]
 - v2.5:   KIS REST 폴링 방식 (init_prev_volumes 제거)
 - v2.5.2: 폴링 사이클 시작/완료 로그 추가 (진단용)
+- v2.8:   폴링 조건 로그 — PRICE_CHANGE_MIN/VOLUME_SPIKE_RATIO → PRICE_DELTA_MIN/VOLUME_DELTA_MIN
+          1차 알림 로그 — 직전대비(1분 추가 상승률) 추가 표시
 """
 
 import asyncio
@@ -25,7 +27,7 @@ async def start() -> None:
     logger.info(
         f"[realtime] 폴링 루프 시작 ✅  "
         f"간격: {config.POLL_INTERVAL_SEC}초 / "
-        f"조건: +{config.PRICE_CHANGE_MIN}% & 거래량{config.VOLUME_SPIKE_RATIO}% "
+        f"조건: 1분+{config.PRICE_DELTA_MIN}% & 1분거래량{config.VOLUME_DELTA_MIN}% "
         f"× {config.CONFIRM_CANDLES}회 연속"
     )
 
@@ -81,7 +83,8 @@ async def _dispatch_alerts(analysis: dict) -> None:
     await telegram_bot.send_async(msg_1st)
     logger.info(
         f"[realtime] 1차 알림: {analysis['종목명']}  "
-        f"+{analysis['등락률']:.1f}%  거래량배율:{analysis['거래량배율']:.1f}배"
+        f"+{analysis['등락률']:.1f}%(누적)  1분+{analysis['직전대비']:.1f}%  "
+        f"1분거래량:{analysis['거래량배율']:.1f}배"
     )
     asyncio.create_task(_send_ai_followup(analysis))
 
