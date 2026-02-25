@@ -32,21 +32,18 @@ async def run_closing_bot():
 
 
 async def start_realtime_bot():
-    """09:00 장중봇 WebSocket 연결 (4단계에서 구현)"""
-    try:
-        from reports.realtime_alert import start
-        await start()
-    except ImportError:
-        logger.info("[main] 장중봇 미구현 (4단계 예정)")
+    """09:00 장중봇 시작 — KIS REST 폴링"""
+    if not is_market_open(get_today()):
+        logger.info("[main] 휴장일 — 장중봇 건너뜀")
+        return
+    from reports.realtime_alert import start
+    await start()
 
 
 async def stop_realtime_bot():
-    """15:30 장중봇 WebSocket 종료"""
-    try:
-        from reports.realtime_alert import stop
-        await stop()
-    except ImportError:
-        pass
+    """15:30 장중봇 종료"""
+    from reports.realtime_alert import stop
+    await stop()
 
 
 async def main():
@@ -57,9 +54,6 @@ async def main():
 
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
-    # 토큰 갱신 (4단계 KIS 연동 시 활성화)
-    # scheduler.add_job(refresh_token, 'cron', hour=7, minute=0)
-
     # 아침봇
     scheduler.add_job(
         run_morning_bot, "cron",
@@ -68,7 +62,7 @@ async def main():
     )
     scheduler.add_job(
         run_morning_bot, "cron",
-        hour=8, minute=48,
+        hour=8, minute=40,
         id="morning_bot_2"
     )
 
@@ -79,15 +73,15 @@ async def main():
         id="closing_bot"
     )
 
-    # 장중봇 시작/종료 (4단계 활성화)
-    scheduler.add_job(start_realtime_bot, 'cron', hour=9,  minute=0,  id='ws_start')
-    scheduler.add_job(stop_realtime_bot,  'cron', hour=15, minute=30, id='ws_stop')
+    # 장중봇 시작/종료
+    scheduler.add_job(start_realtime_bot, "cron", hour=9,  minute=0,  id="rt_start")
+    scheduler.add_job(stop_realtime_bot,  "cron", hour=15, minute=30, id="rt_stop")
 
     scheduler.start()
-    logger.info(f"스케줄 등록 완료")
-    logger.info(f"  아침봇: 매일 08:30")
-    logger.info(f"  마감봇: 매일 18:30")
-    logger.info(f"  장중봇: 미활성 (4단계 예정)")
+    logger.info("스케줄 등록 완료")
+    logger.info("  아침봇: 매일 08:30 / 07:59")
+    logger.info("  장중봇: 매일 09:00~15:30 (KIS REST 폴링)")
+    logger.info("  마감봇: 매일 18:30")
 
     try:
         while True:
