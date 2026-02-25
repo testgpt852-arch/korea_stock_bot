@@ -3,7 +3,7 @@ analyzers/volume_analyzer.py
 장중 급등 감지 전담 — KIS REST 실시간 기반
 
 반환값 규격 (ARCHITECTURE.md 계약):
-{"종목코드": str, "종목명": str, "등락률": float,
+{"종목코드": str, "종목명": str, "등락률": float, "직전대비": float,
  "거래량배율": float, "조건충족": bool, "감지시각": str}
 
 [수정이력]
@@ -11,75 +11,111 @@ analyzers/volume_analyzer.py
 - v2.3: 거래량 필드명 불일치 + 이중 누적 버그 수정
 - v2.4: poll_all_markets() 신규 — pykrx REST 전 종목 폴링
 - v2.5: 데이터 소스를 pykrx → KIS REST 실시간으로 전환
-        기존: pykrx get_market_ohlcv_by_ticker → 15~20분 지연, 비공식 스크래핑
-        수정: rest_client.get_volume_ranking() → 실시간, KIS 공식 API
-        전일 거래량 사전 로딩(init_prev_volumes) 불필요
-             → KIS 응답에 prdy_vol(전일거래량) 포함 → 배율 즉시 계산
-        init_prev_volumes / get_top_tickers 제거 (pykrx 의존성 완전 제거)
+- v2.8: [핵심 변경] 누적 기준 → 델타(1분 변화량) 기준으로 전환
+        문제: 전일종가 대비 누적 등락률/거래량 조건
+              → 재시작 시 이미 올라간 종목 전부 한번에 감지 (폭탄 알림)
+        해결: _prev_snapshot 캐시 도입
+              직전 poll 대비 1분간 변화량(Δ등락률, Δ거래량)으로 조건 판단
+              첫 사이클 = 워밍업 (스냅샷 저장만, 알림 없음)
+              두 번째 사이클부터 진짜 "지금 막 터지는" 종목만 포착
+        조건: Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
+              × CONFIRM_CANDLES(2)회 연속
+        반환값: "직전대비" key 추가 (1분간 추가 상승률)
 """
 
 from datetime import datetime
 from utils.logger import logger
 import config
 
-_confirm_count: dict[str, int] = {}
+# ── 모듈 레벨 상태 ────────────────────────────────────────────
+_prev_snapshot:  dict[str, dict] = {}  # {종목코드: row} 직전 poll 스냅샷
+_confirm_count:  dict[str, int]  = {}  # {종목코드: 연속충족횟수}
 
 
 # ── REST 폴링 전 종목 분석 ──────────────────────────────────
 
 def poll_all_markets() -> list[dict]:
     """
-    KIS REST 거래량 순위 API로 코스피·코스닥 상위 종목 조회
-    CONFIRM_CANDLES 연속 충족 종목만 list[dict]로 반환
+    KIS REST 거래량 순위 API로 코스피·코스닥 조회 후
+    직전 poll 대비 1분간 변화량(델타)으로 급등 조건 판단.
 
     반환값 규격: ARCHITECTURE.md 계약 준수
 
-    [v2.5 변경]
-    - pykrx 완전 제거 → KIS REST 실시간 데이터
-    - KIS 응답의 prdy_vol(전일거래량) 직접 사용 → 배율 즉시 계산
-    - 데이터 지연 없음 (체결 기준 실시간)
-    - 코스피/코스닥 각 상위 100종목 내 급등 조건 필터링
+    [v2.8 감지 로직]
+    1. 첫 사이클 (워밍업): _prev_snapshot 저장만, 알림 없음
+    2. 이후 사이클:
+       - Δ등락률  = (현재가 - 직전가) / 직전가 × 100
+       - Δ거래량  = 누적거래량 - 직전누적거래량
+       - Δ거래량배율 = Δ거래량 / 전일거래량 × 100
+       - 조건: Δ등락률 ≥ PRICE_DELTA_MIN AND Δ거래량배율 ≥ VOLUME_DELTA_MIN
+               × CONFIRM_CANDLES회 연속 충족 시 알림
     """
+    global _prev_snapshot
     from kis.rest_client import get_volume_ranking
 
-    alerted: list[dict] = []
+    current_snapshot: dict[str, dict] = {}
+    alerted:          list[dict]      = []
+    is_warmup = not _prev_snapshot   # 첫 사이클 여부
 
-    for market_code in ["J", "Q"]:   # J=코스피, Q=코스닥
+    for market_code in ["J", "Q"]:
+        market_name = "코스피" if market_code == "J" else "코스닥"
         rows = get_volume_ranking(market_code)
         if not rows:
-            logger.debug(f"[volume] {'코스피' if market_code == 'J' else '코스닥'} 순위 없음")
+            logger.debug(f"[volume] {market_name} 순위 없음")
             continue
 
         for row in rows:
-            ticker   = row["종목코드"]
-            rate     = row["등락률"]
-            acml_vol = row["누적거래량"]
-            prdy_vol = row["전일거래량"]
+            ticker = row["종목코드"]
+            current_snapshot[ticker] = row   # 다음 사이클을 위해 저장
 
-            # 거래량 배율 계산 (전일 총거래량 대비 오늘 누적거래량 %)
-            volume_ratio = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
+            if is_warmup:
+                continue   # 워밍업 사이클: 데이터 수집만
+
+            prev = _prev_snapshot.get(ticker)
+            if not prev:
+                continue   # 이번 사이클 신규 진입 종목 → 다음 사이클부터 감지
+
+            prev_price = prev["현재가"]
+            curr_price = row["현재가"]
+            if prev_price <= 0:
+                continue
+
+            # ── 1분간 추가 등락률 ────────────────────────────
+            delta_rate = (curr_price - prev_price) / prev_price * 100
+
+            # ── 1분간 추가 체결량 → 전일거래량 대비 배율 ────
+            delta_vol       = max(0, row["누적거래량"] - prev["누적거래량"])
+            prdy_vol        = row["전일거래량"]
+            delta_vol_ratio = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
             single_ok = (
-                rate         >= config.PRICE_CHANGE_MIN and
-                volume_ratio >= config.VOLUME_SPIKE_RATIO
+                delta_rate      >= config.PRICE_DELTA_MIN and
+                delta_vol_ratio >= config.VOLUME_DELTA_MIN
             )
 
-            if single_ok:
-                _confirm_count[ticker] = _confirm_count.get(ticker, 0) + 1
-            else:
-                _confirm_count[ticker] = 0
+            _confirm_count[ticker] = (
+                _confirm_count.get(ticker, 0) + 1 if single_ok else 0
+            )
 
             if _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES:
                 alerted.append({
                     "종목코드":   ticker,
                     "종목명":     row["종목명"],
-                    "등락률":     rate,
-                    "거래량배율": round(volume_ratio / 100, 2),
+                    "등락률":     row["등락률"],                      # 누적 등락률 (참고)
+                    "직전대비":   round(delta_rate, 2),              # 1분간 추가 상승률 (핵심)
+                    "거래량배율": round(delta_vol_ratio / 100, 2),   # 1분간 Δvol / prdy_vol
                     "조건충족":   True,
                     "감지시각":   datetime.now().strftime("%H:%M:%S"),
                 })
 
-    if alerted:
+    _prev_snapshot = current_snapshot
+
+    if is_warmup:
+        logger.info(
+            f"[volume] 워밍업 완료 — {len(current_snapshot)}종목 스냅샷 저장 "
+            f"/ 다음 사이클부터 실시간 감지 시작"
+        )
+    elif alerted:
         logger.info(f"[volume] 조건충족 {len(alerted)}종목")
 
     return alerted
@@ -100,8 +136,8 @@ def analyze(tick: dict) -> dict:
     volume_ratio = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
     single_ok = (
-        rate         >= config.PRICE_CHANGE_MIN and
-        volume_ratio >= config.VOLUME_SPIKE_RATIO
+        rate         >= config.PRICE_DELTA_MIN and
+        volume_ratio >= config.VOLUME_DELTA_MIN
     )
 
     if single_ok:
@@ -115,6 +151,7 @@ def analyze(tick: dict) -> dict:
         "종목코드":   ticker,
         "종목명":     tick.get("종목명", ticker),
         "등락률":     rate,
+        "직전대비":   0.0,   # WebSocket 틱은 델타 미지원 (향후 확장 시 구현)
         "거래량배율": round(volume_ratio / 100, 2),
         "조건충족":   confirmed,
         "감지시각":   datetime.now().strftime("%H:%M:%S"),
@@ -122,6 +159,8 @@ def analyze(tick: dict) -> dict:
 
 
 def reset() -> None:
-    """장 마감(15:30) 후 확인 카운터 초기화"""
+    """장 마감(15:30) 후 상태 전체 초기화"""
+    global _prev_snapshot
+    _prev_snapshot = {}
     _confirm_count.clear()
-    logger.info("[volume] 확인카운터 초기화 완료")
+    logger.info("[volume] 스냅샷·확인카운터 초기화 완료")
