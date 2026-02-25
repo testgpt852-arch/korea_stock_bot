@@ -96,8 +96,8 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
     # 아침봇
-    scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=59, id="morning_bot_1")
-    scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=40, id="morning_bot_2")
+    scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot_1")
+    scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=30, id="morning_bot_2")
 
     # 장중봇 시작/종료
     scheduler.add_job(start_realtime_bot, "cron", hour=9,  minute=0,  id="rt_start")
