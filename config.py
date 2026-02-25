@@ -76,7 +76,7 @@ PRICE_CHANGE_MIN   = 3.0     # deprecated: 누적 등락률
 # pykrx REST 전 종목 조회 주기 (초)
 # 60초 × CONFIRM_CANDLES(2) = 조건 충족 후 최대 2분 내 알림
 # KIS WebSocket 미사용 → 차단 위험 없음, 전 종목(코스피+코스닥) 커버
-POLL_INTERVAL_SEC  = 60
+POLL_INTERVAL_SEC  = 30
 
 # ── 중복 알림 방지 ───────────────────────────────────────────
 ALERT_COOLTIME_MIN = 30
