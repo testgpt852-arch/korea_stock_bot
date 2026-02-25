@@ -13,6 +13,9 @@ KIS REST API 호출 전담
           FID_INPUT_ISCD: "0000" → "0001"(코스피) / "1001"(코스닥) 으로 시장 구분
             (기존 "0000" 전체조회 사용 시 rt_cd=0 이지만 항목=0 반환)
           호출부(volume_analyzer.py) 인터페이스 유지: "J"→코스피, "Q"→코스닥
+- v2.9:   get_rate_ranking() 신규 추가 (tr_id: FHPST01700000)
+          등락률 순위 TOP 30 조회 — 거래량 적어도 급등하는 소형주 포착
+          반환값 규격: get_volume_ranking()과 동일 (volume_analyzer 호환)
 """
 
 import requests
@@ -149,4 +152,94 @@ def get_volume_ranking(market_code: str) -> list[dict]:
 
     except Exception as e:
         logger.warning(f"[rest] 거래량 순위 조회 실패 ({market_code}): {e}")
+        return []
+
+def get_rate_ranking(market_code: str) -> list[dict]:
+    """
+    KIS 등락률 순위 조회 (v2.9 신규)
+    tr_id: FHPST01700000
+    URL:   /uapi/domestic-stock/v1/ranking/fluctuation
+
+    market_code: "J" = 코스피, "Q" = 코스닥
+
+    반환값 규격: get_volume_ranking()과 동일
+    → volume_analyzer가 두 리스트를 그대로 합칠 수 있음
+
+    [추가 배경]
+    거래량 순위(TOP 30)에는 대형주·테마 대장주만 잡힘.
+    거래량이 적어도 등락률이 높은 소형주(디모아형) 포착을 위해 추가.
+    두 API를 합산하면 실질적으로 감지 커버리지가 2배로 확장됨.
+    """
+    token = get_access_token()
+    if not token:
+        logger.warning("[rest] 토큰 없음 — 등락률 순위 조회 불가")
+        return []
+
+    market_name = "코스피" if market_code == "J" else "코스닥"
+    input_iscd  = _MARKET_INPUT_ISCD.get(market_code, "0001")
+    logger.info(f"[rest] {market_name} 등락률 순위 조회 시작...")
+
+    url = f"{_BASE_URL}/uapi/domestic-stock/v1/ranking/fluctuation"
+    headers = {
+        "Authorization":  f"Bearer {token}",
+        "appkey":         config.KIS_APP_KEY,
+        "appsecret":      config.KIS_APP_SECRET,
+        "tr_id":          "FHPST01700000",
+        "custtype":       "P",
+        "Content-Type":   "application/json; charset=utf-8",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE":  market_code,   # 등락률API는 "J"/"Q" 모두 지원
+        "FID_COND_SCR_DIV_CODE":   "20170",
+        "FID_INPUT_ISCD":          input_iscd,
+        "FID_RANK_SORT_CLS_CODE":  "0",            # 0: 상승률 순
+        "FID_INPUT_CNT_1":         "0",
+        "FID_PRC_CLS_CODE":        "0",
+        "FID_INPUT_PRICE_1":       "0",
+        "FID_INPUT_PRICE_2":       "0",
+        "FID_VOL_CNT":             "30",
+        "FID_TRGT_CLS_CODE":       "0",
+        "FID_TRGT_EXLS_CLS_CODE":  "0",
+        "FID_DIV_CLS_CODE":        "0",
+        "FID_BLNG_CLS_CODE":       "0",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        body   = resp.json()
+        rt_cd  = body.get("rt_cd",  "?")
+        msg_cd = body.get("msg_cd", "?")
+        msg1   = body.get("msg1",   "")
+
+        raw_list = body.get("output1") or body.get("output") or body.get("output2") or []
+
+        logger.info(
+            f"[rest] {market_name} 등락률 응답: rt_cd={rt_cd} msg_cd={msg_cd} "
+            f"msg={msg1} 항목={len(raw_list)}"
+        )
+
+        result = []
+        for item in raw_list:
+            try:
+                prdy_vol = int(item.get("prdy_vol", 0))
+                acml_vol = int(item.get("acml_vol", 0))
+                if acml_vol <= 0:
+                    continue
+                result.append({
+                    "종목코드":   item.get("mksc_shrn_iscd", ""),
+                    "종목명":     item.get("hts_kor_isnm", ""),
+                    "현재가":     int(item.get("stck_prpr", 0)),
+                    "등락률":     float(item.get("prdy_ctrt", 0.0)),
+                    "누적거래량": acml_vol,
+                    "전일거래량": prdy_vol if prdy_vol > 0 else 1,  # 0 방지
+                })
+            except (ValueError, TypeError):
+                continue
+
+        logger.info(f"[rest] {market_name} 등락률 파싱 완료 — {len(result)}종목")
+        return result
+
+    except Exception as e:
+        logger.warning(f"[rest] 등락률 순위 조회 실패 ({market_code}): {e}")
         return []
