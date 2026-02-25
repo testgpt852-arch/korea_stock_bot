@@ -7,6 +7,12 @@ KIS REST API 호출 전담
 - v2.5.1: URL 수정 → /uapi/domestic-stock/v1/quotations/volume-rank
 - v2.5.2: logger.debug → logger.info (Railway 로그 가시성 확보)
           응답 rt_cd/msg_cd 진단 로그 추가
+- v2.7:   [버그수정] get_volume_ranking() KIS API 파라미터 오류 수정
+          FID_COND_MRKT_DIV_CODE: "J"/"Q" → 항상 "J" 고정
+            (volume-rank 엔드포인트는 "Q" 미지원 → OPSQ2001 오류)
+          FID_INPUT_ISCD: "0000" → "0001"(코스피) / "1001"(코스닥) 으로 시장 구분
+            (기존 "0000" 전체조회 사용 시 rt_cd=0 이지만 항목=0 반환)
+          호출부(volume_analyzer.py) 인터페이스 유지: "J"→코스피, "Q"→코스닥
 """
 
 import requests
@@ -15,6 +21,13 @@ from kis.auth import get_access_token
 import config
 
 _BASE_URL = "https://openapi.koreainvestment.com:9443"
+
+# volume-rank API: FID_COND_MRKT_DIV_CODE는 항상 "J"
+# 코스피/코스닥 구분은 FID_INPUT_ISCD로 처리
+_MARKET_INPUT_ISCD = {
+    "J": "0001",   # 코스피
+    "Q": "1001",   # 코스닥
+}
 
 
 def get_stock_price(ticker: str) -> dict:
@@ -52,6 +65,12 @@ def get_volume_ranking(market_code: str) -> list[dict]:
     KIS 거래량 순위 조회
     tr_id: FHPST01710000
     URL:   /uapi/domestic-stock/v1/quotations/volume-rank
+
+    market_code: "J" = 코스피, "Q" = 코스닥  (volume_analyzer 인터페이스 유지)
+
+    [v2.7 파라미터 수정]
+    - FID_COND_MRKT_DIV_CODE: 항상 "J" (volume-rank는 "Q" 미지원)
+    - FID_INPUT_ISCD: "0001"(코스피) / "1001"(코스닥) 으로 시장 구분
     """
     token = get_access_token()
     if not token:
@@ -59,6 +78,7 @@ def get_volume_ranking(market_code: str) -> list[dict]:
         return []
 
     market_name = "코스피" if market_code == "J" else "코스닥"
+    input_iscd  = _MARKET_INPUT_ISCD.get(market_code, "0001")
     logger.info(f"[rest] {market_name} 거래량 순위 조회 시작...")
 
     url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -71,9 +91,9 @@ def get_volume_ranking(market_code: str) -> list[dict]:
         "Content-Type":   "application/json; charset=utf-8",
     }
     params = {
-        "FID_COND_MRKT_DIV_CODE":   market_code,
+        "FID_COND_MRKT_DIV_CODE":   "J",           # 항상 "J" 고정 (v2.7 수정)
         "FID_COND_SCR_DIV_CODE":    "20171",
-        "FID_INPUT_ISCD":           "0000",
+        "FID_INPUT_ISCD":           input_iscd,     # "0001" or "1001" (v2.7 수정)
         "FID_DIV_CLS_CODE":         "0",
         "FID_BLNG_CLS_CODE":        "0",
         "FID_TRGT_CLS_CODE":        "111111111",
