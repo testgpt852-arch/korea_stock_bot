@@ -72,6 +72,33 @@ async def run_weekly_report():
     await run()
 
 
+async def run_principles_extraction():
+    """
+    매주 일요일 03:00 Trading Principles 추출 배치 (Phase 5, v3.5)
+    trading_history → trading_principles DB 갱신.
+    """
+    from tracking.principles_extractor import run_weekly_extraction
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, run_weekly_extraction
+        )
+        logger.info(
+            f"[main] 원칙 추출 완료 — 신규:{result['inserted']} "
+            f"업데이트:{result['updated']} 총:{result['total_principles']}개"
+        )
+        # 텔레그램 요약 알림
+        from notifiers import telegram_bot
+        if result["total_principles"] > 0:
+            msg = (
+                f"🧠 매매 원칙 DB 업데이트\n"
+                f"• 총 원칙: {result['total_principles']}개\n"
+                f"• 신규: {result['inserted']}개 / 업데이트: {result['updated']}개"
+            )
+            await telegram_bot.send_async(msg)
+    except Exception as e:
+        logger.error(f"[main] 원칙 추출 실패: {e}")
+
+
 async def run_force_close():
     """
     14:50 강제 청산 (Phase 4, v3.4)
@@ -176,6 +203,12 @@ async def main():
 
     # Phase 4: 강제 청산 — 14:50 (v3.4, AUTO_TRADE_ENABLED=true 시에만 의미 있음)
     scheduler.add_job(run_force_close, "cron", hour=14, minute=50, id="force_close")
+    # v3.5 Phase 5: 매주 일요일 03:00 매매 원칙 추출 배치
+    scheduler.add_job(
+        run_principles_extraction, "cron",
+        day_of_week="sun", hour=3, minute=0,
+        id="principles_extract"
+    )
 
     scheduler.start()
     logger.info("스케줄 등록 완료")
@@ -189,7 +222,8 @@ async def main():
             f"  강제청산: 매일 14:50 (Phase 4, 모드: {config.TRADING_MODE}) ✅ 활성"
         )
     else:
-        logger.info("  강제청산: 매일 14:50 (Phase 4) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
+        logger.info("  강제청산: 매일 14:50 (Phase 4)
+  원칙추출: 매주 일요일 03:00 (Phase 5) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
 
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()
