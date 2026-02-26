@@ -49,8 +49,10 @@ class KISWebSocketClient:
             await self.unsubscribe(ticker)
 ```
 
-> **v2.5+ 참고**: 장중봇(realtime_alert.py)은 KIS WebSocket 미사용.
-> KIS REST 거래량 순위 API 폴링 방식. websocket_client.py는 향후 확장용 보존.
+> **v3.1+ 참고**: 장중봇은 WebSocket(방법B) + REST 폴링(방법A) 하이브리드 운영.
+> websocket_client.py: 체결(H0STCNT0) 구독 + v4.0에서 호가(H0STASP0) 구독 추가.
+> WS_ORDERBOOK_ENABLED=false(기본): REST get_orderbook()으로 호가 분석.
+> WS_ORDERBOOK_ENABLED=true: WS 호가 구독 병행 (체결20+호가20=40, 한도 준수).
 
 ---
 
@@ -91,7 +93,7 @@ korea_stock_bot/
 │
 ├── kis/
 │   ├── auth.py              ← 토큰 발급·갱신 (실전 + v3.4 VTS 분리)
-│   ├── websocket_client.py  ← 향후 확장용 보존 (현재 미사용)
+│   ├── websocket_client.py  ← 체결(H0STCNT0)+호가(H0STASP0) WebSocket (v4.0 업그레이드)
 │   ├── rest_client.py       ← 현재가, 거래량 순위 조회
 │   └── order_client.py      ← [v3.4] 모의/실전 매수·매도·잔고 (Phase 4 신규)
 │
@@ -135,7 +137,8 @@ ai_analyzer.py            → morning_report (analyze_dart + analyze_closing v2.
 telegram_bot.py           → morning_report, closing_report, realtime_alert
 kis/auth.py               → kis/rest_client, kis/websocket_client
 kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 + 시가 제공)
-kis/websocket_client.py   → (향후 확장용 보존)
+kis/websocket_client.py   → volume_analyzer, realtime_alert
+                              H0STCNT0(체결) + H0STASP0(호가, v4.0 신규)
 utils/rate_limiter.py     → kis/rest_client (API 호출 보호)
 analyzers/closing_strength.py → reports/closing_report (T5 마감 강도)
 analyzers/volume_flat.py  → reports/closing_report (T6 횡보 거래량)
@@ -395,6 +398,15 @@ MIN_ENTRY_CHANGE     = 3.0            # 매수 진입 최소 등락률 (%)
 MAX_ENTRY_CHANGE     = 10.0           # 추격 금지 상한 등락률 (%)
 FORCE_CLOSE_TIME     = "14:50"        # 강제 청산 시각
 
+# v4.0: 소~중형주 필터 + 호가 분석
+VOLUME_RANK_KOSPI_SIZE_CLS = ["2", "3"]  # 거래량순위 코스피 규모구분 (중형+소형)
+ORDERBOOK_ENABLED      = True          # REST 호가 분석 활성화
+ORDERBOOK_BID_ASK_MIN  = 1.3          # 매수/매도잔량 비율 하한 (강세 기준)
+ORDERBOOK_BID_ASK_GOOD = 2.0          # 매수/매도잔량 비율 강세 기준
+ORDERBOOK_TOP3_RATIO_MIN = 0.4        # 상위3호가 잔량/전체 최솟값
+WS_ORDERBOOK_ENABLED   = False        # WebSocket 호가(H0STASP0) 구독 여부
+WS_ORDERBOOK_SLOTS     = 20           # WS 호가 구독 종목 수 (한도 분할 시)
+
 # v3.2: Phase 2 트리거 임계값
 GAP_UP_MIN             = 1.0    # T2 갭업 최소 비율 (%)
 CLOSING_STRENGTH_MIN   = 0.75   # T5 마감 강도 최소값 (0~1)
@@ -419,7 +431,8 @@ FUND_INFLOW_TOP_N      = 7
  "거래량배율": float,             # v3.8 변경: 누적RVOL (acml_vol / prdy_vol 배수)
  "순간강도": float,               # v3.8 신규: 순간 Δvol / 전일거래량 (%)
  "조건충족": bool, "감지시각": str,
- "감지소스": str}                 # "volume"|"rate"|"gap_up"|"websocket"
+ "감지소스": str,                 # "volume"|"rate"|"gap_up"|"websocket"
+ "호가분석": dict | None}          # v4.0 신규: {매수매도비율, 상위3집중도, 호가강도, 매수잔량, 매도잔량}
 
 # dart_collector.collect() → list[dict]
 {"종목명": str, "종목코드": str, "공시종류": str,
@@ -457,7 +470,8 @@ FUND_INFLOW_TOP_N      = 7
 tr_id            함수명                   용도
 ─────────────────────────────────────────────────
 FHKST01010100    get_stock_price()        단일 종목 현재가
-FHPST01710000    get_volume_ranking()     거래량 순위 (대형주·테마 대장주)
+FHKST01010200    get_orderbook()          호가잔량 조회 (v4.0 신규)
+FHPST01710000    get_volume_ranking()     거래량 순위 (v4.0: 코스피 중형+소형만 — 대형 제외)
 FHPST01700000    get_rate_ranking()       등락률 순위 (v2.9 신규 / v3.0 개편)
                                           코스닥: 모든 노이즈 제외, 등락률 0~10%
                                           코스피: 중형+소형 합산, 등락률 0~10%
@@ -555,6 +569,20 @@ gemini-2.5-flash   20회/일   ❌ 부족
 
 [아침봇 AI 순환매 규칙 — v3.6 추가]
 31. ai_analyzer.analyze_closing()은 morning_report에서도 호출 가능 (v2.4~)
+    → 전날 price_data를 전달해 신호4 제네릭 라벨을 실제 테마명으로 교체
+    → T5/T6/T3 분석기(rule #16)와 달리 ai_analyzer는 양쪽 호출 허용
+    → AI 실패 시 기존 신호4(상한가 순환매 등) 유지 — 의존성 없는 graceful fallback
+
+[소~중형주 필터 + 호가 분석 규칙 — v4.0 추가]
+32. get_volume_ranking() 코스피: 중형(FID_BLNG_CLS_CODE="2") + 소형("3") 2회 호출 필수
+    대형주 포함 전체("0") 호출 금지 — get_rate_ranking()과 동일 방식 유지
+    코스닥은 시장 특성상 전체("0") 유지 (단, 스팩/ETF/ETN 제외)
+33. get_orderbook()은 volume_analyzer 내부 급등 감지 직후에만 호출 (외부 직접 호출 금지)
+    호가 분석 로직은 volume_analyzer.analyze_orderbook()에만 위치
+    telegram_bot에 호가 분석 계산 로직 추가 금지 (반환된 dict 표시만)
+34. WS_ORDERBOOK_ENABLED=true 설정 시 체결(H0STCNT0) 구독 종목 수 = WS_ORDERBOOK_SLOTS(20)
+    체결 + 호가 합계가 WS_WATCHLIST_MAX(40) 초과 금지 — KIS 차단 위험
+    WS_ORDERBOOK_ENABLED는 Railway Variables에서 명시적 "true" 설정 시에만 활성 (기본 false)
     → 전날 price_data를 전달해 신호4 제네릭 라벨을 실제 테마명으로 교체
     → T5/T6/T3 분석기(rule #16)와 달리 ai_analyzer는 양쪽 호출 허용
     → AI 실패 시 기존 신호4(상한가 순환매 등) 유지 — 의존성 없는 graceful fallback
@@ -681,6 +709,30 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | _get_prev_date() timedelta(days=1) → get_prev_trading_day() |
 |      |            | 월요일 입력 시 일요일(데이터 없음) 반환 → 금요일 반환으로 수정 |
 | v3.8 | 2026-02-26 | **초기 급등 포착 & 뒷북 방지 — 장중봇 핵심 로직 개선** |
+| v4.0 | 2026-02-26 | **소~중형주 필터 + WebSocket 호가 분석 통합** |
+|      |            | kis/rest_client.py: get_volume_ranking() 코스피 중형+소형 2회 호출 (대형 제외) |
+|      |            |   _fetch_volume_once() 헬퍼 신규 — blng_cls/exls_cls 파라미터화 |
+|      |            | kis/rest_client.py: get_orderbook() 신규 (FHKST01010200) — 호가잔량 REST 조회 |
+|      |            | kis/websocket_client.py: subscribe_orderbook() 신규 (H0STASP0 구독) |
+|      |            |   unsubscribe_orderbook(), receive_loop()에 on_orderbook 콜백 추가 |
+|      |            |   _parse_orderbook() 신규 — H0STASP0 파이프 포맷 파싱 |
+|      |            |   _peek_tr_id() 신규 — 수신 데이터 분기용 tr_id 빠른 추출 |
+|      |            |   subscribed_ob 세트 신규 — 호가 구독 종목 관리 |
+|      |            |   disconnect()/reconnect: 호가 구독 종목도 복원 |
+|      |            | analyzers/volume_analyzer.py: analyze_orderbook() 신규 |
+|      |            |   매수매도잔량비율/상위3집중도/호가강도(강세/중립/약세) 계산 |
+|      |            |   poll_all_markets()/_detect_gap_up(): 급등 감지 직후 get_orderbook() 호출 |
+|      |            |   analyze_ws_tick(): 호가분석=None 반환 (realtime_alert에서 채움) |
+|      |            |   analyze_ws_orderbook_tick() 신규 — WS 호가 틱 → 호가분석 보강 |
+|      |            | reports/realtime_alert.py: _ws_loop() 호가 분석 통합 |
+|      |            |   WS_ORDERBOOK_ENABLED=false: 체결 감지 후 REST 호가 조회 |
+|      |            |   WS_ORDERBOOK_ENABLED=true: 체결20+호가20=40 구독, _ob_cache 활용 |
+|      |            |   _send_ai_followup(): 호가강도="약세" 시 자동매매 진입 보류 |
+|      |            | notifiers/telegram_bot.py: 호가분석 라인 추가 (강도이모지+매수매도비율+집중도) |
+|      |            | config.py: VOLUME_RANK_KOSPI_SIZE_CLS, ORDERBOOK_* 상수 추가 |
+|      |            |   WS_ORDERBOOK_ENABLED, WS_ORDERBOOK_SLOTS 신규 |
+|      |            | 반환값 계약: 호가분석 dict 키 추가 (매수매도비율/상위3집중도/호가강도/매수잔량/매도잔량) |
+|      |            | 절대 금지 규칙 32~34 추가 |
 |      |            | [문제1] 21.8% 뒷북 알림: volume_ranking은 등락률 무제한이므로 급등 끝 종목도 통과됨 |
 |      |            | [문제2] RVOL 오계산: 거래량배율=순간Δvol이었으나 진짜 RVOL은 누적거래량/전일거래량 |
 |      |            | [문제3] 정렬 오류: MAX_ALERTS_PER_CYCLE 등락률정렬 → 이미 많이 오른 것이 우선 발송 |
@@ -720,6 +772,10 @@ KIS_ACCOUNT_CODE=01
 # Phase 3: DB 경로 (선택 — 미설정 시 /data/bot_db.sqlite)
 # Railway Volume 마운트 시 /data 경로 권장 (재시작 후에도 데이터 유지)
 DB_PATH=/data/bot_db.sqlite
+
+# Phase 4: 호가 분석 / 소~중형주 필터 (선택 — 미설정 시 기본값 적용)
+ORDERBOOK_ENABLED=true        # REST 호가 분석 활성화 (false로 끄면 호가 조회 생략)
+WS_ORDERBOOK_ENABLED=false    # WebSocket H0STASP0 호가 구독 (true시 체결20+호가20=40)
 
 # Phase 4: 자동매매 (선택 — 미설정 시 자동매매 비활성)
 TRADING_MODE=VTS                    # VTS=모의투자(기본) / REAL=실전 (극도 주의)
