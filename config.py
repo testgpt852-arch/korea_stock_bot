@@ -83,6 +83,10 @@ PRICE_DELTA_MIN    = 1.5     # 1분간 최소 추가 등락률 (%) — 핵심 �
 VOLUME_DELTA_MIN   = 10      # 1분간 최소 추가 거래량 (전일 거래량 대비 %) (v3.7: 5→10 강화)
 CONFIRM_CANDLES    = 2       # 연속 충족 폴링 횟수 (허위신호 방지) (v3.7: 1→2 강화)
 MARKET_CAP_MIN     = 30_000_000_000   # 시총 하한: 300억 (극소형 제외)
+# [v4.1 버그수정] MARKET_CAP_MAX: FID_BLNG_CLS_CODE가 volume-rank API에서 실제 미동작
+# → hts_avls(KIS 응답 필드, 억원 단위) 기반 사후 필터링으로 대체
+# 10조 = 100,000억: 삼성전자(~350조), LG전자(~18조), 카카오(~20조) 모두 제외
+MARKET_CAP_MAX     = 100_000            # 억원 단위 (hts_avls 기준) — 10조 이상 제외
 
 # [v4.0 신규] 소~중형주 시총 상한 — 대형주 거래량 순위에서 제외
 # KIS FID_BLNG_CLS_CODE 분류 기준 (코스피):
