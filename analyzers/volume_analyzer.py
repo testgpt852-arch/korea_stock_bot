@@ -29,6 +29,14 @@ analyzers/volume_analyzer.py
         조건: Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
               × CONFIRM_CANDLES(2)회 연속
         반환값: "직전대비" key 추가 (1분간 추가 상승률)
+- v3.7: [노이즈 필터 3종 추가 — prism-insight 참조]
+        ① 누적 등락률 < MIN_CHANGE_RATE(2%) 스킵 — 사실상 안 오른 종목 제외
+        ② 장중 거래대금 < MIN_TRADE_AMOUNT(30억) 스킵 — 쪽정이 제거 (prism: 100억)
+           (거래대금 근사값 = 누적거래량 × 현재가)
+        ③ 사이클당 MAX_ALERTS_PER_CYCLE(5) 초과 알림 차단 — 폭탄 알림 방지
+           (등락률 내림차순 상위 N개만 발송)
+        GAP_UP_MIN 1.0→2.5 강화 (gap_up 조건 = 등락률 5% 이상)
+        CONFIRM_CANDLES 1→2, PRICE_DELTA_MIN 1.0→1.5, VOLUME_DELTA_MIN 5→10
 """
 
 from datetime import datetime
@@ -109,6 +117,27 @@ def poll_all_markets() -> list[dict]:
             if prev_price <= 0:
                 continue
 
+            # ── [v3.7] 누적 등락률 최솟값 체크 ─────────────────────
+            # 사실상 오르지 않은 종목은 급등 감지 대상이 아님 (prism: is_rising 필터)
+            change_rate = row["등락률"]
+            if change_rate < config.MIN_CHANGE_RATE:
+                logger.debug(
+                    f"[volume] {row['종목명']} 누적 등락률 {change_rate:.1f}% < "
+                    f"최솟값 {config.MIN_CHANGE_RATE:.1f}% → 스킵"
+                )
+                continue
+
+            # ── [v3.7] 장중 거래대금 필터 (prism-insight 핵심 필터) ──────
+            # 거래대금 근사값 = 누적거래량 × 현재가
+            # prism: 100억원 이상 / 장중 실시간이므로 30억원으로 완화
+            trade_amount = row["누적거래량"] * curr_price
+            if trade_amount < config.MIN_TRADE_AMOUNT:
+                logger.debug(
+                    f"[volume] {row['종목명']} 거래대금 {trade_amount/1e8:.0f}억원 < "
+                    f"최솟값 {config.MIN_TRADE_AMOUNT/1e8:.0f}억원 → 스킵"
+                )
+                continue
+
             # ── [버그픽스] 전일거래량 최솟값 체크 ───────────────────
             # prdy_vol이 너무 작으면 1분 거래량 배율이 수십만~수백만배로 폭발
             # 예: 전일 1주 거래된 종목이 오늘 1분에 185,805주 → 185,805배
@@ -155,6 +184,18 @@ def poll_all_markets() -> list[dict]:
     alerted.extend(gap_alerted)
 
     _prev_snapshot = current_snapshot
+
+    # ── [v3.7] 사이클당 최대 알림 수 제한 ───────────────────────────
+    # 등락률 내림차순 정렬 후 상위 MAX_ALERTS_PER_CYCLE개만 반환
+    # 한 사이클에 수십개 알림이 쏟아지는 폭탄 알림 방지
+    if len(alerted) > config.MAX_ALERTS_PER_CYCLE:
+        alerted.sort(key=lambda x: x["등락률"], reverse=True)
+        suppressed = len(alerted) - config.MAX_ALERTS_PER_CYCLE
+        alerted = alerted[:config.MAX_ALERTS_PER_CYCLE]
+        logger.info(
+            f"[volume] 사이클 최대 알림 수 초과 — 상위 {config.MAX_ALERTS_PER_CYCLE}개만 발송 "
+            f"({suppressed}개 억제)"
+        )
 
     if is_warmup:
         logger.info(
@@ -212,12 +253,26 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         if change_rate < config.GAP_UP_MIN * 2:
             continue
 
+        # ── [v3.7] 누적 등락률 최솟값 체크 (gap_up도 동일 기준 적용) ──
+        if change_rate < config.MIN_CHANGE_RATE:
+            continue
+
         prdy_vol = row.get("전일거래량", 1)
         # [버그픽스] 전일거래량 최솟값 체크 — 배율 폭발 방지
         if prdy_vol < config.MIN_PREV_VOL:
             logger.debug(
                 f"[volume] T2 {row.get('종목명', ticker)} 전일거래량 {prdy_vol:,}주 < "
                 f"최솟값 {config.MIN_PREV_VOL:,}주 → 스킵"
+            )
+            continue
+
+        curr_price = row.get("현재가", 0)
+        # ── [v3.7] 장중 거래대금 필터 ───────────────────────────────
+        trade_amount = row.get("누적거래량", 0) * curr_price
+        if trade_amount < config.MIN_TRADE_AMOUNT:
+            logger.debug(
+                f"[volume] T2 {row.get('종목명', ticker)} 거래대금 {trade_amount/1e8:.0f}억원 < "
+                f"최솟값 {config.MIN_TRADE_AMOUNT/1e8:.0f}억원 → 스킵"
             )
             continue
 
