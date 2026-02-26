@@ -4,7 +4,8 @@ analyzers/volume_analyzer.py
 
 반환값 규격 (ARCHITECTURE.md 계약):
 {"종목코드": str, "종목명": str, "등락률": float, "직전대비": float,
- "거래량배율": float, "조건충족": bool, "감지시각": str, "감지소스": str}
+ "거래량배율": float, "순간강도": float, "조건충족": bool,
+ "감지시각": str, "감지소스": str}
 
 [수정이력]
 - v1.3: CONFIRM_CANDLES 미사용 버그 수정 — 연속 N틱 카운터 구현
@@ -14,29 +15,27 @@ analyzers/volume_analyzer.py
 - v2.8: [핵심 변경] 누적 기준 → 델타(1분 변화량) 기준으로 전환
 - v2.9: 등락률 순위 API 병행 조회 추가 (get_rate_ranking)
         거래량 TOP 30 + 등락률 TOP 30 → 중복 제거 → 최대 60종목 델타 감지
-        디모아형(거래량 적음, 등락률 높음) 소형주 포착 커버리지 확장
 - v3.2: [Phase 2 / T2] 갭 상승 모멘텀 감지 추가
-        poll_all_markets() 폴링 사이클에서 갭업+장중추가상승 복합 조건 감지
-        데이터 소스: KIS REST 시가(stck_oprc) 활용 (v3.2에서 get_stock_price에 추가)
-        갭 상승 감지: 시가/전일종가 역산 비율 ≥ GAP_UP_MIN(1%) + 현재가 > 시가
-        감지소스 = "gap_up" 으로 구분 (volume/rate/websocket과 구별)
-        문제: 전일종가 대비 누적 등락률/거래량 조건
-              → 재시작 시 이미 올라간 종목 전부 한번에 감지 (폭탄 알림)
-        해결: _prev_snapshot 캐시 도입
-              직전 poll 대비 1분간 변화량(Δ등락률, Δ거래량)으로 조건 판단
-              첫 사이클 = 워밍업 (스냅샷 저장만, 알림 없음)
-              두 번째 사이클부터 진짜 "지금 막 터지는" 종목만 포착
-        조건: Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
-              × CONFIRM_CANDLES(2)회 연속
-        반환값: "직전대비" key 추가 (1분간 추가 상승률)
-- v3.7: [노이즈 필터 3종 추가 — prism-insight 참조]
-        ① 누적 등락률 < MIN_CHANGE_RATE(2%) 스킵 — 사실상 안 오른 종목 제외
-        ② 장중 거래대금 < MIN_TRADE_AMOUNT(30억) 스킵 — 쪽정이 제거 (prism: 100억)
-           (거래대금 근사값 = 누적거래량 × 현재가)
-        ③ 사이클당 MAX_ALERTS_PER_CYCLE(5) 초과 알림 차단 — 폭탄 알림 방지
-           (등락률 내림차순 상위 N개만 발송)
-        GAP_UP_MIN 1.0→2.5 강화 (gap_up 조건 = 등락률 5% 이상)
-        CONFIRM_CANDLES 1→2, PRICE_DELTA_MIN 1.0→1.5, VOLUME_DELTA_MIN 5→10
+- v3.7: [노이즈 필터 3종 추가]
+        ① 누적 등락률 < MIN_CHANGE_RATE(2%) 스킵
+        ② 장중 거래대금 < MIN_TRADE_AMOUNT(30억) 스킵
+        ③ 사이클당 MAX_ALERTS_PER_CYCLE(5) 초과 알림 차단
+- v3.8: [초기 급등 포착 & 뒷북 방지 — 핵심 개선]
+        ① MAX_CATCH_RATE(12%) 상한 필터 추가
+           → 이미 급등 끝난 종목(21.8% 등) 알림 완전 차단 (뒷북 제거)
+           → volume_ranking에는 등락률 제한이 없으므로 직접 필터링 필수
+        ② MIN_CHANGE_RATE 2.0→3.0% 상향
+           → 바닥 꼬물거리는 가짜 상승 제거
+        ③ MIN_VOL_RATIO_ACML(30%) 누적 RVOL 필터 추가
+           → 누적거래량/전일거래량 × 100 ≥ 30% 검증
+           → 호가만 비어서 오르는 쪽박주(거래량 없는 허상 급등) 제거
+           → 진짜 RVOL 개념 도입 (기존 거래량배율=순간 Δvol은 RVOL 아님)
+        ④ 거래량배율 출력 의미 변경: 순간 Δvol → 누적 RVOL (실제 RVOL 표시)
+           + 순간강도(순간 Δvol 비율) 별도 필드로 분리 → 알림 정보 풍부화
+        ⑤ MAX_ALERTS_PER_CYCLE 정렬 기준: 등락률→직전대비(순간 가속도)
+           → 이미 많이 오른 순이 아닌, 지금 막 폭발하는 종목 우선 발송
+        ⑥ 알림 발송 후 _confirm_count 초기화 (재트리거 방지)
+        ⑦ gap_up 감지에도 MAX_CATCH_RATE 상한 적용
 """
 
 from datetime import datetime
@@ -59,14 +58,14 @@ def poll_all_markets() -> list[dict]:
 
     반환값 규격: ARCHITECTURE.md 계약 준수
 
-    [v2.8 감지 로직]
-    1. 첫 사이클 (워밍업): _prev_snapshot 저장만, 알림 없음
-    2. 이후 사이클:
-       - Δ등락률  = (현재가 - 직전가) / 직전가 × 100
-       - Δ거래량  = 누적거래량 - 직전누적거래량
-       - Δ거래량배율 = Δ거래량 / 전일거래량 × 100
-       - 조건: Δ등락률 ≥ PRICE_DELTA_MIN AND Δ거래량배율 ≥ VOLUME_DELTA_MIN
-               × CONFIRM_CANDLES회 연속 충족 시 알림
+    [v3.8 필터 체인 순서]
+    1. 누적 등락률 < MIN_CHANGE_RATE(3%) → 스킵 (바닥 꼬물이)
+    2. 누적 등락률 > MAX_CATCH_RATE(12%) → 스킵 (이미 급등 끝, 뒷북 방지)
+    3. 장중 거래대금 < MIN_TRADE_AMOUNT(30억) → 스킵 (쪽정이)
+    4. 전일거래량 < MIN_PREV_VOL(5만) → 스킵 (배율 왜곡)
+    5. 누적RVOL < MIN_VOL_RATIO_ACML(30%) → 스킵 (허상 급등)
+    6. 순간Δ등락률 ≥ PRICE_DELTA_MIN AND 순간강도 ≥ VOLUME_DELTA_MIN → 카운터 증가
+    7. CONFIRM_CANDLES회 연속 → 알림 발송 + 카운터 초기화
     """
     global _prev_snapshot
     from kis.rest_client import get_volume_ranking, get_rate_ranking
@@ -78,9 +77,6 @@ def poll_all_markets() -> list[dict]:
     for market_code in ["J", "Q"]:
         market_name = "코스피" if market_code == "J" else "코스닥"
 
-        # ── 거래량 순위 + 등락률 순위 병합 (중복 제거) ──────────
-        # 거래량 TOP 30: 대형주·테마 대장주 포착
-        # 등락률 TOP 30: 거래량 적어도 급등하는 소형주(디모아형) 포착
         vol_rows  = get_volume_ranking(market_code)
         rate_rows = get_rate_ranking(market_code)
 
@@ -103,33 +99,39 @@ def poll_all_markets() -> list[dict]:
 
         for row in rows:
             ticker = row["종목코드"]
-            current_snapshot[ticker] = row   # 다음 사이클을 위해 저장
+            current_snapshot[ticker] = row
 
             if is_warmup:
-                continue   # 워밍업 사이클: 데이터 수집만
+                continue
 
             prev = _prev_snapshot.get(ticker)
             if not prev:
-                continue   # 이번 사이클 신규 진입 종목 → 다음 사이클부터 감지
+                continue
 
             prev_price = prev["현재가"]
             curr_price = row["현재가"]
             if prev_price <= 0:
                 continue
 
-            # ── [v3.7] 누적 등락률 최솟값 체크 ─────────────────────
-            # 사실상 오르지 않은 종목은 급등 감지 대상이 아님 (prism: is_rising 필터)
+            # ── 필터 1: 누적 등락률 하한 ─────────────────────────
             change_rate = row["등락률"]
             if change_rate < config.MIN_CHANGE_RATE:
                 logger.debug(
-                    f"[volume] {row['종목명']} 누적 등락률 {change_rate:.1f}% < "
-                    f"최솟값 {config.MIN_CHANGE_RATE:.1f}% → 스킵"
+                    f"[volume] {row['종목명']} 등락률 {change_rate:.1f}% < "
+                    f"하한 {config.MIN_CHANGE_RATE:.1f}% → 스킵"
                 )
                 continue
 
-            # ── [v3.7] 장중 거래대금 필터 (prism-insight 핵심 필터) ──────
-            # 거래대금 근사값 = 누적거래량 × 현재가
-            # prism: 100억원 이상 / 장중 실시간이므로 30억원으로 완화
+            # ── 필터 2: 누적 등락률 상한 (v3.8 신규 — 뒷북 방지 핵심) ─
+            # volume_ranking은 등락률 무제한 → 21.8% 같은 급등 끝 종목 차단
+            if change_rate > config.MAX_CATCH_RATE:
+                logger.debug(
+                    f"[volume] {row['종목명']} 등락률 {change_rate:.1f}% > "
+                    f"상한 {config.MAX_CATCH_RATE:.1f}% → 이미 급등 끝, 스킵"
+                )
+                continue
+
+            # ── 필터 3: 장중 거래대금 ────────────────────────────
             trade_amount = row["누적거래량"] * curr_price
             if trade_amount < config.MIN_TRADE_AMOUNT:
                 logger.debug(
@@ -138,9 +140,7 @@ def poll_all_markets() -> list[dict]:
                 )
                 continue
 
-            # ── [버그픽스] 전일거래량 최솟값 체크 ───────────────────
-            # prdy_vol이 너무 작으면 1분 거래량 배율이 수십만~수백만배로 폭발
-            # 예: 전일 1주 거래된 종목이 오늘 1분에 185,805주 → 185,805배
+            # ── 필터 4: 전일거래량 최솟값 ───────────────────────
             prdy_vol = row["전일거래량"]
             if prdy_vol < config.MIN_PREV_VOL:
                 logger.debug(
@@ -149,16 +149,26 @@ def poll_all_markets() -> list[dict]:
                 )
                 continue
 
-            # ── 1분간 추가 등락률 ────────────────────────────
-            delta_rate = (curr_price - prev_price) / prev_price * 100
+            # ── 필터 5: 누적 RVOL (v3.8 신규 — 허상 급등 방지) ──
+            # 누적거래량 / 전일거래량 × 100
+            # 장 초반인데도 전일의 30% 이상 거래됨 = 진짜 돈이 몰리는 종목
+            acml_vol  = row["누적거래량"]
+            acml_rvol = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
+            if acml_rvol < config.MIN_VOL_RATIO_ACML:
+                logger.debug(
+                    f"[volume] {row['종목명']} 누적RVOL {acml_rvol:.0f}% < "
+                    f"최솟값 {config.MIN_VOL_RATIO_ACML:.0f}% → 거래량 부족, 스킵"
+                )
+                continue
 
-            # ── 1분간 추가 체결량 → 전일거래량 대비 배율 ────
-            delta_vol       = max(0, row["누적거래량"] - prev["누적거래량"])
-            delta_vol_ratio = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
+            # ── 순간 가속도 계산 ──────────────────────────────────
+            delta_rate = (curr_price - prev_price) / prev_price * 100
+            delta_vol  = max(0, acml_vol - prev["누적거래량"])
+            순간강도    = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
             single_ok = (
-                delta_rate      >= config.PRICE_DELTA_MIN and
-                delta_vol_ratio >= config.VOLUME_DELTA_MIN
+                delta_rate >= config.PRICE_DELTA_MIN and
+                순간강도   >= config.VOLUME_DELTA_MIN
             )
 
             _confirm_count[ticker] = (
@@ -166,34 +176,36 @@ def poll_all_markets() -> list[dict]:
             )
 
             if _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES:
+                # [v3.8] 알림 발송 후 카운터 초기화 — 재트리거 방지
+                _confirm_count[ticker] = 0
+
                 alerted.append({
                     "종목코드":   ticker,
                     "종목명":     row["종목명"],
-                    "등락률":     row["등락률"],                      # 누적 등락률 (참고)
-                    "직전대비":   round(delta_rate, 2),              # 1분간 추가 상승률 (핵심)
-                    "거래량배율": round(delta_vol_ratio / 100, 2),   # 1분간 Δvol / prdy_vol
+                    "등락률":     change_rate,                  # 현재 누적 등락률 (3~12% 구간)
+                    "직전대비":   round(delta_rate, 2),         # 순간 추가 상승률 (핵심)
+                    "거래량배율": round(acml_rvol / 100, 2),    # [v3.8] 누적RVOL (acml/prdy 배수)
+                    "순간강도":   round(순간강도, 1),            # [v3.8] 순간 Δvol 강도 (%)
                     "조건충족":   True,
                     "감지시각":   datetime.now().strftime("%H:%M:%S"),
-                    "감지소스":   row.get("_source", "volume"),      # "volume" or "rate"
+                    "감지소스":   row.get("_source", "volume"),
                 })
 
     # ── [T2] 갭 상승 모멘텀 감지 (v3.2) ─────────────────────────
-    # 워밍업 사이클에서도 실행 (갭업은 장 시작부터 이미 발생)
-    # 조건: 시가/전일종가역산 갭업률 ≥ GAP_UP_MIN AND 현재가 > 시가 (추가 상승 중)
     gap_alerted = _detect_gap_up(current_snapshot, alerted)
     alerted.extend(gap_alerted)
 
     _prev_snapshot = current_snapshot
 
-    # ── [v3.7] 사이클당 최대 알림 수 제한 ───────────────────────────
-    # 등락률 내림차순 정렬 후 상위 MAX_ALERTS_PER_CYCLE개만 반환
-    # 한 사이클에 수십개 알림이 쏟아지는 폭탄 알림 방지
+    # ── [v3.8] 사이클당 최대 알림 수 제한 + 정렬 기준 변경 ───────────
+    # 기존: 등락률 내림차순 (이미 많이 오른 종목 우선 → 오히려 뒷북)
+    # 변경: 직전대비(순간 가속도) 내림차순 → "지금 막 폭발하는" 종목 우선
     if len(alerted) > config.MAX_ALERTS_PER_CYCLE:
-        alerted.sort(key=lambda x: x["등락률"], reverse=True)
+        alerted.sort(key=lambda x: x["직전대비"], reverse=True)
         suppressed = len(alerted) - config.MAX_ALERTS_PER_CYCLE
         alerted = alerted[:config.MAX_ALERTS_PER_CYCLE]
         logger.info(
-            f"[volume] 사이클 최대 알림 수 초과 — 상위 {config.MAX_ALERTS_PER_CYCLE}개만 발송 "
+            f"[volume] 사이클 최대 알림 수 초과 — 순간가속도 상위 {config.MAX_ALERTS_PER_CYCLE}개만 발송 "
             f"({suppressed}개 억제)"
         )
 
@@ -216,13 +228,8 @@ _gap_alerted: set[str] = set()   # 당일 이미 갭 알림 발송된 종목 (�
 def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> list[dict]:
     """
     [T2] 갭 상승 모멘텀 감지
-    - 시가 > 전일종가 × (1 + GAP_UP_MIN/100): 갭업 확인
-    - 현재가 > 시가: 장중 추가 상승 중
-    - 이미 alerted에 포함된 종목 제외 (중복 방지)
-    - 당일 이미 감지된 종목 제외 (_gap_alerted)
-
-    전일종가 역산: prev_close ≈ curr_price / (1 + change_rate/100)
-    (KIS volume-rank/rate-rank API에 전일종가 필드 없으므로 역산 사용)
+    - change_rate > GAP_UP_MIN × 2: 갭업 + 추가 상승 복합 추정
+    - [v3.8] change_rate ≤ MAX_CATCH_RATE: 이미 급등 끝난 종목 제외 (일관성)
     """
     already_codes = {a["종목코드"] for a in already_alerted}
     results = []
@@ -237,28 +244,21 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         if curr_price <= 0 or change_rate <= 0:
             continue
 
-        # 전일종가 역산
-        prev_close = curr_price / (1 + change_rate / 100)
-        if prev_close <= 0:
-            continue
-
-        # 시가 정보가 없으면 스킵 (get_stock_price v3.2에서 추가 — 별도 조회 불필요)
-        # volume_ranking / rate_ranking 응답에는 시가 없음 → 갭 감지 불가 시 스킵
-        # 향후 rest_client 응답에 stck_oprc 포함 시 활성화 가능
-        # 현재는 change_rate 만으로 갭 추정
-        # 갭업 추정: change_rate > GAP_UP_MIN + 시초가 갭업 가정 (보수적)
-        # 더 정확한 구현은 개별 get_stock_price() 호출이 필요하나 API 비용 높음
-        # → 현 단계에서 등락률로 간접 추정 (갭업 + 추가 상승 = 전체 등락률 높음)
-        # T2 감지 조건: 현재 등락률이 GAP_UP_MIN × 2 이상인 종목 (갭+추가상승 복합)
         if change_rate < config.GAP_UP_MIN * 2:
             continue
 
-        # ── [v3.7] 누적 등락률 최솟값 체크 (gap_up도 동일 기준 적용) ──
         if change_rate < config.MIN_CHANGE_RATE:
             continue
 
+        # ── [v3.8] 상한 필터 (gap_up도 동일 기준) ───────────────
+        if change_rate > config.MAX_CATCH_RATE:
+            logger.debug(
+                f"[volume] T2 {row.get('종목명', ticker)} 등락률 {change_rate:.1f}% > "
+                f"상한 {config.MAX_CATCH_RATE:.1f}% → 이미 급등 끝, 스킵"
+            )
+            continue
+
         prdy_vol = row.get("전일거래량", 1)
-        # [버그픽스] 전일거래량 최솟값 체크 — 배율 폭발 방지
         if prdy_vol < config.MIN_PREV_VOL:
             logger.debug(
                 f"[volume] T2 {row.get('종목명', ticker)} 전일거래량 {prdy_vol:,}주 < "
@@ -266,8 +266,6 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
             )
             continue
 
-        curr_price = row.get("현재가", 0)
-        # ── [v3.7] 장중 거래대금 필터 ───────────────────────────────
         trade_amount = row.get("누적거래량", 0) * curr_price
         if trade_amount < config.MIN_TRADE_AMOUNT:
             logger.debug(
@@ -277,22 +275,23 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
             continue
 
         _gap_alerted.add(ticker)
-        acml_vol    = row.get("누적거래량", 0)
-        vol_ratio   = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
+        acml_vol  = row.get("누적거래량", 0)
+        acml_rvol = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
 
         results.append({
             "종목코드":   ticker,
             "종목명":     row.get("종목명", ticker),
             "등락률":     change_rate,
-            "직전대비":   0.0,   # 갭 감지는 델타 미사용
-            "거래량배율": round(vol_ratio, 2),
+            "직전대비":   0.0,
+            "거래량배율": round(acml_rvol, 2),   # [v3.8] 누적RVOL (acml/prdy 배수)
+            "순간강도":   0.0,                    # [v3.8] 갭 감지는 순간강도 N/A
             "조건충족":   True,
             "감지시각":   datetime.now().strftime("%H:%M:%S"),
-            "감지소스":   "gap_up",   # T2 갭 상승 트리거
+            "감지소스":   "gap_up",
         })
         logger.info(
             f"[volume] T2 갭상승 감지: {row.get('종목명', ticker)} "
-            f"+{change_rate:.1f}% (갭업추정)"
+            f"+{change_rate:.1f}% (갭업추정, RVOL {acml_rvol:.1f}x)"
         )
 
     return results
@@ -328,8 +327,9 @@ def analyze(tick: dict) -> dict:
         "종목코드":   ticker,
         "종목명":     tick.get("종목명", ticker),
         "등락률":     rate,
-        "직전대비":   0.0,   # WebSocket 틱은 델타 미지원 (향후 확장 시 구현)
+        "직전대비":   0.0,
         "거래량배율": round(volume_ratio / 100, 2),
+        "순간강도":   0.0,
         "조건충족":   confirmed,
         "감지시각":   datetime.now().strftime("%H:%M:%S"),
         "감지소스":   "volume",
@@ -341,8 +341,8 @@ def reset() -> None:
     global _prev_snapshot
     _prev_snapshot = {}
     _confirm_count.clear()
-    _ws_alerted_tickers.clear()   # v3.1: WS 상태도 초기화
-    _gap_alerted.clear()          # v3.2: T2 갭 상승 감지 상태 초기화
+    _ws_alerted_tickers.clear()
+    _gap_alerted.clear()
     logger.info("[volume] 스냅샷·확인카운터·WS상태·갭상승상태 초기화 완료")
 
 
@@ -356,38 +356,31 @@ def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
     REST  : 직전 poll 대비 Δ등락률/Δ거래량 (변화량 기준) → 신규 종목 발굴
     WS    : 누적 등락률 >= PRICE_CHANGE_MIN(3%) (절대값 기준) → 워치리스트 즉시 감지
 
-    [중복 알림 방지]
-    실제 발송 제어는 state_manager.can_alert()에 위임 (30분 쿨타임).
-    이 함수는 조건 판단만 담당.
-
-    Args:
-        tick:     _parse_tick()이 반환한 실시간 틱 dict
-                  {"종목코드", "등락률", "누적거래량", "체결시각", "종목명"(보강)}
-        prdy_vol: 전일거래량 (watchlist_state에서 전달)
-
-    Returns:
-        조건 충족 시 알림 dict, 미충족 시 None
+    [v3.8] 상한 필터(MAX_CATCH_RATE) 추가 — 워치리스트 종목도 뒷북 방지
     """
     rate = tick.get("등락률", 0.0)
 
-    # 누적 등락률이 임계값 미달 → 조건 미충족
     if rate < config.PRICE_CHANGE_MIN:
         return None
+    # [v3.8] WebSocket도 상한 필터 적용 (일관성)
+    if rate > config.MAX_CATCH_RATE:
+        return None
 
-    acml_vol     = tick.get("누적거래량", 0)
-    volume_ratio = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
+    acml_vol  = tick.get("누적거래량", 0)
+    acml_rvol = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
 
     ticker = tick.get("종목코드", "")
     체결시각 = tick.get("체결시각", "")
-    if len(체결시각) == 6:   # HHMMSS → HH:MM:SS
+    if len(체결시각) == 6:
         체결시각 = f"{체결시각[:2]}:{체결시각[2:4]}:{체결시각[4:]}"
 
     return {
         "종목코드":   ticker,
         "종목명":     tick.get("종목명", ticker),
         "등락률":     rate,
-        "직전대비":   0.0,         # WS 틱은 누적값 — "직전대비" 개념 없음
-        "거래량배율": round(volume_ratio, 2),
+        "직전대비":   0.0,
+        "거래량배율": round(acml_rvol, 2),   # [v3.8] 누적RVOL
+        "순간강도":   0.0,
         "조건충족":   True,
         "감지시각":   체결시각 or datetime.now().strftime("%H:%M:%S"),
         "감지소스":   "websocket",
