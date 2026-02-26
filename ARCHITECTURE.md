@@ -93,9 +93,14 @@ korea_stock_bot/
 │   ├── theme_analyzer.py         ← 테마 그룹핑, 순환매 소외도
 │   ├── signal_analyzer.py        ← 신호 1~5
 │   ├── ai_analyzer.py            ← Gemma-3-27b-it 2차 분석 [v4.2 Phase 1: 프롬프트 전면 강화]
+│   │                                 analyze_spike(): 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS
+│   │                                 (rule #38: 오닐 인격 블록 삭제 금지)
 │   ├── closing_strength.py       ← [v3.2] T5 마감 강도 트리거 (마감봇용, pykrx)
 │   ├── volume_flat.py            ← [v3.2] T6 횡보 거래량 급증 (마감봇용, pykrx)
-│   └── fund_inflow_analyzer.py   ← [v3.2] T3 시총 대비 자금유입 (마감봇용, pykrx)
+│   ├── fund_inflow_analyzer.py   ← [v3.2] T3 시총 대비 자금유입 (마감봇용, pykrx)
+│   └── oracle_analyzer.py        ← [v8.1] 쪽집게봇 — 컨플루언스 스코어링 → 픽 + 진입조건
+│                                     테마/수급/공시/T5·T6·T3 종합 (외부 API·DB·발송 호출 없음)
+│                                     closing_report(T5/T6/T3 포함) + morning_report(수급·공시만) 양쪽 호출
 │
 ├── notifiers/
 │   ├── telegram_bot.py      ← 텔레그램 포맷 + 발송 [v5.0: send_photo_async, format_morning_summary 추가]
@@ -178,6 +183,7 @@ ai_analyzer.py            → morning_report (analyze_dart + analyze_closing v2.
                             [v4.2] market_env 파라미터: realtime_alert에서 선택적 주입
                             [v4.2] 반환값 확장: target_price, stop_loss, risk_reward_ratio 추가
 telegram_bot.py           → morning_report, closing_report, realtime_alert
+                            [v8.1] format_oracle_section(): oracle_analyzer 결과 포맷 (분석 로직 없음)
 kis/auth.py               → kis/rest_client, kis/websocket_client
 kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 + 시가 제공)
 kis/websocket_client.py   → volume_analyzer, realtime_alert
@@ -186,6 +192,11 @@ utils/rate_limiter.py     → kis/rest_client (API 호출 보호)
 analyzers/closing_strength.py → reports/closing_report (T5 마감 강도)
 analyzers/volume_flat.py  → reports/closing_report (T6 횡보 거래량)
 analyzers/fund_inflow_analyzer.py → reports/closing_report (T3 시총 자금유입)
+analyzers/oracle_analyzer.py    ← reports/closing_report (theme_map, price, institutional, T5/T6/T3 전달)
+analyzers/oracle_analyzer.py    ← reports/closing_report (theme_map, price, institutional, T5/T6/T3 전달)
+                                 ← reports/morning_report (theme_map, price, institutional, ai_dart 전달)
+                                 → notifiers/telegram_bot (format_oracle_section 이 포맷)
+                                 ※ T5/T6/T3는 closing_report에서만 전달 (morning_report는 None) — rule #16
 kis/order_client.py       → kis/auth (get_vts_access_token / get_access_token)
 kis/order_client.py       → utils/rate_limiter (API 호출 보호)
 traders/position_manager.py → tracking/db_schema (get_conn)
@@ -324,8 +335,10 @@ graph TD
            "상한가 순환매"/"KOSPI 급등 순환매" → 실제 테마명(바이오신약 등)
            실패 시 기존 신호4 유지 (graceful fallback)
        ⑧ theme_analyzer — AI 테마 기반 소외도 계산
+       ⑧-b oracle_analyzer — 수급·공시·소외도 기반 픽 + 진입조건 (v8.1 신규)
+           T5/T6/T3 없음 — rule #16 준수 (마감봇 전용 트리거)
        ⑨ morning_report 조립
-       ⑩ telegram_bot 발송 (요약 선발송 → 상세 리포트 후발송)  ← v5.0 변경
+       ⑩ telegram_bot 발송 (쪽집게 최우선 선발송 → 핵심 요약 → 상세 리포트)  ← v8.1 변경
 
 09:00  ─── 장중봇 시작 ──────────────────────────────────────
        (컨테이너가 이미 장중에 있으면 시작 시 즉시 실행됨)
@@ -415,6 +428,8 @@ graph TD
        [v3.2] volume_flat     → T6 횡보 거래량 급증 종목  ← v3.6에서 dead code 복원
        [v3.2] fund_inflow_analyzer → T3 시총 자금유입     ← v3.6에서 dead code 복원
        [v3.2] watchlist_state 보강: T5+T6 종목 → 내일 WebSocket 워치리스트 추가  ← v3.6 복원
+       [v8.1] oracle_analyzer → T5/T6/T3 + 테마/수급/공시 종합 → 내일 픽 + 진입조건
+              쪽집게 섹션 선발송 → 마감 리포트 후발송 (결론 먼저 제공)
        telegram_bot 발송 (T3/T5/T6 섹션 포함)
 
 18:45  ─── 수익률 추적 배치 (Phase 3, v3.3 / v4.2 확장) ────────────────────
@@ -577,6 +592,42 @@ FUND_INFLOW_TOP_N      = 7
 # order_client.get_balance() → dict
 {"holdings": list[{ticker,name,qty,avg_price,current_price,profit_rate}],
  "available_cash": int, "total_eval": int, "total_profit": float}
+
+# oracle_analyzer.analyze() → dict  [v8.1 신규]
+{
+    "picks": [          # 최대 5종목
+        {
+            "rank":          int,      # 1~5 순위
+            "ticker":        str,      # 종목코드
+            "name":          str,      # 종목명
+            "theme":         str,      # 소속 테마
+            "entry_price":   int,      # 진입가 (전일 종가)
+            "target_price":  int,      # 목표가
+            "stop_price":    int,      # 손절가 (O'Neil -7%)
+            "target_pct":    float,    # 목표 수익률 (%)
+            "stop_pct":      float,    # 손절 기준 (%) — 항상 -7.0
+            "rr_ratio":      float,    # 손익비
+            "score":         int,      # 컨플루언스 점수 (0~100)
+            "badges":        list[str],# 근거 배지 (기관/외인↑, 마감강도↑ 등)
+            "position_type": str,      # 포지션 타입 (오늘★/내일/모니터/대장)
+        }
+    ],
+    "top_themes": [     # 상위 3 테마
+        {
+            "theme":         str,
+            "score":         int,
+            "factors":       list[str],  # 점수 기여 요인
+            "leader":        str,
+            "leader_change": float,
+        }
+    ],
+    "market_env":     str,    # 시장 환경
+    "rr_threshold":   float,  # 적용 R/R 기준
+    "one_line":       str,    # 한 줄 요약
+    "has_data":       bool,   # 실제 픽 있는지
+}
+# R/R 기준: 강세장 1.2+ / 약세장·횡보 2.0+ / 기본 1.5+
+# T5/T6/T3 파라미터: closing_report에서만 전달, morning_report는 None (rule #82)
 
 # position_manager.can_buy(ticker, ai_result, market_env) → (bool, str)  [v4.2 확장]
 (True, "OK") | (False, "사유 메시지")
@@ -748,7 +799,24 @@ gemini-2.5-flash   20회/일   ❌ 부족
     대화 타임아웃 EVALUATE_CONV_TIMEOUT_SEC(기본 120초) 반드시 적용
     KIS get_current_price 실패 시 현재가 없이 수익률 0% 표시 (비치명적)
 
-[v7.0 Priority 1~3 구현 규칙]
+[v8.1 쪽집게봇 규칙]
+80. analyzers/oracle_analyzer.py는 분석·점수 계산만 담당
+    DB 기록·텔레그램 발송·KIS API 호출·AI API 호출·수집 로직 절대 금지
+    외부 의존성 없는 순수 계산 모듈 (입력 파라미터만으로 동작)
+81. oracle_analyzer.analyze()는 closing_report / morning_report 에서만 호출
+    장중봇(realtime_alert) 직접 호출 금지 — 마감/아침 배치 전용
+82. oracle_analyzer에 T5/T6/T3 파라미터는 closing_report에서만 전달
+    morning_report에서는 반드시 None으로 전달 — rule #16 (마감봇 전용 트리거) 준수
+    실수로 None이 들어와도 oracle_analyzer 내부에서 안전하게 처리 (빈 set으로 폴백)
+83. format_oracle_section()은 telegram_bot.py에만 위치 — rule #6 준수
+    oracle_analyzer나 report 모듈에서 직접 포맷 생성 금지 (telegram_bot 경유 필수)
+84. oracle_analyzer.analyze() 실패 시 반드시 None 반환 (비치명적)
+    호출처(closing_report / morning_report)에서 oracle_result is None 체크 후 발송 건너뜀
+    oracle 실패가 전체 리포트 발송을 막으면 안 됨
+85. 윌리엄 오닐 인격 적용 범위 명시:
+    - ai_analyzer.analyze_spike(): 장중 급등 AI 판단 (rule #38 — 삭제 금지)
+    - oracle_analyzer: 아침/마감 픽 생성 시 오닐 -7% 손절 철칙 + R/R 기준 강제 적용
+    두 모듈이 상호 보완 — 장중봇은 오닐 AI 판단, 아침/마감봇은 오닐 수치 기준 픽 필터
 72. tests/ 디렉토리는 단위 테스트 전용 — 실제 API 호출 금지 (Mock 불필요한 순수 로직만)
     테스트는 외부 의존성 없이 독립 실행 가능해야 함 (임시 SQLite DB 허용)
     새 모듈 추가 시 tests/ 에 대응 테스트 파일 생성 권장
@@ -1090,6 +1158,26 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | requirements.txt 수정 |
 |      |            | - matplotlib 추가 |
 |      |            | 절대 금지 규칙 61~65 추가 (Phase 5 차트 & UX 규칙) |
+| v8.1 | 2026-02-27 | **쪽집게봇 — oracle_analyzer 통합 (아침봇·마감봇 픽 + 진입조건)** |
+|      |            | analyzers/oracle_analyzer.py 신규: 컨플루언스 스코어링 엔진 |
+|      |            | - analyze(): 테마/수급/공시/T5·T6·T3 종합 → 최대 5종목 픽 |
+|      |            | - 컨플루언스 점수(0~100): 기관/외인30 + 소외도25 + T5마감강도20 + 공시AI15 + T3/T6 10 + 신호강도5 |
+|      |            | - 윌리엄 오닐 손절 철칙 -7% 절대 적용 + R/R 기준 시장환경 분기 |
+|      |            |   (강세장 1.2+ / 약세장·횡보 2.0+ / 기본 1.5+) |
+|      |            | - 외부 API 호출 없음 — 입력 파라미터만으로 동작 (순수 계산 모듈) |
+|      |            | - 실패 시 None 반환 (비치명적) — 전체 리포트 발송에 영향 없음 |
+|      |            | reports/closing_report.py 수정: oracle_analyzer 통합 |
+|      |            | - T5/T6/T3 결과 oracle_analyzer에 전달 (마감봇만 — rule #16 준수) |
+|      |            | - 쪽집게 픽 섹션 선발송 → 마감 리포트 후발송 (결론 먼저) |
+|      |            | reports/morning_report.py 수정: oracle_analyzer 통합 |
+|      |            | - T5/T6/T3 None 전달 (아침봇은 수급+공시+소외도 기반만) |
+|      |            | - 쪽집게 픽 섹션 최우선 발송 → 핵심 요약 → 상세 리포트 (3단계) |
+|      |            | notifiers/telegram_bot.py 수정: format_oracle_section() 추가 |
+|      |            | - oracle_result → 텔레그램 포맷 (포맷·발송만, 분석 로직 없음 — rule #6) |
+|      |            | - 픽마다 진입가·목표가·손절가·R/R + 판단 근거 배지 표시 |
+|      |            | - 한 줄 요약(one_line) 맨 하단 표시 |
+|      |            | ARCHITECTURE.md: 의존성 지도 + 규칙 80~85 추가 |
+|      |            | 절대 금지 규칙 80~85 추가 (v8.1 쪽집게봇 규칙) |
 | v4.4 | 2026-02-26 | **Phase 4 — 포트폴리오 인텔리전스 강화 (Prism portfolio_intelligence 경량화)** |
 |      |            | config.py: Phase 4 상수 추가 |
 |      |            | - POSITION_MAX_BULL(5) / POSITION_MAX_NEUTRAL(3) / POSITION_MAX_BEAR(2) |
