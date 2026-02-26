@@ -251,14 +251,12 @@ graph TD
        asyncio.create_task(_poll_loop()) 백그라운드 시작
        ↓ POLL_INTERVAL_SEC(60초)마다:
            volume_analyzer.poll_all_markets()
-               [v2.9 듀얼 소스 병합]
-               → KIS REST get_volume_ranking("J"/"Q") 거래량 순위 각 30종목
-                   대형주·테마 대장주 포착 (거래량 많은 종목)
-               → KIS REST get_rate_ranking("J"/"Q")   등락률 순위 각 최대 30종목
-                   [v3.0 개편] 코스닥: 노이즈전부제외 / 코스피: 중형+소형합산
-                   등락률 0~10% 구간만 → 초기 급등 조기 포착
-                   종목코드 필드 버그 수정 (stck_shrn_iscd)
-               → 종목코드 기준 중복 제거 → 최대 60종목 델타 감지
+               [v4.1 소스 단일화]
+               → KIS REST get_rate_ranking("J"/"Q") 등락률 순위만 사용
+                   코스피: 중형+소형 합산 / 코스닥: 전체(스팩·ETF 제외)
+                   등락률 0~10% 구간 → 초기 급등 조기 포착
+                   ※ get_volume_ranking() 제거: 삼성전자·현대차 등 대형주가
+                     거래량 순위 상위에 항상 포함되어 노이즈 알림 발생했었음
                [v2.8 델타 기준 감지]
                → 첫 사이클: 워밍업 (스냅샷 저장만, 알림 없음)
                → 이후 사이클: 직전 poll 대비 1분간 변화량 판단
@@ -471,7 +469,7 @@ tr_id            함수명                   용도
 ─────────────────────────────────────────────────
 FHKST01010100    get_stock_price()        단일 종목 현재가
 FHKST01010200    get_orderbook()          호가잔량 조회 (v4.0 신규)
-FHPST01710000    get_volume_ranking()     거래량 순위 (v4.0: 코스피 중형+소형만 — 대형 제외)
+FHPST01710000    get_volume_ranking()     거래량 순위 (v4.1: poll_all_markets에서 제거됨 — 대형주 노이즈)
 FHPST01700000    get_rate_ranking()       등락률 순위 (v2.9 신규 / v3.0 개편)
                                           코스닥: 모든 노이즈 제외, 등락률 0~10%
                                           코스피: 중형+소형 합산, 등락률 0~10%
@@ -574,8 +572,9 @@ gemini-2.5-flash   20회/일   ❌ 부족
     → AI 실패 시 기존 신호4(상한가 순환매 등) 유지 — 의존성 없는 graceful fallback
 
 [소~중형주 필터 + 호가 분석 규칙 — v4.0 추가]
-32. get_volume_ranking() 코스피: 중형(FID_BLNG_CLS_CODE="2") + 소형("3") 2회 호출 필수
-    대형주 포함 전체("0") 호출 금지 — get_rate_ranking()과 동일 방식 유지
+32. [v4.1 deprecated] get_volume_ranking() 은 poll_all_markets()에서 사용하지 않음
+    → 대형주 노이즈 알림 원인이었으므로 제거. get_rate_ranking() 단독 사용.
+    get_volume_ranking() 함수 자체는 rest_client.py에 보존 (다른 용도 호환)
     코스닥은 시장 특성상 전체("0") 유지 (단, 스팩/ETF/ETN 제외)
 33. get_orderbook()은 volume_analyzer 내부 급등 감지 직후에만 호출 (외부 직접 호출 금지)
     호가 분석 로직은 volume_analyzer.analyze_orderbook()에만 위치
@@ -710,6 +709,13 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | 월요일 입력 시 일요일(데이터 없음) 반환 → 금요일 반환으로 수정 |
 | v3.8 | 2026-02-26 | **초기 급등 포착 & 뒷북 방지 — 장중봇 핵심 로직 개선** |
 | v4.0 | 2026-02-26 | **소~중형주 필터 + WebSocket 호가 분석 통합** |
+| v4.1 | 2026-02-26 | **장중봇 소스 단일화 — 거래량 순위 제거, 등락률 순위만 사용** |
+|      |            | analyzers/volume_analyzer.py: poll_all_markets()에서 get_volume_ranking() 호출 제거 |
+|      |            | 이유: 삼성전자·현대차 등 시총 대형주가 거래량 순위 상위에 항상 포함되어 |
+|      |            |   실질적 급등 신호가 아닌 노이즈 알림 다수 발생 |
+|      |            | get_rate_ranking()만 사용 — 코스피(중형+소형)/코스닥(전체,스팩·ETF제외) |
+|      |            | 감지소스 "volume" 배지 deprecated (장중 REST 감지는 전부 "rate") |
+|      |            | 절대 금지 규칙 32 업데이트 |
 |      |            | kis/rest_client.py: get_volume_ranking() 코스피 중형+소형 2회 호출 (대형 제외) |
 |      |            |   _fetch_volume_once() 헬퍼 신규 — blng_cls/exls_cls 파라미터화 |
 |      |            | kis/rest_client.py: get_orderbook() 신규 (FHKST01010200) — 호가잔량 REST 조회 |
