@@ -182,6 +182,20 @@ def _fetch_volume_once(token: str, label: str, input_iscd: str,
                 acml_vol = int(item.get("acml_vol", 0))
                 if prdy_vol <= 0 or acml_vol <= 0:
                     continue
+                # [v4.1 버그수정] FID_BLNG_CLS_CODE가 API에서 무시됨
+                # → hts_avls(억원 단위) 기반 사후 시총 필터로 대체
+                hts_avls_raw = item.get("hts_avls", "0") or "0"
+                try:
+                    시총억원 = int(str(hts_avls_raw).replace(",", ""))
+                except ValueError:
+                    시총억원 = 0
+                # hts_avls가 없는 경우(0) 필터 통과 (알 수 없으면 포함)
+                if 시총억원 > 0 and 시총억원 > config.MARKET_CAP_MAX:
+                    logger.debug(
+                        f"[rest] 대형주 제외: {item.get('hts_kor_isnm','')} "
+                        f"시총={시총억원:,}억 > {config.MARKET_CAP_MAX:,}억"
+                    )
+                    continue
                 result.append({
                     "종목코드":   item.get("mksc_shrn_iscd", ""),
                     "종목명":     item.get("hts_kor_isnm", ""),
@@ -299,6 +313,14 @@ def _fetch_rate_once(token: str, label: str, input_iscd: str,
                 acml_vol = int(item.get("acml_vol", 0))
                 prdy_vol = int(item.get("prdy_vol", 0))
                 if acml_vol <= 0:
+                    continue
+                # [v4.1] 시총 사후 필터 (등락률 순위도 동일 적용)
+                hts_avls_raw = item.get("hts_avls", "0") or "0"
+                try:
+                    시총억원 = int(str(hts_avls_raw).replace(",", ""))
+                except ValueError:
+                    시총억원 = 0
+                if 시총억원 > 0 and 시총억원 > config.MARKET_CAP_MAX:
                     continue
                 result.append({
                     "종목코드":   item.get("stck_shrn_iscd", ""),   # v3.0 버그수정
