@@ -1,6 +1,6 @@
 """
 tracking/db_schema.py
-SQLite DB 스키마 정의 + 초기화 (Phase 3, v3.3 신규 / v3.4 업데이트 / v3.5 업데이트)
+SQLite DB 스키마 정의 + 초기화 (Phase 3, v3.3 신규 / v3.4 업데이트 / v3.5 업데이트 / v4.2 업데이트)
 
 [역할]
 DDL(테이블·인덱스·뷰 생성) + init_db() + get_conn() 만 담당.
@@ -12,6 +12,7 @@ main.py 시작 시 init_db() 1회 호출.
   performance_tracker    ← 알림 후 1/3/7일 수익률 추적 행 (performance_tracker 배치 UPDATE)
   trading_history        ← Phase 4 모의투자 매매 이력 (position_manager가 기록)
   positions              ← [v3.4] 현재 오픈 포지션 (position_manager 전용)
+                           [v4.2] peak_price / stop_loss / market_env 컬럼 추가 (Trailing Stop)
   trading_principles     ← [v3.5] AI 학습용 매매 원칙 DB (principles_extractor가 기록)
 
 [뷰]
@@ -40,6 +41,7 @@ def init_db() -> None:
     """
     DB 파일 생성 + 테이블·인덱스·뷰 초기화.
     main.py 시작 시 1회 호출. 이미 존재하면 변경 없음 (IF NOT EXISTS).
+    [v4.2] 기존 DB 마이그레이션 자동 실행 (_migrate_v42).
     """
     db_path = config.DB_PATH
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -109,16 +111,18 @@ def init_db() -> None:
                 profit_rate     REAL,               -- 수익률 (%)
                 profit_amount   INTEGER,            -- 손익 금액 (원)
                 trigger_source  TEXT,               -- 매수 트리거 종류
-                close_reason    TEXT,               -- take_profit_1 / take_profit_2 / stop_loss / force_close / manual
+                close_reason    TEXT,               -- take_profit_1 / take_profit_2 / stop_loss / trailing_stop / force_close / manual
                 mode            TEXT DEFAULT 'VTS'  -- VTS=모의 / REAL=실전
             )
         """)
 
-        # ── 4. 오픈 포지션 (Phase 4, v3.4 신규) ──────────────
-        # 현재 보유 중인 포지션 전용 테이블.
-        # position_manager.open_position() 에서 INSERT,
-        # position_manager.close_position() 에서 DELETE.
-        # trading_history 와 1:1 대응 (position_id = trading_history.id).
+        # ── 4. 오픈 포지션 (Phase 4, v3.4 신규 / v4.2 확장) ──
+        # [v4.2] Trailing Stop 지원을 위해 3개 컬럼 추가:
+        #   peak_price  — 진입 후 최고가. Trailing Stop 기준점.
+        #   stop_loss   — 현재 손절가 (원). AI 제공값 or config 기본값에서 시작,
+        #                  peak_price 갱신 시 자동 상향 (하향 불가).
+        #   market_env  — 진입 시 시장 환경 ("강세장" / "약세장/횡보" / "").
+        #                  Trailing Stop 비율 결정에 사용 (강세 0.92, 약세 0.95).
         c.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,14 +133,14 @@ def init_db() -> None:
                 buy_price       INTEGER NOT NULL,
                 qty             INTEGER NOT NULL,
                 trigger_source  TEXT,               -- 진입 트리거 종류
-                mode            TEXT DEFAULT 'VTS'
+                mode            TEXT DEFAULT 'VTS',
+                peak_price      INTEGER DEFAULT 0,  -- [v4.2] 진입 후 최고가 (Trailing Stop 기준)
+                stop_loss       REAL,               -- [v4.2] 현재 손절가 (원, AI 제공 or 기본값)
+                market_env      TEXT DEFAULT ''     -- [v4.2] 진입 시 시장 환경
             )
         """)
 
         # ── 5. 매매 원칙 DB (Phase 5, v3.5 신규) ──────────────
-        # principles_extractor.py가 거래 완료 후 패턴을 추출해 INSERT.
-        # ai_context.py가 조회해 AI 프롬프트에 주입.
-        # 주간 배치(매주 일요일 03:00)에서 high_conf 원칙 추출.
         c.execute("""
             CREATE TABLE IF NOT EXISTS trading_principles (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,6 +204,45 @@ def init_db() -> None:
     except Exception as e:
         logger.error(f"[db] DB 초기화 실패: {e}")
         raise
+    finally:
+        conn.close()
+
+    # [v4.2] 기존 DB에 Trailing Stop 컬럼 마이그레이션 (idempotent)
+    _migrate_v42(db_path)
+
+
+def _migrate_v42(db_path: str) -> None:
+    """
+    [v4.2 Phase 2] positions 테이블에 Trailing Stop 컬럼 추가.
+    이미 존재하는 컬럼은 건너뜀 (idempotent — 여러 번 실행해도 안전).
+    기존 DB를 새로 만들지 않고 ALTER TABLE로 안전하게 추가.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        # 현재 positions 컬럼 목록 조회
+        c.execute("PRAGMA table_info(positions)")
+        existing_cols = {row[1] for row in c.fetchall()}
+
+        migrations = [
+            ("peak_price", "INTEGER DEFAULT 0"),
+            ("stop_loss",  "REAL"),
+            ("market_env", "TEXT DEFAULT ''"),
+        ]
+        added = []
+        for col_name, col_def in migrations:
+            if col_name not in existing_cols:
+                c.execute(f"ALTER TABLE positions ADD COLUMN {col_name} {col_def}")
+                added.append(col_name)
+
+        if added:
+            conn.commit()
+            logger.info(f"[db] v4.2 마이그레이션 완료 — 추가된 컬럼: {added}")
+        else:
+            logger.info("[db] v4.2 마이그레이션 — 이미 최신 스키마")
+
+    except Exception as e:
+        logger.warning(f"[db] v4.2 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

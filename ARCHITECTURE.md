@@ -112,7 +112,7 @@ korea_stock_bot/
 │   └── principles_extractor.py ← [v3.5] 매매 원칙 추출 배치 (Phase 5 신규)
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
-    └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록
+    └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록 [v4.2 Phase 2: Trailing Stop]
 ```
 
 ---
@@ -152,6 +152,11 @@ traders/position_manager.py → kis/order_client (buy, sell, get_current_price)
 traders/position_manager.py → notifiers/telegram_bot (format_trade_executed, format_trade_closed)
 traders/position_manager.py ← reports/realtime_alert (can_buy, open_position, check_exit)
 traders/position_manager.py ← main.py (force_close_all 14:50 cron)
+traders/position_manager.py ← tracking/performance_tracker (update_trailing_stops)  ← v4.2 추가
+                              [v4.2] can_buy(ai_result, market_env): R/R 필터 적용
+                              [v4.2] open_position(stop_loss_price, market_env): Trailing Stop 초기화
+                              [v4.2] check_exit(): Trailing Stop 포함 (peak_price × 0.92/0.95)
+                              [v4.2] update_trailing_stops(): 18:45 배치에서 종가 기준 일괄 갱신
 tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
 tracking/alert_recorder.py        ← reports/realtime_alert (유일 호출처)
 tracking/performance_tracker.py   ← main.py (18:45 cron), reports/weekly_report
@@ -266,8 +271,10 @@ graph TD
                  × CONFIRM_CANDLES(2)회 연속 충족 → 알림
                → 알림 포맷: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착)
                [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true 시:
-               position_manager.check_exit() — 익절/손절 조건 검사
-               → TAKE_PROFIT_1(+5%) / TAKE_PROFIT_2(+10%) / STOP_LOSS(-3%) 충족 시
+               position_manager.check_exit() — 익절/손절/Trailing Stop 조건 검사
+               → TAKE_PROFIT_1(+5%) / TAKE_PROFIT_2(+10%) — 익절
+               → Trailing Stop: peak_price × 0.92(강세) / × 0.95(약세) 이탈 시 "trailing_stop" 청산
+               → 절대 손절: AI 제공 stop_loss or config.STOP_LOSS(-3%) — "stop_loss" 청산
                  order_client.sell() → position_manager.close_position() → 텔레그램 청산 알림
 
            → can_alert() 쿨타임 확인
@@ -324,12 +331,16 @@ graph TD
        [v3.2] watchlist_state 보강: T5+T6 종목 → 내일 WebSocket 워치리스트 추가  ← v3.6 복원
        telegram_bot 발송 (T3/T5/T6 섹션 포함)
 
-18:45  ─── 수익률 추적 배치 (Phase 3, v3.3) ────────────────────
+18:45  ─── 수익률 추적 배치 (Phase 3, v3.3 / v4.2 확장) ────────────────────
        performance_tracker.run_batch()
        → done_Xd=0 미추적 행 조회 (1/3/7일 전 발송 알림)
        → pykrx 마감 확정치 전종목 종가 일괄 조회
        → 수익률 계산 → performance_tracker UPDATE
        → 트리거별 승률 로그 출력
+       [v4.2] 수익률 추적 완료 후 Trailing Stop 일괄 갱신:
+       → position_manager.update_trailing_stops() 호출
+       → 오픈 포지션 peak_price / stop_loss 종가 기준 상향 조정
+       → AUTO_TRADE_ENABLED=false 시 즉시 return (안전, 비치명적)
 
 매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3) ────────
        performance_tracker.get_weekly_stats() → 지난 7일 DB 조회
@@ -470,8 +481,10 @@ FUND_INFLOW_TOP_N      = 7
 {"holdings": list[{ticker,name,qty,avg_price,current_price,profit_rate}],
  "available_cash": int, "total_eval": int, "total_profit": float}
 
-# position_manager.can_buy() → (bool, str)
+# position_manager.can_buy(ticker, ai_result, market_env) → (bool, str)  [v4.2 확장]
 (True, "OK") | (False, "사유 메시지")
+# ai_result: analyze_spike() 반환값. risk_reward_ratio 기반 R/R 필터 적용.
+# market_env: "강세장" → R/R 1.2+, "약세장/횡보" → R/R 2.0+, 미지정 → R/R 1.5+
 
 # position_manager.close_position() → dict | None
 {"ticker": str, "name": str, "buy_price": int, "sell_price": int,
@@ -580,6 +593,21 @@ gemini-2.5-flash   20회/일   ❌ 부족
     AI API 호출·텔레그램 직접 발송·매수 로직 절대 금지
     main.py 매주 일요일 03:00 cron에서만 호출
     데이터 부족(total < 5건) 시 원칙 등록 건너뜀 — 신뢰도 없는 원칙 방지
+
+[Phase 2 Trailing Stop & 매매전략 규칙 — v4.2 추가]
+39. positions 테이블 peak_price / stop_loss / market_env 컬럼은 position_manager만 관리
+    외부에서 직접 UPDATE 금지 — _update_peak() / update_trailing_stops() 경유 필수
+40. Trailing Stop 손절가 상향만 허용, 하향 금지
+    _update_peak() / update_trailing_stops() 내부에서 MAX(stop_loss, new_stop) 강제 적용
+41. update_trailing_stops() 는 performance_tracker.run_batch() 종료 직후에만 호출
+    장중 직접 호출 금지 (pykrx 당일 미확정가 방지)
+    단, check_exit() 폴링 내에서 peak_price 실시간 갱신은 허용 (KIS REST 현재가 기준)
+42. can_buy() 는 ai_result + market_env 선택적 파라미터 — 기존 호출부(ai_result 없이) 하위 호환
+    ai_result 없거나 risk_reward_ratio 없으면 R/R 필터 미적용 (Phase 1 이전 동작 유지)
+43. watchlist_state.determine_and_set_market_env() 는 morning_report.py 에서만 호출
+    장중 재설정 금지 (당일 전략 일관성)
+44. Trailing Stop 비율: 강세장 0.92 / 약세장·횡보 0.95 (position_manager._TS_RATIO_* 상수)
+    비율 변경 시 반드시 양쪽 상수 동시 수정 — 한쪽만 수정 금지
 
 [Phase 1 벤치마킹 AI 강화 규칙 — v4.2 추가]
 35. analyze_spike() 의 market_env 파라미터는 realtime_alert에서 선택적으로 주입
@@ -737,6 +765,35 @@ gemini-2.5-flash   20회/일   ❌ 부족
 | v4.0 | 2026-02-26 | **소~중형주 필터 + WebSocket 호가 분석 통합** |
 | v4.1 | 2026-02-26 | **장중봇 소스 단일화 — 거래량 순위 제거, 등락률 순위만 사용** |
 | v4.2 | 2026-02-26 | **Phase 1 벤치마킹 — AI 프롬프트 전면 강화 (Prism 흡수)** |
+| v4.3 | 2026-02-26 | **Phase 2 — Trailing Stop & 매매전략 고도화** |
+|      |            | tracking/db_schema.py: positions 테이블 3개 컬럼 추가 (peak_price, stop_loss, market_env) |
+|      |            | _migrate_v42(): 기존 DB 자동 마이그레이션 (idempotent, ALTER TABLE) |
+|      |            | traders/position_manager.py: Trailing Stop 전면 구현 |
+|      |            | - can_buy(ai_result, market_env): R/R 필터 추가 (강세 1.2+, 약세 2.0+) |
+|      |            | - open_position(stop_loss_price, market_env): AI 손절가 + 환경 저장 |
+|      |            | - check_exit(): Trailing Stop (peak × 0.92/0.95) + 절대 손절 분리 |
+|      |            | - update_trailing_stops() 신규: 18:45 종가 기준 peak/stop 일괄 갱신 |
+|      |            | - _calc_trailing_stop() / _update_peak() 내부 헬퍼 신규 |
+|      |            | - close_position() reason에 "trailing_stop" 추가 |
+|      |            | utils/watchlist_state.py: 시장 환경 저장/조회 기능 추가 |
+|      |            | - set_market_env() / get_market_env() 신규 |
+|      |            | - determine_and_set_market_env(price_data): KOSPI 등락률 기준 자동 판단 |
+|      |            | - clear(): _market_env도 함께 초기화 |
+|      |            | reports/morning_report.py: ⑨ 시장 환경 판단 + 저장 단계 추가 |
+|      |            | - watchlist_state.determine_and_set_market_env(price_data) 호출 |
+|      |            | reports/realtime_alert.py: market_env 전체 흐름 연동 |
+|      |            | - _send_ai_followup(): watchlist_state.get_market_env() 조회 |
+|      |            | - analyze_spike()에 market_env 주입 |
+|      |            | - can_buy()에 ai_result + market_env 전달 |
+|      |            | - _handle_trade_signal(): stop_loss_price + market_env 파라미터 추가 |
+|      |            | - open_position()에 stop_loss_price + market_env 전달 |
+|      |            | notifiers/telegram_bot.py: 3개 함수 수정 |
+|      |            | - format_realtime_alert_ai(): R/R + 목표가/손절가 라인 추가 |
+|      |            | - format_trade_executed(): AI 손절가 표시 + 시장 환경 배지 + Trailing Stop 안내 |
+|      |            | - format_trade_closed(): trailing_stop 이모지/라벨 추가 (📈 Trailing Stop) |
+|      |            | tracking/performance_tracker.py: run_batch() 완료 후 update_trailing_stops() 호출 |
+|      |            | 반환값 확장: trailing_updated 필드 추가 |
+|      |            | 절대 금지 규칙 39~44 추가 (Phase 2 Trailing Stop 규칙) |
 |      |            | analyzers/ai_analyzer.py: analyze_spike() 프롬프트 전면 개편 |
 |      |            | - 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS 블록 추가 |
 |      |            | - 손절 철칙 -7% 절대 + 예외 조건 5개 ALL 충족 명시 |

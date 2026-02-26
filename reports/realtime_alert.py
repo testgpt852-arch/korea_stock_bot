@@ -25,6 +25,14 @@ reports/realtime_alert.py
 - v4.0:   호가 분석 통합 (_ws_loop, _dispatch_alerts)
           REST 급등 감지 후 호가 분석 결과를 1차 알림에 포함
           WS_ORDERBOOK_ENABLED=true 시 on_orderbook() 콜백 활성화
+- v4.2:   Phase 2 — Trailing Stop & 매매전략 고도화 연동
+          _send_ai_followup():
+            1) watchlist_state.get_market_env() 로 시장 환경 주입
+            2) analyze_spike()에 market_env 전달 → 오닐 전략 분기
+            3) can_buy()에 ai_result + market_env 전달 → R/R 필터 적용
+          _handle_trade_signal():
+            1) stop_loss_price / market_env 파라미터 추가
+            2) open_position()에 stop_loss_price + market_env 전달 → Trailing Stop 초기화
 """
 
 import asyncio
@@ -67,6 +75,10 @@ async def start() -> None:
             f"[realtime] WebSocket 구독 시작 ✅  "
             f"워치리스트: {len(watchlist)}종목 / 모드: {ob_mode}"
         )
+
+    # [v4.2] 시장 환경 로깅 (아침봇에서 설정된 값)
+    market_env = watchlist_state.get_market_env()
+    logger.info(f"[realtime] 오늘 시장 환경: {market_env or '(아침봇 미실행 — 미지정)'}")
 
 
 async def stop() -> None:
@@ -155,7 +167,6 @@ async def _ws_loop(watchlist: dict) -> None:
     - 장중 구독/해제 반복 없음
     - 장 마감 stop()에서 전체 해제 후 종료
     """
-    # 최근접 종목을 우선 배치 (watchlist는 dict, 삽입 순 유지)
     watchlist_items = list(watchlist.items())
 
     try:
@@ -165,7 +176,6 @@ async def _ws_loop(watchlist: dict) -> None:
             return
 
         if config.WS_ORDERBOOK_ENABLED:
-            # 체결 20 + 호가 20 = 40 (한도 준수)
             slots = config.WS_ORDERBOOK_SLOTS
             tick_items = watchlist_items[:slots]
             ob_items   = watchlist_items[:slots]
@@ -178,17 +188,13 @@ async def _ws_loop(watchlist: dict) -> None:
                 f"/ 호가 {len(ws_client.subscribed_ob)}종목"
             )
         else:
-            # 체결 전체 (최대 WS_WATCHLIST_MAX=40)
             for ticker, _ in watchlist_items[:config.WS_WATCHLIST_MAX]:
                 await ws_client.subscribe(ticker)
             logger.info(
                 f"[realtime] WS 구독 완료 — 체결 {len(ws_client.subscribed_tickers)}/{len(watchlist)}종목"
             )
 
-        # ── 호가 틱 캐시 (체결-호가 연계용) ─────────────────────
-        # WS_ORDERBOOK_ENABLED=true 시: 호가 틱이 오면 해당 종목 캐시에 저장
-        # 체결 틱에서 급등 감지 시 캐시에서 호가 분석 결과를 즉시 활용
-        _ob_cache: dict[str, dict] = {}   # {ticker: orderbook_dict}
+        _ob_cache: dict[str, dict] = {}
 
         async def on_tick(tick: dict) -> None:
             ticker = tick.get("종목코드", "")
@@ -205,12 +211,9 @@ async def _ws_loop(watchlist: dict) -> None:
                 return
             mark_alerted(ticker)
 
-            # [v4.0] 호가 분석 보강
             if config.WS_ORDERBOOK_ENABLED and ticker in _ob_cache:
-                # WS 호가 캐시가 있으면 즉시 활용 (REST 호출 없음)
                 result = volume_analyzer.analyze_ws_orderbook_tick(_ob_cache[ticker], result)
             elif config.ORDERBOOK_ENABLED and not config.WS_ORDERBOOK_ENABLED:
-                # REST 호가 조회 (1회)
                 loop = asyncio.get_event_loop()
                 from kis.rest_client import get_orderbook
                 ob_data = await loop.run_in_executor(None, lambda: get_orderbook(ticker))
@@ -225,16 +228,10 @@ async def _ws_loop(watchlist: dict) -> None:
             await _dispatch_alerts(result)
 
         async def on_orderbook(ob: dict) -> None:
-            """
-            [v4.0] WS_ORDERBOOK_ENABLED=true 시 호가 틱 수신 콜백
-            체결 틱과 연계 없이 독립적으로 호가 캐시만 업데이트
-            (체결 감지 시 캐시에서 즉시 활용)
-            """
             ticker = ob.get("종목코드", "")
             if ticker and ticker in watchlist:
                 _ob_cache[ticker] = ob
 
-        # WS_ORDERBOOK_ENABLED에 따라 on_orderbook 콜백 전달 여부 결정
         ob_callback = on_orderbook if config.WS_ORDERBOOK_ENABLED else None
         await ws_client.receive_loop(on_tick, on_orderbook=ob_callback)
 
@@ -259,19 +256,34 @@ async def _dispatch_alerts(analysis: dict) -> None:
 
 
 async def _send_ai_followup(analysis: dict) -> None:
+    """
+    [v4.2] 시장 환경 주입 추가:
+    - analyze_spike()에 market_env 전달 → 오닐 R/R 분기 전략 자동 적용
+    - can_buy()에 ai_result + market_env 전달 → R/R 필터 실행
+    - _handle_trade_signal()에 stop_loss_price + market_env 전달 → Trailing Stop 초기화
+    """
     try:
         loop   = asyncio.get_event_loop()
         ticker = analysis.get("종목코드", "")
         source = analysis.get("감지소스", "unknown")
-        ctx    = await loop.run_in_executor(
+
+        # [v4.2] 아침봇이 설정한 시장 환경 조회
+        market_env = watchlist_state.get_market_env()
+
+        ctx = await loop.run_in_executor(
             None, lambda: ai_context.build_spike_context(ticker, source)
         )
-        ai_result = ai_analyzer.analyze_spike(analysis, ai_context=ctx)
-        msg_2nd   = telegram_bot.format_realtime_alert_ai(analysis, ai_result)
+        # [v4.2] market_env 주입 → 오닐 강세/약세 분기
+        ai_result = ai_analyzer.analyze_spike(
+            analysis, ai_context=ctx, market_env=market_env
+        )
+        msg_2nd = telegram_bot.format_realtime_alert_ai(analysis, ai_result)
         await telegram_bot.send_async(msg_2nd)
         logger.info(
             f"[realtime] 2차 AI 알림: {analysis['종목명']} "
-            f"→ {ai_result.get('판단', 'N/A')}"
+            f"→ {ai_result.get('판단', 'N/A')}  "
+            f"R/R:{ai_result.get('risk_reward_ratio', 'N/A')}  "
+            f"시장:{market_env or '미지정'}"
         )
 
         if not config.AUTO_TRADE_ENABLED:
@@ -296,25 +308,38 @@ async def _send_ai_followup(analysis: dict) -> None:
             )
             return
 
-        loop   = asyncio.get_event_loop()
-        name   = analysis["종목명"]
+        name = analysis["종목명"]
 
         from traders import position_manager
+        # [v4.2] can_buy()에 ai_result + market_env 전달 → R/R 필터 적용
         ok, reason = await loop.run_in_executor(
-            None, position_manager.can_buy, ticker
+            None,
+            lambda: position_manager.can_buy(ticker, ai_result=ai_result, market_env=market_env)
         )
         if not ok:
             logger.info(f"[realtime] 자동매매 진입 불가 — {name}: {reason}")
             return
 
-        asyncio.create_task(_handle_trade_signal(ticker, name, source))
+        # [v4.2] stop_loss_price + market_env 전달
+        stop_loss_price = ai_result.get("stop_loss")
+        asyncio.create_task(
+            _handle_trade_signal(ticker, name, source, stop_loss_price, market_env)
+        )
 
     except Exception as e:
         logger.warning(f"[realtime] 2차 AI 알림 실패: {e}")
 
 
-async def _handle_trade_signal(ticker: str, name: str, source: str) -> None:
-    """매수 체결 → DB 기록 → 텔레그램 알림 (v3.4)"""
+async def _handle_trade_signal(
+    ticker: str, name: str, source: str,
+    stop_loss_price: int | None = None,   # [v4.2] AI 제공 손절가
+    market_env: str = "",                  # [v4.2] 시장 환경
+) -> None:
+    """
+    매수 체결 → DB 기록 → 텔레그램 알림 (v3.4)
+    [v4.2] stop_loss_price / market_env → open_position() 에 전달
+           → Trailing Stop peak_price 초기화 + 손절가 설정
+    """
     from traders import position_manager
     from kis import order_client
 
@@ -335,18 +360,28 @@ async def _handle_trade_signal(ticker: str, name: str, source: str) -> None:
         qty       = buy_result["qty"]
         total_amt = buy_result["total_amt"]
 
+        # [v4.2] stop_loss_price + market_env 전달 → Trailing Stop 초기화
         await loop.run_in_executor(
             None,
-            lambda: position_manager.open_position(ticker, name, buy_price, qty, source)
+            lambda: position_manager.open_position(
+                ticker, name, buy_price, qty, source,
+                stop_loss_price=stop_loss_price,
+                market_env=market_env,
+            )
         )
 
         msg = telegram_bot.format_trade_executed(
             ticker=ticker, name=name,
             buy_price=buy_price, qty=qty, total_amt=total_amt,
-            source=source, mode=config.TRADING_MODE
+            source=source, mode=config.TRADING_MODE,
+            stop_loss_price=stop_loss_price,   # [v4.2] 알림에 AI 손절가 표시
+            market_env=market_env,
         )
         await telegram_bot.send_async(msg)
         logger.info(
+            f"[realtime] 자동매수 완료 ✅  {name}({ticker})  "
+            f"{qty}주 × {buy_price:,}원  총 {total_amt:,}원  "
+            f"손절가:{stop_loss_price:,}원" if stop_loss_price else
             f"[realtime] 자동매수 완료 ✅  {name}({ticker})  "
             f"{qty}주 × {buy_price:,}원  총 {total_amt:,}원"
         )
@@ -356,7 +391,7 @@ async def _handle_trade_signal(ticker: str, name: str, source: str) -> None:
 
 
 async def _check_positions() -> None:
-    """포지션 익절/손절 검사 + 청산 처리 (v3.4)"""
+    """포지션 익절/손절/Trailing Stop 검사 + 청산 처리 (v3.4 / v4.2 TS 추가)"""
     from traders import position_manager
 
     loop = asyncio.get_event_loop()

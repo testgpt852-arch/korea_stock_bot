@@ -1,6 +1,6 @@
 """
 tracking/performance_tracker.py
-알림 후 1/3/7일 실제 수익률 추적 배치 + 주간 통계 조회 (Phase 3, v3.3 신규)
+알림 후 1/3/7일 실제 수익률 추적 배치 + 주간 통계 조회 (Phase 3, v3.3 신규 / v4.2 확장)
 
 [실행 시점]
 main.py 스케줄러 → 매 거래일 18:45 run_batch() 호출.
@@ -11,6 +11,8 @@ main.py 스케줄러 → 매 거래일 18:45 run_batch() 호출.
    → 오늘 기준 캘린더 1/3/7일 전에 발송된 알림 대상
 ② pykrx 마감 확정치로 현재 종가 일괄 조회 (KOSPI+KOSDAQ 전종목)
 ③ 수익률 계산 → performance_tracker UPDATE
+④ [v4.2] position_manager.update_trailing_stops() 호출
+   → 오픈 포지션 peak_price / stop_loss 종가 기준 일괄 갱신
 
 [get_weekly_stats]
 weekly_report.py 가 호출해 지난 7일 성과 데이터를 가져간다.
@@ -20,6 +22,7 @@ performance_tracker ← main.py  (18:45 cron, run_batch)
 performance_tracker ← reports/weekly_report  (get_weekly_stats)
 performance_tracker → tracking/db_schema  (get_conn)
 performance_tracker → pykrx  (마감 확정치 — 18:45 실행이므로 허용)
+performance_tracker → traders/position_manager  (update_trailing_stops)  ← v4.2 추가
 
 [절대 금지 규칙 — ARCHITECTURE #20]
 run_batch() 는 main.py 18:45 cron 에서만 호출.
@@ -44,8 +47,12 @@ def run_batch() -> dict:
     수익률 추적 배치 실행.
     main.py 에서 매 거래일 18:45 에 호출.
 
+    [v4.2] 수익률 추적 완료 후 position_manager.update_trailing_stops() 호출.
+    → 오픈 포지션 peak_price / stop_loss 를 종가 기준으로 갱신.
+    → AUTO_TRADE_ENABLED=false 이면 update_trailing_stops() 내부에서 즉시 return.
+
     Returns:
-        {"updated": int, "stats": list[dict]}
+        {"updated": int, "stats": list[dict], "trailing_updated": int}
     """
     today_kst = datetime.now(KST)
     today_str = today_kst.strftime("%Y%m%d")
@@ -75,7 +82,24 @@ def run_batch() -> dict:
             )
 
     logger.info(f"[perf] 배치 완료 — 총 {total_updated}건 업데이트")
-    return {"updated": total_updated, "stats": stats}
+
+    # ── [v4.2] Trailing Stop 일괄 갱신 ───────────────────────
+    # pykrx 종가 조회 완료 직후 실행 (18:45, 마감 확정치 사용 가능)
+    # 오픈 포지션의 peak_price와 stop_loss를 오늘 종가 기준으로 갱신
+    # AUTO_TRADE_ENABLED=false 이면 내부에서 즉시 반환 (안전)
+    trailing_updated = 0
+    try:
+        from traders.position_manager import update_trailing_stops
+        trailing_updated = update_trailing_stops()
+        logger.info(f"[perf] Trailing Stop 갱신 완료 — {trailing_updated}종목")
+    except Exception as e:
+        logger.warning(f"[perf] Trailing Stop 갱신 실패 (비치명적): {e}")
+
+    return {
+        "updated":          total_updated,
+        "stats":            stats,
+        "trailing_updated": trailing_updated,   # [v4.2] 신규
+    }
 
 
 def get_weekly_stats() -> dict:
@@ -181,7 +205,6 @@ def _update_period(
         for (row_id, ticker, price_at_alert) in rows:
             curr = price_map.get(ticker)
             if curr is None or curr <= 0:
-                # 상장폐지·정지 등으로 가격 없음 → done 표시만
                 c.execute(f"""
                     UPDATE performance_tracker
                     SET {done_col}=1, {date_col}=? WHERE id=?
@@ -191,7 +214,6 @@ def _update_period(
                 continue
 
             if not price_at_alert or price_at_alert <= 0:
-                # 알림 시 가격 미기록 → done 표시만 (수익률 계산 불가)
                 c.execute(f"""
                     UPDATE performance_tracker
                     SET {done_col}=1, {date_col}=? WHERE id=?

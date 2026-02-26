@@ -435,6 +435,9 @@ def format_realtime_alert(analysis: dict) -> str:
 
 
 def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
+    """
+    [v4.2] R/R 비율 + 목표가/손절가 라인 추가
+    """
     판단   = ai_result.get("판단", "판단불가")
     이모지  = {"진짜급등": "✅", "작전주의심": "⚠️", "판단불가": "❓"}.get(판단, "❓")
     직전대비  = analysis.get("직전대비", 0.0)
@@ -462,34 +465,47 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
     else:
         ob_line = ""
 
+    # [v4.2] R/R + 목표가/손절가 라인 (AI 제공 시에만 표시)
+    target = ai_result.get("target_price")
+    stop   = ai_result.get("stop_loss")
+    rr     = ai_result.get("risk_reward_ratio")
+
+    if target and stop and rr:
+        rr_line = (
+            f"📊 R/R: <b>{rr:.1f}</b>  "
+            f"목표가: {target:,}원  /  손절가: {stop:,}원\n"
+        )
+    elif rr:
+        rr_line = f"📊 R/R: <b>{rr:.1f}</b>\n"
+    else:
+        rr_line = ""
+
     return (
         f"🚨 <b>급등 감지 + AI 분석</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
         f"등락률: +{analysis['등락률']:.1f}%"
         + (f"  <b>(순간 +{직전대비:.1f}%)</b>" if 직전대비 > 0 else "") + "\n"
         + f"{rvol_line}\n"
-        + f"{ob_line}\n"
+        + f"{ob_line}"
         + f"{이모지} AI 판단: <b>{판단}</b>\n"
-        + f"이유: {ai_result.get('이유', 'N/A')}"
-    )
+        + f"이유: {ai_result.get('이유', 'N/A')}\n"
+        + f"{rr_line}"
+    ).rstrip()
 
 
 def format_trade_executed(
     ticker: str, name: str,
     buy_price: int, qty: int, total_amt: int,
-    source: str, mode: str = "VTS"
+    source: str, mode: str = "VTS",
+    stop_loss_price: int | None = None,   # [v4.2] AI 제공 손절가 (원)
+    market_env: str = "",                  # [v4.2] 시장 환경
 ) -> str:
     """
-    자동매수 체결 알림 포맷 (Phase 4, v3.4 신규)
+    자동매수 체결 알림 포맷 (Phase 4, v3.4 신규 / v4.2 확장)
 
-    Args:
-        ticker:    종목코드
-        name:      종목명
-        buy_price: 매수가 (원)
-        qty:       체결 수량
-        total_amt: 총 매수 금액 (원)
-        source:    감지 소스 (volume / rate / websocket / gap_up)
-        mode:      "VTS"(모의) / "REAL"(실전)
+    [v4.2] stop_loss_price / market_env 추가:
+    - stop_loss_price: AI 제공 시 별도 표시. None이면 config 기본값(-3%) 표시.
+    - market_env: 시장 환경 배지 표시 (강세장/약세장/횡보 구분)
     """
     import config
     mode_badge = "📋 모의투자" if mode == "VTS" else "💰 실전투자"
@@ -499,9 +515,30 @@ def format_trade_executed(
         else "🎯 워치리스트" if source == "websocket"
         else "📈 등락률포착"
     )
+
+    # [v4.2] 시장 환경 배지
+    if "강세장" in market_env:
+        env_badge = "📈 강세장 (R/R 1.2+)"
+    elif "약세장" in market_env or "횡보" in market_env:
+        env_badge = "📉 약세장/횡보 (R/R 2.0+)"
+    else:
+        env_badge = ""
+
     tp1 = round(buy_price * (1 + config.TAKE_PROFIT_1 / 100))
     tp2 = round(buy_price * (1 + config.TAKE_PROFIT_2 / 100))
-    sl  = round(buy_price * (1 + config.STOP_LOSS / 100))
+
+    # [v4.2] 손절가: AI 제공값 우선, 없으면 config 기본값
+    if stop_loss_price and stop_loss_price > 0:
+        sl       = stop_loss_price
+        sl_label = "AI 손절"
+        sl_pct   = round((stop_loss_price - buy_price) / buy_price * 100, 1)
+        sl_str   = f"{sl:,}원 ({sl_pct:+.1f}%) — AI 제공"
+    else:
+        sl       = round(buy_price * (1 + config.STOP_LOSS / 100))
+        sl_label = "손절"
+        sl_str   = f"{sl:,}원 ({config.STOP_LOSS:.0f}%) — 기본값"
+
+    env_line = f"시장 환경: {env_badge}\n" if env_badge else ""
 
     return (
         f"📈 <b>자동매수 체결</b>  {mode_badge}\n"
@@ -509,16 +546,21 @@ def format_trade_executed(
         f"체결가: {buy_price:,}원  수량: {qty}주\n"
         f"총 매수금액: {total_amt:,}원\n"
         f"감지 트리거: {source_badge}\n"
+        f"{env_line}"
         f"━━━━━━━━━━━━━━━━\n"
         f"목표1: <b>{tp1:,}원</b> (+{config.TAKE_PROFIT_1:.0f}%)\n"
         f"목표2: <b>{tp2:,}원</b> (+{config.TAKE_PROFIT_2:.0f}%)\n"
-        f"손절:  <b>{sl:,}원</b> ({config.STOP_LOSS:.0f}%)"
+        f"{sl_label}:  <b>{sl_str}</b>\n"
+        f"Trailing Stop: 고점 대비 {'8%' if '강세장' in market_env else '5%'} 이탈 시 자동 청산"
     )
 
 
 def format_trade_closed(closed: dict) -> str:
     """
-    포지션 청산 알림 포맷 (Phase 4, v3.4 신규)
+    포지션 청산 알림 포맷 (Phase 4, v3.4 신규 / v4.2 확장)
+
+    [v4.2] trailing_stop 청산 사유 추가:
+    closed["reason"] = "trailing_stop" → 📈 Trailing Stop 표시
 
     Args:
         closed: position_manager.close_position() 반환값
@@ -538,15 +580,22 @@ def format_trade_closed(closed: dict) -> str:
     mode_badge = "📋 모의투자" if mode == "VTS" else "💰 실전투자"
 
     reason_map = {
-        "take_profit_1": ("✅", "1차 익절"),
-        "take_profit_2": ("🏆", "2차 익절"),
-        "stop_loss":     ("🔴", "손절"),
-        "force_close":   ("⏰", "강제청산"),
-        "manual":        ("🖐", "수동청산"),
+        "take_profit_1":  ("✅", "1차 익절"),
+        "take_profit_2":  ("🏆", "2차 익절"),
+        "stop_loss":      ("🔴", "손절"),
+        "trailing_stop":  ("📈", "Trailing Stop"),   # [v4.2] 신규
+        "force_close":    ("⏰", "강제청산"),
+        "manual":         ("🖐", "수동청산"),
     }
     emoji, label = reason_map.get(reason, ("❓", reason))
-    sign = "+" if profit_rate >= 0 else ""
+    sign     = "+" if profit_rate   >= 0 else ""
     amt_sign = "+" if profit_amount >= 0 else ""
+
+    # [v4.2] trailing_stop 시 추가 설명
+    trailing_note = (
+        "\n💡 고점 대비 임계 이탈로 자동 손절가 작동"
+        if reason == "trailing_stop" else ""
+    )
 
     return (
         f"{emoji} <b>포지션 청산</b>  {mode_badge}  [{label}]\n"
@@ -554,6 +603,7 @@ def format_trade_closed(closed: dict) -> str:
         f"매수가: {buy_price:,}원 → 매도가: {sell_price:,}원  ({qty}주)\n"
         f"수익률: <b>{sign}{profit_rate:.2f}%</b>  "
         f"손익: <b>{amt_sign}{profit_amount:,}원</b>"
+        f"{trailing_note}"
     )
 
 

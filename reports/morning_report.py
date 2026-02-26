@@ -13,7 +13,8 @@ reports/morning_report.py
    ("상한가 순환매"/"KOSPI 급등 순환매" → "바이오신약", "방산" 등 실제 테마명)
 ⑧ theme_analyzer    → 순환매 지도 (price_data로 소외도 계산)
 ⑨ watchlist_state   → WebSocket 워치리스트 저장 (장중봇용)            ← v3.1 추가
-⑩ 보고서 조립 → 텔레그램 발송
+⑩ watchlist_state   → 시장 환경 판단 + 저장 (장중봇 R/R 필터용)      ← v4.2 추가
+⑪ 보고서 조립 → 텔레그램 발송
 
 [수정이력]
 - v1.0: 기본 구조
@@ -27,6 +28,9 @@ reports/morning_report.py
         (price_data["institutional"] → report["prev_institutional"])
 - v2.4: ai_analyzer.analyze_closing(price_data) 추가
         신호4 "상한가 순환매" 제네릭 라벨을 AI 실제 테마명으로 교체
+- v4.2: watchlist_state.determine_and_set_market_env(price_data) 추가
+        → 전날 KOSPI 등락률로 "강세장"/"약세장/횡보"/"횡보" 판단
+        → 장중봇 can_buy() R/R 필터 + analyze_spike() 분기 전략에 활용
 """
 
 from utils.logger import logger
@@ -157,6 +161,13 @@ async def run() -> None:
             f"[morning] WebSocket 워치리스트 저장 — {len(ws_watchlist)}종목 "
             f"(장중봇이 09:00에 구독 예정)"
         )
+
+        # ── ⑨ 시장 환경 판단 + 저장 (v4.2 Phase 2 신규) ─────
+        # 전날 KOSPI 등락률 기준으로 "강세장" / "약세장/횡보" / "횡보" 결정
+        # → 장중봇 can_buy() R/R 필터 (강세 1.2+ / 약세 2.0+) 에 활용
+        # → analyze_spike() market_env 파라미터에 주입 → 오닐 전략 자동 분기
+        market_env = watchlist_state.determine_and_set_market_env(price_data)
+        logger.info(f"[morning] 시장 환경 판단 완료: {market_env or '(미지정)'}")
 
         logger.info("[morning] 아침봇 완료 ✅")
 
