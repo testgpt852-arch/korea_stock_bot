@@ -8,10 +8,12 @@ reports/morning_report.py
 ③ news_collector    → 리포트·정책뉴스
 ④ price_collector   → 전날 가격 데이터 (상한가·급등·기관/외인) ← v2.1 추가
 ⑤ signal_analyzer   → 신호 1~5 통합 판단 (신호4 price_data 활용)    ← v2.1 변경
-⑥ ai_analyzer       → 주요 공시 호재/악재 점수화 (GOOGLE_AI_API_KEY 있을 때만)
-⑦ theme_analyzer    → 순환매 지도 (price_data로 소외도 계산)          ← v2.1 변경
-⑧ watchlist_state   → WebSocket 워치리스트 저장 (장중봇용)            ← v3.1 추가
-⑧ 보고서 조립 → 텔레그램 발송
+⑥ ai_analyzer.analyze_dart()  → 주요 공시 호재/악재 점수화
+⑦ ai_analyzer.analyze_closing() → 신호4 제네릭 라벨 교체             ← v2.4 추가
+   ("상한가 순환매"/"KOSPI 급등 순환매" → "바이오신약", "방산" 등 실제 테마명)
+⑧ theme_analyzer    → 순환매 지도 (price_data로 소외도 계산)
+⑨ watchlist_state   → WebSocket 워치리스트 저장 (장중봇용)            ← v3.1 추가
+⑩ 보고서 조립 → 텔레그램 발송
 
 [수정이력]
 - v1.0: 기본 구조
@@ -23,6 +25,8 @@ reports/morning_report.py
         theme_analyzer에 price_data["by_name"] 전달
 - v2.2: 전날 기관/외인 순매수 데이터 보고서에 추가
         (price_data["institutional"] → report["prev_institutional"])
+- v2.4: ai_analyzer.analyze_closing(price_data) 추가
+        신호4 "상한가 순환매" 제네릭 라벨을 AI 실제 테마명으로 교체
 """
 
 from utils.logger import logger
@@ -88,6 +92,31 @@ async def run() -> None:
             if ai_dart_results:
                 logger.info(f"[morning] AI 공시 분석 완료 — {len(ai_dart_results)}건")
                 _enrich_signals_with_ai(signal_result["signals"], ai_dart_results)
+
+        # ── ④-b AI 순환매 테마 그룹핑 (v2.4) ────────────────
+        # signal4 "상한가 순환매"/"KOSPI 급등 순환매" 제네릭 라벨을
+        # ai_analyzer.analyze_closing()으로 실제 테마명(바이오신약, 방산 등)으로 교체
+        # ARCHITECTURE 규칙: T5/T6/T3 분석기 호출 금지지만
+        # ai_analyzer.analyze_closing()은 허용 (ai_analyzer → morning_report 의존성 기존 존재)
+        if price_data:
+            try:
+                logger.info("[morning] AI 순환매 테마 그룹핑 중 (신호4 교체)...")
+                ai_closing_signals = ai_analyzer.analyze_closing(price_data)
+                if ai_closing_signals:
+                    # 신호4(순환매) 엔트리만 교체 — 신호1/2/3/5는 유지
+                    non_signal4 = [
+                        s for s in signal_result["signals"]
+                        if "신호4" not in s.get("발화신호", "")
+                    ]
+                    signal_result["signals"] = non_signal4 + ai_closing_signals
+                    signal_result["signals"].sort(key=lambda x: x["강도"], reverse=True)
+                    logger.info(
+                        f"[morning] 신호4 AI 교체 완료 — {len(ai_closing_signals)}개 테마"
+                    )
+                else:
+                    logger.info("[morning] AI 테마 결과 없음 (저변동/AI 미설정) — 기존 신호4 유지")
+            except Exception as e:
+                logger.warning(f"[morning] AI 테마 그룹핑 실패 ({e}) — 기존 신호4 유지")
 
         # ── ⑤ 테마 분석 (v2.1: price_data["by_name"] 전달) ───
         # theme_analyzer가 price_data로 소외도를 실제 수치로 계산
