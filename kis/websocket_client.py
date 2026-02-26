@@ -1,6 +1,6 @@
 """
 kis/websocket_client.py
-KIS 실시간 체결 WebSocket 수신 전담 (4단계)
+KIS 실시간 체결·호가 WebSocket 수신 전담 (4단계)
 
 ═══════════════════════════════════════════════════════════════
 🚨 KIS WebSocket 운영 규칙 — 위반 시 IP·앱키 차단 (ARCHITECTURE.md)
@@ -16,9 +16,14 @@ KIS 실시간 체결 WebSocket 수신 전담 (4단계)
 - disconnect()→ 장 마감(15:30) 1회만 호출. 모든 구독 해제 후 종료.
 - subscribe() → 이미 구독 중이면 skip. 구독 후 ack 대기.
 - reconnect   → 네트워크 에러 시만. 5초 간격, 회수 제한 없음 (v3.2).
-               [이전 v3.1: MAX 3회, 30초 간격 → Railway 네트워크 끊김 대응 실패]
-               [변경 v3.2: 무한 재시도, 5초 간격 (python-kis reconnect_interval=5 참조)]
-═══════════════════════════════════════════════════════════════
+
+[v4.0 호가 구독 추가]
+- subscribe_orderbook(ticker): H0STASP0 실시간 호가 구독
+  WS_ORDERBOOK_ENABLED=true 시 realtime_alert._ws_loop()에서 호출
+  ⚠️ 체결(H0STCNT0)과 호가(H0STASP0) 합산 구독 수가 한도(40) 초과 금지
+  → WS_ORDERBOOK_ENABLED=true 시 체결 20 + 호가 20 = 40으로 운영
+- _parse_orderbook(): H0STASP0 파이프 포맷 파싱
+  receive_loop에서 tr_id로 체결/호가 자동 분기
 
 [ARCHITECTURE 의존성]
 websocket_client → volume_analyzer, realtime_alert
@@ -38,10 +43,11 @@ _WS_URL = "ws://ops.koreainvestment.com:21000"
 class KISWebSocketClient:
 
     def __init__(self):
-        self.connected          = False               # 연결 상태
-        self.subscribed_tickers = set()               # 현재 구독 중인 종목
-        self._ws                = None                # websockets 객체
-        self._recv_callbacks    = []                  # 데이터 수신 콜백 목록
+        self.connected          = False
+        self.subscribed_tickers = set()   # 체결(H0STCNT0) 구독 종목
+        self.subscribed_ob      = set()   # 호가(H0STASP0) 구독 종목 (v4.0 신규)
+        self._ws                = None
+        self._recv_callbacks    = []
         self._reconnect_count   = 0
 
     # ── 1. 연결 (장 시작 1회) ─────────────────────────────────
@@ -73,13 +79,12 @@ class KISWebSocketClient:
             logger.error(f"[ws] 연결 실패: {e}")
             self.connected = False
 
-    # ── 2. 종목 구독 ─────────────────────────────────────────
+    # ── 2. 종목 구독 (체결 H0STCNT0) ────────────────────────
 
     async def subscribe(self, ticker: str) -> None:
         """
         종목 실시간 체결 구독
-        이미 구독 중이면 skip (중복 구독 금지)
-        구독 후 ack 대기 (수신 검증 없는 구독 금지)
+        이미 구독 중이면 skip. 구독 후 ack 대기.
         """
         if not self.connected:
             logger.warning(f"[ws] {ticker} 구독 불가 — 연결 안 됨")
@@ -87,95 +92,143 @@ class KISWebSocketClient:
         if ticker in self.subscribed_tickers:
             return
 
-        msg = _build_subscribe_msg(ticker, subscribe=True)
+        msg = _build_subscribe_msg(ticker, tr_id="H0STCNT0", subscribe=True)
         try:
             await self._ws.send(json.dumps(msg))
-            # ack 대기: 최대 3초
             acked = await self._wait_for_ack(ticker, timeout=3)
             if acked:
                 self.subscribed_tickers.add(ticker)
-                logger.info(f"[ws] {ticker} 구독 완료")
+                logger.info(f"[ws] {ticker} 체결 구독 완료")
             else:
-                logger.warning(f"[ws] {ticker} ack 미수신 — 구독 미등록")
+                logger.warning(f"[ws] {ticker} 체결 ack 미수신 — 구독 미등록")
         except Exception as e:
-            logger.warning(f"[ws] {ticker} 구독 요청 실패: {e}")
+            logger.warning(f"[ws] {ticker} 체결 구독 요청 실패: {e}")
 
-    # ── 3. 구독 해제 ─────────────────────────────────────────
+    # ── 3. 호가 구독 (H0STASP0) — v4.0 신규 ─────────────────
+
+    async def subscribe_orderbook(self, ticker: str) -> None:
+        """
+        종목 실시간 호가(H0STASP0) 구독
+        v4.0 신규. WS_ORDERBOOK_ENABLED=true 시 realtime_alert에서 호출.
+
+        ⚠️ 한도 주의: 체결(H0STCNT0) + 호가(H0STASP0) 합계 ≤ WS_WATCHLIST_MAX(40)
+           → WS_ORDERBOOK_ENABLED 설정 시 realtime_alert._ws_loop()에서
+             체결 WS_ORDERBOOK_SLOTS(20) + 호가 WS_ORDERBOOK_SLOTS(20) = 40으로 분할
+        """
+        if not self.connected:
+            logger.warning(f"[ws] {ticker} 호가 구독 불가 — 연결 안 됨")
+            return
+        if ticker in self.subscribed_ob:
+            return
+
+        msg = _build_subscribe_msg(ticker, tr_id="H0STASP0", subscribe=True)
+        try:
+            await self._ws.send(json.dumps(msg))
+            acked = await self._wait_for_ack(ticker, timeout=3)
+            if acked:
+                self.subscribed_ob.add(ticker)
+                logger.info(f"[ws] {ticker} 호가 구독 완료")
+            else:
+                logger.warning(f"[ws] {ticker} 호가 ack 미수신 — 구독 미등록")
+        except Exception as e:
+            logger.warning(f"[ws] {ticker} 호가 구독 요청 실패: {e}")
+
+    # ── 4. 구독 해제 ─────────────────────────────────────────
 
     async def unsubscribe(self, ticker: str) -> None:
-        """미구독 종목은 skip"""
+        """체결 구독 해제. 미구독 종목은 skip."""
         if ticker not in self.subscribed_tickers:
             return
-        msg = _build_subscribe_msg(ticker, subscribe=False)
+        msg = _build_subscribe_msg(ticker, tr_id="H0STCNT0", subscribe=False)
         try:
             await self._ws.send(json.dumps(msg))
             self.subscribed_tickers.discard(ticker)
-            logger.info(f"[ws] {ticker} 구독해제 완료")
+            logger.info(f"[ws] {ticker} 체결 구독해제 완료")
         except Exception as e:
-            logger.warning(f"[ws] {ticker} 구독해제 실패: {e}")
-            self.subscribed_tickers.discard(ticker)  # 오류여도 로컬에서 제거
+            logger.warning(f"[ws] {ticker} 체결 구독해제 실패: {e}")
+            self.subscribed_tickers.discard(ticker)
 
-    # ── 4. 연결 종료 (장 마감 1회) ───────────────────────────
+    async def unsubscribe_orderbook(self, ticker: str) -> None:
+        """호가 구독 해제. 미구독 종목은 skip."""
+        if ticker not in self.subscribed_ob:
+            return
+        msg = _build_subscribe_msg(ticker, tr_id="H0STASP0", subscribe=False)
+        try:
+            await self._ws.send(json.dumps(msg))
+            self.subscribed_ob.discard(ticker)
+            logger.info(f"[ws] {ticker} 호가 구독해제 완료")
+        except Exception as e:
+            logger.warning(f"[ws] {ticker} 호가 구독해제 실패: {e}")
+            self.subscribed_ob.discard(ticker)
+
+    # ── 5. 연결 종료 (장 마감 1회) ───────────────────────────
 
     async def disconnect(self) -> None:
         """
         장 마감(15:30) 시 1회만 호출
-        구독 중인 종목 전부 해제 후 연결 종료
+        체결·호가 모든 구독 해제 후 연결 종료
         """
         if not self.connected:
             return
 
-        # 구독 종목 전체 해제 후 종료
         for ticker in list(self.subscribed_tickers):
             await self.unsubscribe(ticker)
+        for ticker in list(self.subscribed_ob):
+            await self.unsubscribe_orderbook(ticker)
 
         if self._ws:
             await self._ws.close()
         self.connected = False
         logger.info("[ws] KIS WebSocket 연결 종료")
 
-    # ── 5. 데이터 수신 루프 ───────────────────────────────────
+    # ── 6. 데이터 수신 루프 ───────────────────────────────────
 
-    async def receive_loop(self, on_data: callable) -> None:
+    async def receive_loop(self, on_tick: callable,
+                           on_orderbook: callable | None = None) -> None:
         """
         실시간 데이터 수신 루프
-        on_data(parsed_data: dict) → 콜백으로 데이터 전달
+        on_tick(parsed_tick: dict)           → 체결(H0STCNT0) 콜백
+        on_orderbook(parsed_ob: dict) | None → 호가(H0STASP0) 콜백 (v4.0 신규)
 
-        volume_analyzer.handle_tick() 등 콜백을 등록해서 사용
+        tr_id로 체결/호가 자동 분기:
+          0|H0STCNT0|... → on_tick 호출
+          0|H0STASP0|... → on_orderbook 호출 (on_orderbook이 None이면 skip)
         """
         if not self.connected or not self._ws:
             logger.error("[ws] 수신 루프 시작 불가 — 연결 안 됨")
             return
 
-        logger.info("[ws] 실시간 데이터 수신 시작")
+        logger.info("[ws] 실시간 데이터 수신 시작 (체결+호가 분기)")
         try:
             async for raw in self._ws:
                 try:
-                    data = _parse_tick(raw)
-                    if data:
-                        await on_data(data)
+                    # tr_id로 분기
+                    tr_id = _peek_tr_id(raw)
+                    if tr_id == "H0STCNT0":
+                        data = _parse_tick(raw)
+                        if data:
+                            await on_tick(data)
+                    elif tr_id == "H0STASP0" and on_orderbook:
+                        data = _parse_orderbook(raw)
+                        if data:
+                            await on_orderbook(data)
                 except Exception as e:
-                    logger.debug(f"[ws] 틱 파싱 오류: {e}")
+                    logger.debug(f"[ws] 데이터 파싱 오류: {e}")
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"[ws] 연결 끊김: {e}")
             self.connected = False
-            # 네트워크 에러 시만 재연결 시도
-            await self._reconnect_with_backoff()
+            await self._reconnect_with_backoff(on_tick, on_orderbook)
         except Exception as e:
             logger.error(f"[ws] 수신 루프 오류: {e}")
             self.connected = False
 
-    # ── 6. 에러 재연결 (네트워크 에러 시만, v3.2: 무한 재시도) ──
+    # ── 7. 에러 재연결 (v3.2: 무한 재시도) ───────────────────
 
-    async def _reconnect_with_backoff(self) -> None:
+    async def _reconnect_with_backoff(self, on_tick=None, on_orderbook=None) -> None:
         """
         네트워크 에러로 연결이 끊겼을 때만 재연결 허용.
         의도적인 연결/종료 반복 절대 금지.
-
-        [v3.2 변경]
-        이전: MAX 3회, 30초 간격 → Railway 간헐적 끊김 시 3회 실패 후 WS 완전 사망
-        변경: 회수 제한 없음, 5초 간격 (네트워크 복구될 때까지 계속 재시도)
-             python-kis reconnect_interval=5 참조
+        v3.2: 회수 제한 없음, 5초 간격
         """
         attempt = 0
         while True:
@@ -187,24 +240,31 @@ class KISWebSocketClient:
             await asyncio.sleep(config.WS_RECONNECT_DELAY)
 
             try:
-                # connect()는 내부에서 self.connected 체크 → 중복 연결 방지
-                self.connected = False   # 강제로 False 설정해야 connect() 진행됨
+                self.connected = False
                 await self.connect()
                 if not self.connected:
                     logger.warning(f"[ws] 재연결 실패 ({attempt}회) — 재시도 예정")
                     continue
 
-                # 재연결 성공 → 기존 구독 종목 복원
+                # 재연결 성공 → 기존 체결 구독 복원
                 prev_tickers = list(self.subscribed_tickers)
                 self.subscribed_tickers.clear()
                 for ticker in prev_tickers:
                     await self.subscribe(ticker)
+
+                # 호가 구독도 복원
+                prev_ob = list(self.subscribed_ob)
+                self.subscribed_ob.clear()
+                for ticker in prev_ob:
+                    await self.subscribe_orderbook(ticker)
+
                 logger.info(
                     f"[ws] 재연결 완료 ({attempt}회 시도) — "
-                    f"{len(self.subscribed_tickers)}/{len(prev_tickers)}종목 재구독"
+                    f"체결 {len(self.subscribed_tickers)}/{len(prev_tickers)}종목 "
+                    f"/ 호가 {len(self.subscribed_ob)}/{len(prev_ob)}종목 재구독"
                 )
                 self._reconnect_count = 0
-                return   # 성공 시 루프 탈출
+                return
 
             except asyncio.CancelledError:
                 logger.info("[ws] 재연결 루프 취소 (CancelledError) — 장 마감으로 판단")
@@ -212,7 +272,7 @@ class KISWebSocketClient:
             except Exception as e:
                 logger.warning(f"[ws] 재연결 예외: {e} — {attempt}회 시도 후 재시도")
 
-    # ── 7. ack 대기 (수신 검증) ──────────────────────────────
+    # ── 8. ack 대기 (수신 검증) ──────────────────────────────
 
     async def _wait_for_ack(self, ticker: str, timeout: float = 3.0) -> bool:
         """구독 요청 후 ack 수신 대기"""
@@ -221,8 +281,6 @@ class KISWebSocketClient:
             while asyncio.get_event_loop().time() < deadline:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=1.0)
                 data = json.loads(raw) if isinstance(raw, str) else {}
-                # KIS ack: header.tr_id가 구독한 종목의 tr_id와 일치하거나
-                # body.msg1 = "SUBSCRIBE SUCCESS"
                 if _is_ack(data, ticker):
                     return True
             return False
@@ -234,7 +292,7 @@ class KISWebSocketClient:
 
 # ── 내부 유틸 ────────────────────────────────────────────────
 
-def _build_subscribe_msg(ticker: str, subscribe: bool) -> dict:
+def _build_subscribe_msg(ticker: str, tr_id: str, subscribe: bool) -> dict:
     """KIS WebSocket 구독/해제 메시지 생성"""
     return {
         "header": {
@@ -245,8 +303,8 @@ def _build_subscribe_msg(ticker: str, subscribe: bool) -> dict:
         },
         "body": {
             "input": {
-                "tr_id":      "H0STCNT0",   # 국내주식 실시간 체결
-                "tr_key":     ticker,
+                "tr_id":  tr_id,    # "H0STCNT0"(체결) 또는 "H0STASP0"(호가)
+                "tr_key": ticker,
             }
         }
     }
@@ -262,20 +320,32 @@ def _is_ack(data: dict, ticker: str) -> bool:
         return False
 
 
+def _peek_tr_id(raw: str | bytes) -> str:
+    """
+    파싱 없이 tr_id만 빠르게 추출
+    KIS 파이프 포맷: type|tr_id|cnt|data
+    """
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        parts = raw.split("|", 3)
+        if len(parts) >= 2 and parts[0] == "0":
+            return parts[1]
+    except Exception:
+        pass
+    return ""
+
+
 def _parse_tick(raw: str | bytes) -> dict | None:
     """
     KIS H0STCNT0 실시간 체결 데이터 파싱 (v3.1 필드 수정)
 
-    KIS 파이프 형식: type|tr_id|cnt|data
     data 필드 (^구분):
       [0]  종목코드   [1] 체결시각(HHMMSS)  [2] 현재가
       [3]  전일대비부호               [4] 전일대비(등락폭)
-      [5]  전일대비율(등락률%)        ← v3.1: 기존 [12] 오류 → [5] 정정
-      [6]  가중평균가  [7] 시가  [8] 고가  [9] 저가
-      [10] 매도호가1  [11] 매수호가1
+      [5]  전일대비율(등락률%)
       [12] 체결거래량(이 틱)
-      [13] 누적거래량(당일 누적)      ← v3.1 신규: analyze_ws_tick RVOL용
-      [14] 누적거래대금
+      [13] 누적거래량(당일 누적)
     """
     try:
         if isinstance(raw, bytes):
@@ -283,30 +353,91 @@ def _parse_tick(raw: str | bytes) -> dict | None:
         parts = raw.split("|")
         if len(parts) < 4:
             return None
-        if parts[0] == "0":   # 실시간 데이터
+        if parts[0] == "0":
             fields = parts[3].split("^")
             if len(fields) < 14:
                 return None
 
-            def safe_int(v: str) -> int:
-                return int(v) if v and v.lstrip("-").isdigit() else 0
-
-            def safe_float(v: str) -> float:
-                try:    return float(v) if v else 0.0
+            def safe_int(v): return int(v) if v and v.lstrip("-").isdigit() else 0
+            def safe_float(v):
+                try: return float(v) if v else 0.0
                 except: return 0.0
 
             return {
                 "종목코드":   fields[0],
                 "체결가":     safe_int(fields[2]),
-                "등락률":     safe_float(fields[5]),    # v3.1 정정: 전일대비율
-                "체결거래량": safe_int(fields[12]),     # 이 틱 거래량
-                "누적거래량": safe_int(fields[13]),     # v3.1 신규: 당일 누적
-                "체결시각":   fields[1],                # HHMMSS
+                "등락률":     safe_float(fields[5]),
+                "체결거래량": safe_int(fields[12]),
+                "누적거래량": safe_int(fields[13]),
+                "체결시각":   fields[1],
             }
     except Exception:
         pass
     return None
 
 
-# ── 싱글톤 인스턴스 (realtime_alert에서 import해서 사용) ──────
+def _parse_orderbook(raw: str | bytes) -> dict | None:
+    """
+    [v4.0 신규] KIS H0STASP0 실시간 호가 데이터 파싱
+
+    data 필드 (^구분, python-kis KisDomesticRealtimeOrderbook 참조):
+      [0]  종목코드 (MKSC_SHRN_ISCD)
+      [1]  영업시간 (HHMMSS)
+      [2]  시간구분코드
+      [3~12]   매도호가 1~10 (ASKP1~10)
+      [13~22]  매수호가 1~10 (BIDP1~10)
+      [23~32]  매도호가잔량 1~10 (ASKP_RSQN1~10)
+      [33~42]  매수호가잔량 1~10 (BIDP_RSQN1~10)
+      [43] 총매도호가잔량 (TOTAL_ASKP_RSQN)
+      [44] 총매수호가잔량 (TOTAL_BIDP_RSQN)
+      [53] 누적거래량 (ACML_VOL)
+
+    반환값:
+    {
+        "종목코드":   str,
+        "체결시각":   str,
+        "매도호가":   list[{"가격": int, "잔량": int}],  # asks[0]=최저매도가
+        "매수호가":   list[{"가격": int, "잔량": int}],  # bids[0]=최고매수가
+        "총매도잔량": int,
+        "총매수잔량": int,
+    }
+    """
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        parts = raw.split("|")
+        if len(parts) < 4 or parts[0] != "0":
+            return None
+
+        fields = parts[3].split("^")
+        if len(fields) < 45:
+            return None
+
+        def safe_int(v): return int(v) if v and v.lstrip("-").isdigit() else 0
+
+        asks = [
+            {"가격": safe_int(fields[3 + i]), "잔량": safe_int(fields[23 + i])}
+            for i in range(10)
+            if safe_int(fields[3 + i]) > 0
+        ]
+        bids = [
+            {"가격": safe_int(fields[13 + i]), "잔량": safe_int(fields[33 + i])}
+            for i in range(10)
+            if safe_int(fields[13 + i]) > 0
+        ]
+
+        return {
+            "종목코드":   fields[0],
+            "체결시각":   fields[1],
+            "매도호가":   asks,
+            "매수호가":   bids,
+            "총매도잔량": safe_int(fields[43]),
+            "총매수잔량": safe_int(fields[44]),
+        }
+    except Exception:
+        pass
+    return None
+
+
+# ── 싱글톤 인스턴스 ──────────────────────────────────────────
 ws_client = KISWebSocketClient()
