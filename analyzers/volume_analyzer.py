@@ -31,6 +31,11 @@ analyzers/volume_analyzer.py
         poll_all_markets() / analyze_ws_tick() 에 호가 분석 결과 통합
         REST 급등 감지 → get_orderbook() 즉시 호출 → 알림에 호가 강도 추가
         WebSocket 체결 급등 감지 → REST 호가 조회 → 동일 분석 적용
+- v4.1: [소스 단일화] poll_all_markets() 에서 get_volume_ranking() 제거
+        → 코스피/코스닥 급등률 순위(get_rate_ranking)만 사용
+        이유: 거래량 순위는 삼성전자·현대차 등 시총 대형주가 항상 상위에 포함되어
+             실질적인 급등 신호가 아닌 노이즈 알림 발생
+        감지소스 "volume" 배지 deprecated → 장중 REST 감지는 전부 "rate"
 """
 
 from datetime import datetime, timezone, timedelta
@@ -122,11 +127,17 @@ def analyze_orderbook(orderbook: dict) -> dict | None:
 
 def poll_all_markets() -> list[dict]:
     """
-    KIS REST 거래량 순위 API로 코스피·코스닥 조회 후
+    KIS REST 등락률 순위 API로 코스피·코스닥 조회 후
     직전 poll 대비 1분간 변화량(델타)으로 급등 조건 판단.
 
+    [v4.1 소스 단일화] get_volume_ranking() 제거 — get_rate_ranking()만 사용
+    이유: 거래량 순위는 삼성전자·현대차 등 시총 대형주가 항상 상위에 포함되어
+         실질적 급등 신호가 아닌 노이즈 알림이 발생함.
+         등락률 순위는 코스피 중형+소형, 코스닥 전체(스팩·ETF 제외) 기준이므로
+         대형주 필터가 이미 적용되어 있음.
+
     [v4.0] 조건 충족 종목: get_orderbook() 즉시 호출 → 호가 분석 결과 포함
-    소~중형주 필터는 rest_client.get_volume_ranking()에서 처리 (v4.0)
+    소~중형주 필터는 rest_client.get_rate_ranking()에서 처리
 
     [v3.8 필터 체인 순서]
     1. 누적 등락률 < MIN_CHANGE_RATE(3%) → 스킵
@@ -139,7 +150,7 @@ def poll_all_markets() -> list[dict]:
     8. [v4.0] 알림 대상 종목 → REST 호가 조회 → analyze_orderbook() 주입
     """
     global _prev_snapshot
-    from kis.rest_client import get_volume_ranking, get_rate_ranking, get_orderbook
+    from kis.rest_client import get_rate_ranking, get_orderbook
 
     current_snapshot: dict[str, dict] = {}
     alerted:          list[dict]      = []
@@ -148,23 +159,15 @@ def poll_all_markets() -> list[dict]:
     for market_code in ["J", "Q"]:
         market_name = "코스피" if market_code == "J" else "코스닥"
 
-        vol_rows  = get_volume_ranking(market_code)
+        # [v4.1] 등락률 순위만 사용 — 거래량 순위 제거 (대형주 노이즈 차단)
         rate_rows = get_rate_ranking(market_code)
+        rows = [{**row, "_source": "rate"} for row in rate_rows]
 
-        seen: dict[str, dict] = {}
-        for row in vol_rows:
-            seen[row["종목코드"]] = {**row, "_source": "volume"}
-        for row in rate_rows:
-            if row["종목코드"] not in seen:
-                seen[row["종목코드"]] = {**row, "_source": "rate"}
-
-        rows = list(seen.values())
         if not rows:
             logger.debug(f"[volume] {market_name} 순위 없음")
             continue
         logger.info(
-            f"[volume] {market_name} 합산: 거래량{len(vol_rows)}+등락률{len(rate_rows)}"
-            f"→ 중복제거 후 {len(rows)}종목 (소~중형 필터 적용)"
+            f"[volume] {market_name} 등락률 순위: {len(rows)}종목 (소~중형 필터 적용)"
         )
 
         for row in rows:
