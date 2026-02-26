@@ -176,10 +176,16 @@ def _fetch_index(target_date: datetime, index_code: str, name: str) -> dict:
     [v2.2 버그 수정]
     fromdate==todate 단일날짜 조회 시 pykrx가 등락률 0.00% 반환하는 문제
     → target_date 기준 10 캘린더일 전부터 조회 → 마지막 행 사용
+
+    [v2.5 버그 수정 — 날짜 교체 시 0% 초기화]
+    pykrx 등락률 컬럼은 범위 첫 행을 0으로 삼는 경우가 있어
+    하루가 바뀌면 최근 행이 0%로 초기화되는 현상 발생.
+    → 마지막 두 행의 종가로 등락률을 직접 계산하도록 변경.
+    범위를 10 → 20일로 확장해 공휴일 연속 구간에서도 2개 이상 행 보장.
     """
     try:
         date_str  = fmt_ymd(target_date)
-        from_date = target_date - timedelta(days=10)
+        from_date = target_date - timedelta(days=20)   # v2.5: 10 → 20일로 확장
         from_str  = fmt_ymd(from_date)
 
         df = pykrx_stock.get_index_ohlcv_by_date(from_str, date_str, index_code)
@@ -187,9 +193,16 @@ def _fetch_index(target_date: datetime, index_code: str, name: str) -> dict:
             logger.warning(f"[price] {name} 지수 없음 (휴장 또는 데이터 없음)")
             return {}
 
-        row         = df.iloc[-1]
-        close       = float(row.get("종가", 0))
-        change_rate = float(row.get("등락률", 0))
+        close = float(df.iloc[-1].get("종가", 0))
+
+        # v2.5: 등락률 직접 계산 (pykrx 등락률 컬럼 0% 반환 버그 회피)
+        if len(df) >= 2:
+            prev_close  = float(df.iloc[-2].get("종가", 0))
+            change_rate = ((close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+        else:
+            # 행이 1개뿐이면 컬럼 값을 fallback으로 사용
+            change_rate = float(df.iloc[-1].get("등락률", 0))
+
         logger.info(f"[price] {name}: {close:,.2f} ({change_rate:+.2f}%)")
         return {"close": close, "change_rate": change_rate}
     except Exception as e:
