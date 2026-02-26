@@ -5,6 +5,7 @@ reports/closing_report.py
 [ARCHITECTURE 의존성]
 closing_report → price_collector, theme_analyzer, ai_analyzer, telegram_bot
 closing_report → closing_strength, volume_flat, fund_inflow_analyzer  ← v3.2 T5/T6/T3
+closing_report → oracle_analyzer                                       ← v8.1 쪽집게봇
 수정 시 이 파일만 수정 (나머지 건드리지 않음)
 
 [실행 흐름]
@@ -15,7 +16,13 @@ closing_report → closing_strength, volume_flat, fund_inflow_analyzer  ← v3.2
    volume_flat     → T6 횡보 거래량 급증 종목 (v3.2)
    fund_inflow_analyzer → T3 시총 대비 자금유입 종목 (v3.2)
    _update_watchlist_from_closing() → 내일 WebSocket 워치리스트 보강 (v3.2)
-⑤ telegram_bot     → 발송 (T3/T5/T6 섹션 포함)
+④-b oracle_analyzer → 테마·수급·공시·T5/T6/T3 종합 → 내일 픽 + 진입조건  ← v8.1 신규
+⑤ telegram_bot     → 쪽집게 섹션 선발송 → 마감 리포트 후발송              ← v8.1 변경
+
+[수정이력]
+- v8.1: oracle_analyzer 통합
+        쪽집게 섹션(format_oracle_section) 선발송 추가
+        T5/T6/T3 결과를 oracle_analyzer에 전달 (rule #16 준수 — 마감봇에서만)
 """
 
 from datetime import datetime
@@ -27,6 +34,7 @@ import analyzers.ai_analyzer           as ai_analyzer
 import analyzers.closing_strength      as closing_strength    # v3.2: T5 마감 강도
 import analyzers.volume_flat           as volume_flat         # v3.2: T6 횡보 거래량
 import analyzers.fund_inflow_analyzer  as fund_inflow_analyzer  # v3.2: T3 시총 자금유입
+import analyzers.oracle_analyzer       as oracle_analyzer     # v8.1: 쪽집게봇
 import utils.watchlist_state           as watchlist_state     # v3.2: 마감봇→장중봇 워치리스트
 import notifiers.telegram_bot     as telegram_bot
 
@@ -70,8 +78,7 @@ async def run() -> None:
         logger.info("[closing] 순환매 소외도 계산 중...")
         theme_result = theme_analyzer.analyze(signal_result, price_result["by_name"])
 
-        # ── 4. T5/T6/T3 트리거 분석 (v3.2 — 이전에 dead code였던 호출 복원) ──
-        # price_collector 이후 같은 날짜 기준으로 각 분석기 실행
+        # ── 4. T5/T6/T3 트리거 분석 (v3.2) ──────────────────────
         target_ymd = target.strftime("%Y%m%d")
 
         logger.info("[closing] T5 마감 강도 분석 중...")
@@ -98,6 +105,27 @@ async def run() -> None:
         # 내일 WebSocket 워치리스트에 T5/T6 종목 추가
         _update_watchlist_from_closing(cs_result, vf_result, price_result)
 
+        # ── 4-b. 쪽집게 분석 (v8.1 신규) ─────────────────────
+        # T5/T6/T3 결과까지 종합 → 내일 주도 테마 + 종목 픽 + 진입조건
+        # rule #16 준수: closing_report에서만 T5/T6/T3 전달 가능
+        logger.info("[closing] 쪽집게 분석 중 (내일 픽 + 진입조건)...")
+        market_env_val = watchlist_state.get_market_env() or ""
+        try:
+            oracle_result = oracle_analyzer.analyze(
+                theme_map=theme_result.get("theme_map", []),
+                price_by_name=price_result.get("by_name", {}),
+                institutional=price_result.get("institutional", []),
+                ai_dart_results=[],          # 마감봇은 공시 분석 없음
+                signals=ai_signals,
+                market_env=market_env_val,
+                closing_strength=cs_result,  # T5 — 마감봇 전용
+                volume_flat=vf_result,       # T6 — 마감봇 전용
+                fund_inflow=fi_result,       # T3 — 마감봇 전용
+            )
+        except Exception as _e:
+            logger.warning(f"[closing] 쪽집게 분석 실패 (비치명적): {_e}")
+            oracle_result = None
+
         # ── 5. 보고서 조립 ─────────────────────────────────────
         report = {
             "today_str":        today_str,
@@ -111,14 +139,24 @@ async def run() -> None:
             "short_selling":    price_result.get("short_selling", []),
             "theme_map":        theme_result.get("theme_map",     []),
             "volatility":       signal_result["volatility"],
-            # v3.2: T5/T6/T3 트리거 결과 (telegram_bot.format_closing_report 에서 사용)
+            # v3.2: T5/T6/T3 트리거 결과
             "closing_strength": cs_result,
             "volume_flat":      vf_result,
             "fund_inflow":      fi_result,
+            # v8.1: 쪽집게 분석 결과
+            "oracle":           oracle_result,
         }
 
-        # ── 6. 텔레그램 발송 ───────────────────────────────────
+        # ── 6. 텔레그램 발송 (v8.1: 쪽집게 섹션 선발송) ──────────
         logger.info("[closing] 텔레그램 발송 중...")
+
+        # [v8.1] 쪽집게 픽 섹션 먼저 발송 (가장 중요한 결론 → 즉시 확인)
+        if oracle_result and oracle_result.get("has_data"):
+            oracle_msg = telegram_bot.format_oracle_section(oracle_result)
+            if oracle_msg:
+                await telegram_bot.send_async(oracle_msg)
+
+        # 전체 마감 리포트 후발송
         message = telegram_bot.format_closing_report(report)
         await telegram_bot.send_async(message)
 
