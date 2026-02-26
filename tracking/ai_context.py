@@ -323,13 +323,18 @@ def _get_index_level_context() -> str:
 
     [절대 금지 규칙 — ARCHITECTURE #29]
     DB 조회 + 문자열 반환만. AI API 호출 금지.
+
+    [v7.0 수정] watchlist_state.get_kospi_level()로 현재 KOSPI 레벨을 읽어
+    현재 구간(예: 6200~6400) 중심으로 인접 구간 승률을 반환.
+    아침봇 미실행(레벨=0) 시 전체 Top3 반환 (폴백).
     """
     try:
-        # 현재 KOSPI 레벨은 watchlist_state에 저장된 시장 환경 정보에서 추론
-        # (아침봇이 price_data를 가지고 있으나 여기서 직접 접근 불가)
-        # → memory_compressor.get_index_context()에 위임
+        import utils.watchlist_state as _wls
+        kospi_level = _wls.get_kospi_level()
+        current_kospi: float | None = kospi_level if kospi_level > 0 else None
+
         from tracking.memory_compressor import get_index_context
-        return get_index_context(current_kospi=None)
+        return get_index_context(current_kospi=current_kospi)
     except Exception as e:
         logger.debug(f"[ai_context] _get_index_level_context 실패 (비치명적): {e}")
         return ""

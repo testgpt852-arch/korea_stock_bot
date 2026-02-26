@@ -1,7 +1,7 @@
 """
 utils/watchlist_state.py
 아침봇 → 장중봇 간 WebSocket 워치리스트 + 시장 환경 + 섹터 맵 공유 상태
-(v3.1 신규 / v4.2 확장 / v4.4 Phase4 섹터 맵 추가)
+(v3.1 신규 / v4.2 확장 / v4.4 Phase4 섹터 맵 추가 / v7.0 KOSPI 지수값 추가)
 
 [역할]
 morning_report(08:30) 가 전날 수급·신호 데이터로 워치리스트를 생성해 저장.
@@ -16,6 +16,11 @@ position_manager.can_buy() R/R 필터에 활용.
 morning_report 가 price_data["by_sector"]로 ticker→sector 맵을 생성해 저장.
 position_manager.open_position() 에서 섹터 분산 체크 + DB 기록에 활용.
 
+[v7.0 추가] KOSPI 지수값(종가) 저장/조회 기능
+determine_and_set_market_env() 에서 price_data["kospi"]["close"]를 함께 저장.
+position_manager.open_position() 에서 buy_market_context 기록에 활용.
+tracking/ai_context._get_index_level_context() 에서 현재 레벨 구간 조회에 활용.
+
 [판단 기준 — _determine_market_env()]
   전날 KOSPI 등락률 기준 (단순 당일 기준, pykrx 확정치 사용):
   +1.0% 이상 → "강세장"   (R/R 1.2+ 기준)
@@ -25,6 +30,8 @@ position_manager.open_position() 에서 섹터 분산 체크 + DB 기록에 활�
 [ARCHITECTURE 의존성]
 morning_report  → watchlist_state (write: set_watchlist, set_market_env, set_sector_map)
 realtime_alert  → watchlist_state (read: get_watchlist, get_market_env, get_sector)
+position_manager → watchlist_state (read: get_kospi_level)  ← v7.0 추가
+ai_context       → watchlist_state (read: get_kospi_level)  ← v7.0 추가
 수집/분석/발송 로직 없음 — 상태 공유만
 """
 
@@ -38,6 +45,10 @@ _market_env: str = ""
 
 # [v4.4] 섹터 맵 — {종목코드: 섹터명}  (아침봇 price_data["by_sector"] 기반)
 _sector_map: dict[str, str] = {}
+
+# [v7.0] KOSPI 지수 종가 — 아침봇 price_data["kospi"]["close"] 기반
+# position_manager.open_position() buy_market_context 기록 + ai_context 구간 조회에 활용
+_kospi_level: float = 0.0
 
 
 # ── 워치리스트 ────────────────────────────────────────────────
@@ -61,11 +72,12 @@ def is_ready() -> bool:
 
 def clear() -> None:
     """장 마감 후 초기화 (다음날 아침봇이 덮어쓰므로 선택적)"""
-    global _watchlist, _market_env, _sector_map
-    _watchlist  = {}
-    _market_env = ""
-    _sector_map = {}
-    logger.info("[watchlist] 워치리스트 + 시장 환경 + 섹터 맵 초기화")
+    global _watchlist, _market_env, _sector_map, _kospi_level
+    _watchlist   = {}
+    _market_env  = ""
+    _sector_map  = {}
+    _kospi_level = 0.0
+    logger.info("[watchlist] 워치리스트 + 시장 환경 + 섹터 맵 + KOSPI 레벨 초기화")
 
 
 # ── [v4.2] 시장 환경 ──────────────────────────────────────────
@@ -119,6 +131,11 @@ def determine_and_set_market_env(price_data: dict | None) -> str:
     kospi       = price_data.get("kospi", {})
     change_rate = kospi.get("change_rate", 0) or 0  # 전날 KOSPI 등락률 (%)
 
+    # [v7.0] KOSPI 종가(지수값)도 함께 저장 — buy_market_context / ai_context 구간 조회에 활용
+    kospi_close = kospi.get("close", 0) or 0.0
+    if kospi_close > 0:
+        set_kospi_level(kospi_close)
+
     if change_rate >= 1.0:
         env = "강세장"
     elif change_rate <= -1.0:
@@ -129,8 +146,36 @@ def determine_and_set_market_env(price_data: dict | None) -> str:
     set_market_env(env)
     logger.info(
         f"[watchlist] 시장 환경 판단: KOSPI {change_rate:+.2f}% → {env}"
+        + (f"  (지수 {kospi_close:,.2f})" if kospi_close > 0 else "")
     )
     return env
+
+
+# ── [v7.0] KOSPI 지수값 ────────────────────────────────────────
+
+def set_kospi_level(level: float) -> None:
+    """
+    [v7.0] 아침봇에서 호출 — KOSPI 지수 종가 저장.
+    determine_and_set_market_env() 내부에서 price_data["kospi"]["close"] 값으로 자동 호출.
+
+    Args:
+        level: KOSPI 지수 종가 (예: 6306.85)
+    """
+    global _kospi_level
+    _kospi_level = float(level)
+    logger.info(f"[watchlist] KOSPI 지수값 저장: {_kospi_level:,.2f}")
+
+
+def get_kospi_level() -> float:
+    """
+    [v7.0] 장중봇에서 호출 — 저장된 KOSPI 지수 종가 반환.
+    position_manager.open_position(): buy_market_context 기록에 활용.
+    tracking/ai_context._get_index_level_context(): 현재 레벨 구간 조회에 활용.
+
+    Returns:
+        KOSPI 지수값 (예: 6306.85). 아침봇 미실행 시 0.0.
+    """
+    return _kospi_level
 
 
 # ── [v4.4] 섹터 맵 ────────────────────────────────────────────

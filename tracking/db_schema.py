@@ -21,6 +21,7 @@ main.py 시작 시 init_db() 1회 호출.
   kospi_index_stats      ← [v7.0 Priority3 신규] KOSPI/KOSDAQ 지수 레벨별 매매 승률 통계
                            memory_compressor.update_index_stats()가 매주 배치 업데이트.
                            kospi_range 기준 레벨별 승률을 AI 프롬프트에 주입 가능.
+                           trading_history.buy_market_context 컬럼에서 KOSPI 레벨 파싱.
 
 [뷰]
   trigger_stats          ← 트리거별 7일 승률 집계 (weekly_report 조회용)
@@ -120,7 +121,8 @@ def init_db() -> None:
                 profit_amount   INTEGER,            -- 손익 금액 (원)
                 trigger_source  TEXT,               -- 매수 트리거 종류
                 close_reason    TEXT,               -- take_profit_1 / take_profit_2 / stop_loss / trailing_stop / force_close / manual
-                mode            TEXT DEFAULT 'VTS'  -- VTS=모의 / REAL=실전
+                mode            TEXT DEFAULT 'VTS', -- VTS=모의 / REAL=실전
+                buy_market_context TEXT             -- [v7.0] 매수 당시 KOSPI 레벨 (예: "KOSPI:6306")
             )
         """)
 
@@ -459,9 +461,9 @@ def _migrate_v60(db_path: str) -> None:
 
 def _migrate_v70(db_path: str) -> None:
     """
-    [v7.0 Priority3] kospi_index_stats 테이블 추가.
+    [v7.0 Priority3] kospi_index_stats 테이블 추가 + trading_history.buy_market_context 컬럼 추가.
     Prism memory_compressor_agent의 지수 변곡점 분석 기능 경량화 구현.
-    기존 DB에 테이블이 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    기존 DB에 테이블/컬럼이 없으면 생성/추가 (idempotent — 여러 번 실행해도 안전).
     """
     conn = sqlite3.connect(db_path)
     try:
@@ -486,8 +488,18 @@ def _migrate_v70(db_path: str) -> None:
             ON kospi_index_stats(kospi_range)
         """)
 
+        # [v7.0] trading_history.buy_market_context 컬럼 추가
+        # update_index_stats()가 이 컬럼으로 KOSPI 레벨을 파싱해 구간별 승률 집계
+        c.execute("PRAGMA table_info(trading_history)")
+        existing_cols = {row[1] for row in c.fetchall()}
+        if "buy_market_context" not in existing_cols:
+            c.execute(
+                "ALTER TABLE trading_history ADD COLUMN buy_market_context TEXT"
+            )
+            logger.info("[db] v7.0 마이그레이션 — trading_history.buy_market_context 컬럼 추가")
+
         conn.commit()
-        logger.info("[db] v7.0 마이그레이션 완료 — kospi_index_stats 테이블 확인")
+        logger.info("[db] v7.0 마이그레이션 완료 — kospi_index_stats 테이블 + buy_market_context 컬럼 확인")
 
     except Exception as e:
         logger.warning(f"[db] v7.0 마이그레이션 경고: {e}")

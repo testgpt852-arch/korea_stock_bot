@@ -207,6 +207,8 @@ traders/position_manager.py ← tracking/performance_tracker (update_trailing_st
                               [v4.4] get_effective_position_max(market_env): 동적 POSITION_MAX
 utils/watchlist_state.py      ← morning_report (set_sector_map)  ← v4.4 추가
                                ← realtime_alert (get_sector)    ← v4.4 추가
+                               ← position_manager (get_kospi_level) ← v7.0 추가
+                               ← tracking/ai_context (_get_index_level_context) ← v7.0 추가
 tracking/ai_context.py         → _get_portfolio_context(): 오픈 포지션 현황 → AI 프롬프트 주입  ← v4.4
 analyzers/ai_analyzer.py       → analyze_selective_close(positions, market_env): 선택적 청산 판단  ← v4.4
 tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
@@ -757,8 +759,12 @@ gemini-2.5-flash   20회/일   ❌ 부족
     외부에서 직접 INSERT/UPDATE 금지 — update_index_stats() 경유 필수
     거래 데이터 5건 미만 레벨은 get_index_context()에서 자동 필터 (total_count >= 3)
     buy_market_context 컬럼 없는 구버전 DB → graceful fallback (빈 결과 반환)
+    [v7.0 수정] _migrate_v70()이 trading_history.buy_market_context 컬럼도 자동 추가
+    position_manager.open_position()이 매수 시 "KOSPI:6306" 형태로 자동 기록
 75. tracking/ai_context._get_index_level_context()는 DB 조회 + 문자열 반환만
     AI API 호출 금지 (규칙 #29 준수) — memory_compressor.get_index_context()에 위임
+    [v7.0 수정] watchlist_state.get_kospi_level()로 현재 레벨 읽어 current_kospi에 전달
+    아침봇 미실행(레벨=0.0) 시 current_kospi=None으로 전체 Top3 폴백
     데이터 없으면 "" 반환 — AI 프롬프트에서 컨텍스트 없으면 기존 방식으로 판단
 
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
@@ -1006,8 +1012,16 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            |   run_compression() 내 Step4로 자동 실행 (매주 일요일 03:30) |
 |      |            | - tracking/memory_compressor.py: get_index_context() 신규 |
 |      |            |   인접 구간 승률 조회 → AI 프롬프트 주입용 문자열 반환 |
-|      |            | - tracking/ai_context.py: _get_index_level_context() 신규 |
-|      |            |   build_spike_context() 내에서 자동 호출 → AI가 KOSPI 레벨별 승률 인식 |
+|      |            | - trading/db_schema.py: trading_history에 buy_market_context 컬럼 추가 (DDL + _migrate_v70 마이그레이션) |
+|      |            | - traders/position_manager.py: open_position()에서 KOSPI 레벨 자동 기록 |
+|      |            |   watchlist_state.get_kospi_level() → "KOSPI:6306" 형태로 buy_market_context 저장 |
+|      |            | - utils/watchlist_state.py: KOSPI 지수값 저장/조회 기능 추가 |
+|      |            |   set_kospi_level() / get_kospi_level() 신규 |
+|      |            |   determine_and_set_market_env(): price_data["kospi"]["close"] 자동 저장 |
+|      |            |   clear(): _kospi_level도 함께 초기화 |
+|      |            | - tracking/ai_context.py: _get_index_level_context() 수정 |
+|      |            |   watchlist_state.get_kospi_level()로 현재 레벨 읽어 current_kospi 전달 |
+|      |            |   기존 None 고정 → 실제 KOSPI 레벨로 개선 (현재 구간 중심 인접 승률 조회) |
 |      |            | 절대 금지 규칙 72~75 추가 (v7.0 Priority 1~3 규칙) |
 |      |            | [이슈④] TRADING_MODE=REAL 전환 안전장치: _check_real_mode_safety() 신규 |
 |      |            | → REAL 감지 시 텔레그램 경고 + REAL_MODE_CONFIRM_DELAY_SEC(기본 5분) 대기 |

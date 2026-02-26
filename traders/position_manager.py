@@ -231,6 +231,11 @@ def open_position(
     - sector: 진입 종목의 섹터 (watchlist_state.get_sector()로 조회).
               섹터 분산 체크 및 AI 컨텍스트 활용에 사용.
 
+    [v7.0] buy_market_context 자동 기록
+    - watchlist_state.get_kospi_level()로 현재 KOSPI 레벨을 읽어
+      trading_history.buy_market_context에 "KOSPI:6306" 형태로 자동 저장.
+      memory_compressor.update_index_stats()가 이를 파싱해 레벨별 승률 집계.
+
     Args:
         ticker:          종목코드
         name:            종목명
@@ -259,12 +264,22 @@ def open_position(
     try:
         c = conn.cursor()
 
+        # [v7.0] 매수 당시 KOSPI 레벨 기록 (kospi_index_stats 집계용)
+        # watchlist_state에서 아침봇이 저장한 전날 KOSPI 종가를 읽어 컨텍스트 문자열로 저장
+        try:
+            import utils.watchlist_state as _wls
+            _kospi = _wls.get_kospi_level()
+            buy_market_context = f"KOSPI:{_kospi:.0f}" if _kospi > 0 else None
+        except Exception:
+            buy_market_context = None
+
         # trading_history 에 먼저 기록 (sell_time=NULL = 미청산)
         c.execute("""
             INSERT INTO trading_history
-                (ticker, name, buy_time, buy_price, qty, trigger_source, mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (ticker, name, buy_time, buy_price, qty, trigger_source, config.TRADING_MODE))
+                (ticker, name, buy_time, buy_price, qty, trigger_source, mode, buy_market_context)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ticker, name, buy_time, buy_price, qty, trigger_source, config.TRADING_MODE,
+              buy_market_context))
         trading_id = c.lastrowid
 
         # positions 테이블에 오픈 포지션 등록
