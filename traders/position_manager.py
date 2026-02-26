@@ -840,23 +840,47 @@ def _calc_unrealized_pnl() -> int:
     """
     [v4.4 Phase 4] 현재 오픈 포지션의 미실현 손익 합산 (원).
     can_buy() 당일 손실 한도 체크 시 실현 손익과 합산하여 정밀 체크에 사용.
-    KIS API 호출 실패 시 0 반환 (비치명적).
+
+    [v6.0 이슈⑤ 수정] KIS API 장애 시 0 대신 보수적 기본값(KIS_FAILURE_SAFE_LOSS_PCT) 적용.
+    기존: KIS 장애 → 0 반환 → 실제 손실 중인데도 daily_loss_limit 통과 가능
+    수정: KIS 장애 → POSITION_BUY_AMOUNT × 보유종목수 × KIS_FAILURE_SAFE_LOSS_PCT% 추정값 반환
+    → 보수적으로 손실이 있다고 가정해 추가 매수 과도 허용 방지
     """
     positions = get_open_positions()
     if not positions:
         return 0
 
+    kis_available = False
     try:
         from kis import order_client
+        kis_available = True
     except Exception:
-        return 0
+        pass
 
     total = 0
+    kis_failure_count = 0
+
     for pos in positions:
+        if not kis_available:
+            kis_failure_count += 1
+            continue
         try:
             cur = order_client.get_current_price(pos["ticker"]).get("현재가", 0)
             if cur > 0 and pos["buy_price"] > 0:
                 total += (cur - pos["buy_price"]) * pos["qty"]
+            else:
+                kis_failure_count += 1
         except Exception:
-            pass
+            kis_failure_count += 1
+
+    # [v6.0] KIS 조회 실패한 포지션은 보수적 기본값으로 추정
+    if kis_failure_count > 0:
+        # KIS_FAILURE_SAFE_LOSS_PCT(기본 -1.5%)만큼 손실이 있다고 가정
+        safe_loss_per_pos = config.POSITION_BUY_AMOUNT * (config.KIS_FAILURE_SAFE_LOSS_PCT / 100)
+        total += round(safe_loss_per_pos * kis_failure_count)
+        logger.debug(
+            f"[position] KIS 조회 실패 {kis_failure_count}종목 → "
+            f"보수적 손실 추정 {safe_loss_per_pos * kis_failure_count:,.0f}원 적용"
+        )
+
     return total

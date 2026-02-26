@@ -17,6 +17,8 @@ main.py
 - v3.4:  Phase 4 — 자동매매 강제청산 스케줄 추가
          14:50 run_force_close() — 미청산 포지션 전부 시장가 매도
          AUTO_TRADE_ENABLED=false 시 스케줄 등록 자체를 건너뜀
+- v6.0:  [이슈④] TRADING_MODE=REAL 전환 안전장치 — 시작 시 감지 + 텔레그램 확인 + 5분 딜레이
+         [5번/P1] 기억 압축 배치 — 매주 일요일 03:30 스케줄 추가
 """
 
 import asyncio
@@ -203,6 +205,87 @@ async def _maybe_start_now():
         logger.info(f"[main] 장외 시간 ({now.strftime('%H:%M')} KST) — 장중봇 대기 중")
 
 
+
+async def _check_real_mode_safety():
+    """
+    [v6.0 이슈④] TRADING_MODE=REAL 전환 안전장치.
+    봇 시작 시 REAL 모드 감지 → 텔레그램 경고 + 5분 딜레이 후 자동매매 활성화.
+    REAL_MODE_CONFIRM_ENABLED=false 이면 건너뜀.
+
+    목적: Railway Variables에서 VTS→REAL 변경 즉시 실매매 발생하는 위험 방지.
+    절차: ① 텔레그램 경고 발송 → ② REAL_MODE_CONFIRM_DELAY_SEC(기본 300초) 대기
+         → ③ 대기 완료 후 "REAL 모드 활성화 완료" 알림 → 이후 자동매매 가능
+    """
+    if not config.AUTO_TRADE_ENABLED:
+        return
+    if config.TRADING_MODE != "REAL":
+        return
+    if not config.REAL_MODE_CONFIRM_ENABLED:
+        logger.warning("[main] REAL 모드 활성화 — 안전장치 비활성(REAL_MODE_CONFIRM_ENABLED=false)")
+        return
+
+    delay = config.REAL_MODE_CONFIRM_DELAY_SEC
+    from notifiers import telegram_bot
+
+    warning_msg = (
+        f"⚠️ <b>REAL 실전 자동매매 전환 감지</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📍 TRADING_MODE=REAL 감지됨\n"
+        f"⏳ <b>{delay // 60}분 후</b> 자동매매가 활성화됩니다.\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"❌ 취소하려면 지금 바로 컨테이너를 재시작하거나\n"
+        f"   TRADING_MODE=VTS 로 변경 후 재배포하세요."
+    )
+    try:
+        await telegram_bot.send_async(warning_msg)
+        logger.warning(f"[main] REAL 모드 전환 안전장치 — {delay}초({delay//60}분) 대기 시작")
+    except Exception as e:
+        logger.error(f"[main] REAL 모드 경고 알림 실패: {e}")
+
+    await asyncio.sleep(delay)
+
+    activate_msg = (
+        f"✅ <b>REAL 실전 자동매매 활성화 완료</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"계좌: {config.KIS_ACCOUNT_NO or 'N/A'}\n"
+        f"모드: 실전 ({delay // 60}분 대기 완료)\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⚠️ 이제부터 실제 매수/매도가 실행됩니다."
+    )
+    try:
+        await telegram_bot.send_async(activate_msg)
+    except Exception as e:
+        logger.error(f"[main] REAL 모드 활성화 알림 실패: {e}")
+    logger.warning("[main] REAL 모드 자동매매 활성화 완료")
+
+
+async def run_memory_compression():
+    """
+    [v6.0 5번/P1] 매주 일요일 03:30 기억 압축 배치.
+    trading_journal 3계층 압축 (Layer1: 원문 → Layer2: 요약 → Layer3: 핵심만).
+    원칙 추출(03:00) 완료 후 실행 (30분 간격으로 충분한 여유).
+    """
+    from tracking.memory_compressor import run_compression
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, run_compression)
+        logger.info(
+            f"[main] 기억 압축 완료 — "
+            f"Layer1→2: {result.get('compressed_l1', 0)}건, "
+            f"Layer2→3: {result.get('compressed_l2', 0)}건, "
+            f"정리: {result.get('cleaned', 0)}건"
+        )
+        from notifiers import telegram_bot
+        if result.get('compressed_l1', 0) + result.get('compressed_l2', 0) > 0:
+            msg = (
+                f"🗜️ 기억 압축 완료\n"
+                f"• Layer1→2 (요약): {result.get('compressed_l1', 0)}건\n"
+                f"• Layer2→3 (핵심): {result.get('compressed_l2', 0)}건\n"
+                f"• 오래된 항목 정리: {result.get('cleaned', 0)}건"
+            )
+            await telegram_bot.send_async(msg)
+    except Exception as e:
+        logger.error(f"[main] 기억 압축 실패 (비치명적): {e}")
+
 async def main():
     config.validate_env()
 
@@ -265,6 +348,9 @@ async def main():
         logger.info("  인터랙티브 핸들러: /status /holdings /principles (Phase 5) ✅")
     except Exception as e:
         logger.warning(f"  인터랙티브 핸들러 시작 실패 (비치명적): {e}")
+
+    # [v6.0 이슈④] REAL 모드 전환 안전장치 — 감지 시 텔레그램 경고 + 딜레이 대기
+    await _check_real_mode_safety()
 
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()

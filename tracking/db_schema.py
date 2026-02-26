@@ -266,6 +266,8 @@ def init_db() -> None:
     _migrate_v43(db_path)
     # [v4.4] positions.sector 컬럼 마이그레이션 (idempotent)
     _migrate_v44(db_path)
+    # [v6.0] trading_journal 압축 레이어 컬럼 마이그레이션 (idempotent)
+    _migrate_v60(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -385,6 +387,43 @@ def _migrate_v44(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v4.4 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v60(db_path: str) -> None:
+    """
+    [v6.0 5번/P1] trading_journal 테이블에 기억 압축 지원 컬럼 추가.
+    - compression_layer: 1=원문(0~7일) / 2=AI요약(8~30일) / 3=핵심(31일+)
+    - summary_text: Layer 2/3 압축 시 AI가 생성한 요약 텍스트
+    - compressed_at: 압축 처리 시각 (NULL = 미압축)
+    이미 존재하면 건너뜀 (idempotent).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(trading_journal)")
+        existing_cols = {row[1] for row in c.fetchall()}
+
+        migrations = [
+            ("compression_layer", "INTEGER DEFAULT 1"),   # 1=원문, 2=요약, 3=핵심
+            ("summary_text",      "TEXT"),                # 압축 후 요약 텍스트
+            ("compressed_at",     "TEXT"),                # 압축 처리 시각 (ISO 8601)
+        ]
+        added = []
+        for col_name, col_def in migrations:
+            if col_name not in existing_cols:
+                c.execute(f"ALTER TABLE trading_journal ADD COLUMN {col_name} {col_def}")
+                added.append(col_name)
+
+        if added:
+            conn.commit()
+            logger.info(f"[db] v6.0 마이그레이션 완료 — trading_journal 추가 컬럼: {added}")
+        else:
+            logger.info("[db] v6.0 마이그레이션 — 이미 최신 스키마")
+
+    except Exception as e:
+        logger.warning(f"[db] v6.0 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

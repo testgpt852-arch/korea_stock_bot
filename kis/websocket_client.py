@@ -230,15 +230,44 @@ class KISWebSocketClient:
         네트워크 에러로 연결이 끊겼을 때만 재연결 허용.
         의도적인 연결/종료 반복 절대 금지.
         v3.2: 회수 제한 없음, 5초 간격
+        v6.0 이슈③: 지수 백오프 적용으로 KIS IP 차단 위험 완화.
+            - 1~3회: 5초 간격 (기존 동일)
+            - 4~6회: 30초 간격 (서버 부하 감소)
+            - 7회+:  120초 간격 (KIS 서버 장애 시 연결 폭탄 방지)
+            - 60회(120초 간격 기준 2시간) 초과 시 장 마감으로 간주해 중단
         """
         attempt = 0
+        # 지수 백오프 딜레이 단계
+        _BACKOFF_STAGES = [
+            (3,  config.WS_RECONNECT_DELAY),   # 1~3회: 기본 간격(5초)
+            (6,  30),                           # 4~6회: 30초
+            (float('inf'), 120),                # 7회+:  120초
+        ]
+        _MAX_ATTEMPTS = 60  # 최대 재연결 횟수 (120초 간격 기준 약 2시간)
+
         while True:
             attempt += 1
+
+            # [v6.0 이슈③] 최대 횟수 초과 시 중단
+            if attempt > _MAX_ATTEMPTS:
+                logger.error(
+                    f"[ws] 재연결 {attempt}회 초과 — KIS 서버 장애 또는 IP 차단 가능성. "
+                    f"장 마감으로 간주해 재연결 중단."
+                )
+                return
+
+            # 현재 단계 딜레이 결정
+            delay = _BACKOFF_STAGES[-1][1]
+            for threshold, stage_delay in _BACKOFF_STAGES:
+                if attempt <= threshold:
+                    delay = stage_delay
+                    break
+
             logger.info(
                 f"[ws] 재연결 시도 {attempt}회 "
-                f"({config.WS_RECONNECT_DELAY}초 후)..."
+                f"({delay}초 후)..."
             )
-            await asyncio.sleep(config.WS_RECONNECT_DELAY)
+            await asyncio.sleep(delay)
 
             try:
                 self.connected = False

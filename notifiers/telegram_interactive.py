@@ -6,6 +6,9 @@ notifiers/telegram_interactive.py
 - /status    — 봇 현재 상태 (오늘 알림 수, 포지션 수, 시장 환경)
 - /holdings  — 현재 보유 종목 (AUTO_TRADE_ENABLED=true 시 KIS 잔고 조회)
 - /principles — 주요 매매 원칙 Top5 (confidence='high' 기준)
+- /evaluate  — [v6.0 P2 신규] 보유 종목 AI 맞춤 분석 (Prism /evaluate 경량화)
+               종목코드 입력 → 평균매수가 입력 → Gemma AI 분석 결과 반환
+               ConversationHandler 2단계 대화 플로우 (EVAL_TICKER → EVAL_PRICE)
 
 [아키텍처]
 - python-telegram-bot Application + CommandHandler 기반 롱폴링
@@ -17,15 +20,18 @@ notifiers/telegram_interactive.py
 telegram_interactive → tracking/db_schema (get_conn)
 telegram_interactive → utils/watchlist_state (get_market_env)
 telegram_interactive → kis/order_client (get_balance — AUTO_TRADE=true 시만)
+telegram_interactive → tracking/trading_journal (get_journal_context — /evaluate)
 telegram_interactive ← main.py (start_interactive_handler 호출)
 
 [규칙]
 - CommandHandler는 이 파일에만 위치 — telegram_bot.py에 추가 금지
 - KIS API 호출은 AUTO_TRADE_ENABLED=true 시에만 시도, 실패 시 DB 폴백
-- run_in_executor 불필요 — Application은 독자 이벤트 루프 없이 asyncio 통합
+- /evaluate AI 호출은 run_in_executor 경유 (동기 Gemma SDK 사용)
+- ConversationHandler 타임아웃: EVALUATE_CONV_TIMEOUT_SEC(기본 120초)
 
 [수정이력]
 - v5.0: Phase 5 신규
+- v6.0: /evaluate 명령어 추가 (P2, Prism 경량화)
 """
 
 import asyncio
@@ -228,6 +234,252 @@ async def _cmd_principles(update, context) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+# /evaluate 명령어 — 보유 종목 AI 맞춤 분석 [v6.0 P2 신규]
+# ══════════════════════════════════════════════════════════════
+
+# ConversationHandler 상태값
+_EVAL_TICKER = 0   # 종목코드 입력 대기
+_EVAL_PRICE  = 1   # 평균매수가 입력 대기
+
+
+async def _cmd_evaluate_start(update, context) -> int:
+    """
+    /evaluate — 1단계: 종목코드 입력 요청.
+    Prism /evaluate 경량화 구현 — 보유 종목 AI 맞춤 분석.
+    """
+    await update.message.reply_text(
+        "📊 <b>보유 종목 AI 분석</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "분석할 종목코드를 입력해주세요.\n"
+        "예: <code>005930</code> (삼성전자)\n\n"
+        "❌ 취소하려면 /cancel 을 입력하세요.",
+        parse_mode="HTML"
+    )
+    return _EVAL_TICKER
+
+
+async def _cmd_evaluate_ticker(update, context) -> int:
+    """
+    /evaluate — 2단계: 종목코드 수신 후 평균매수가 요청.
+    종목명은 KIS get_stock_price로 조회 시도, 실패 시 코드 그대로 사용.
+    """
+    ticker_input = update.message.text.strip().replace("-", "").upper()
+
+    # 6자리 숫자 코드 또는 종목명 허용 (종목명은 간략 매핑 시도)
+    if not ticker_input.isdigit():
+        await update.message.reply_text(
+            "⚠️ 6자리 종목코드를 입력해주세요.\n예: <code>005930</code>",
+            parse_mode="HTML"
+        )
+        return _EVAL_TICKER
+
+    ticker = ticker_input.zfill(6)
+
+    # 종목명 조회 시도
+    stock_name = ticker
+    try:
+        if config.AUTO_TRADE_ENABLED or config.KIS_APP_KEY:
+            from kis.order_client import get_current_price
+            price_info = get_current_price(ticker)
+            if price_info:
+                stock_name = price_info.get("종목명", ticker) or ticker
+    except Exception:
+        pass
+
+    context.user_data["eval_ticker"]     = ticker
+    context.user_data["eval_stock_name"] = stock_name
+
+    await update.message.reply_text(
+        f"✅ <b>{stock_name}</b> ({ticker}) 선택됨\n\n"
+        f"평균 매수가를 입력해주세요. (숫자만)\n"
+        f"예: <code>68500</code>",
+        parse_mode="HTML"
+    )
+    return _EVAL_PRICE
+
+
+async def _cmd_evaluate_price(update, context) -> int:
+    """
+    /evaluate — 3단계: 평균매수가 수신 → Gemma AI 분석 실행.
+    과거 거래 일지 컨텍스트 + 매매 원칙을 주입해 맞춤 분석 반환.
+    """
+    try:
+        avg_price = int(update.message.text.strip().replace(",", ""))
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ 숫자만 입력해주세요. 예: <code>68500</code>",
+            parse_mode="HTML"
+        )
+        return _EVAL_PRICE
+
+    ticker     = context.user_data.get("eval_ticker", "")
+    stock_name = context.user_data.get("eval_stock_name", ticker)
+
+    waiting_msg = await update.message.reply_text(
+        f"🔍 <b>{stock_name}</b> 분석 중...\n잠시 기다려주세요.",
+        parse_mode="HTML"
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            _run_evaluate_analysis,
+            ticker, stock_name, avg_price
+        )
+        await waiting_msg.delete()
+        await update.message.reply_text(result, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"[interactive] /evaluate 분석 오류: {e}")
+        await waiting_msg.delete()
+        await update.message.reply_text("❌ 분석 중 오류가 발생했습니다.")
+
+    return _EVAL_CANCEL  # ConversationHandler 종료
+
+
+_EVAL_CANCEL = -1  # ConversationHandler.END 역할
+
+
+async def _cmd_evaluate_cancel(update, context) -> int:
+    """/evaluate 대화 취소"""
+    await update.message.reply_text("분석이 취소되었습니다.")
+    context.user_data.clear()
+    return _EVAL_CANCEL
+
+
+def _run_evaluate_analysis(ticker: str, stock_name: str, avg_price: int) -> str:
+    """
+    동기 함수 — run_in_executor 경유 호출.
+    Gemma AI로 보유 종목 맞춤 분석 수행.
+
+    주입 컨텍스트:
+    1. 현재가 + 수익률 (KIS API)
+    2. 과거 거래 일지 요약 (trading_journal)
+    3. 관련 매매 원칙 (trading_principles)
+    4. 시장 환경 (watchlist_state)
+    """
+    # ① 현재가 조회
+    current_price = 0
+    try:
+        if config.KIS_APP_KEY:
+            from kis.order_client import get_current_price
+            price_info = get_current_price(ticker)
+            current_price = price_info.get("현재가", 0) if price_info else 0
+    except Exception:
+        pass
+
+    profit_pct = (
+        (current_price - avg_price) / avg_price * 100
+        if avg_price > 0 and current_price > 0 else 0.0
+    )
+
+    # ② 과거 거래 일지 컨텍스트
+    journal_ctx = ""
+    try:
+        from tracking.trading_journal import get_journal_context
+        journal_ctx = get_journal_context(ticker)
+    except Exception:
+        pass
+
+    # ③ 관련 매매 원칙
+    principles_ctx = ""
+    try:
+        from tracking.db_schema import get_conn
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT condition_desc, action, win_rate
+                FROM trading_principles
+                WHERE confidence = 'high'
+                  AND (is_active IS NULL OR is_active = 1)
+                ORDER BY win_rate DESC
+                LIMIT 2
+            """).fetchall()
+        if rows:
+            items = [f"'{r[0]}' → {r[1]} (승률 {r[2]:.0f}%)" for r in rows]
+            principles_ctx = "매매 원칙: " + " / ".join(items)
+    except Exception:
+        pass
+
+    # ④ 시장 환경
+    market_env = ""
+    try:
+        from utils.watchlist_state import get_market_env
+        market_env = get_market_env() or ""
+    except Exception:
+        pass
+
+    # ⑤ Google AI 분석
+    google_client = None
+    try:
+        from google import genai
+        from google.genai import types as _gtypes
+        if config.GOOGLE_AI_API_KEY:
+            google_client = genai.Client(api_key=config.GOOGLE_AI_API_KEY)
+    except Exception:
+        pass
+
+    if not google_client:
+        # AI 없으면 기본 수익률 보고만
+        emoji = "📈" if profit_pct >= 0 else "📉"
+        price_line = f"현재가: {current_price:,}원" if current_price > 0 else "현재가: 조회 불가"
+        return (
+            f"{emoji} <b>{stock_name}</b> ({ticker}) 분석\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"평균 매수가: {avg_price:,}원\n"
+            f"{price_line}\n"
+            f"현재 수익률: <b>{profit_pct:+.2f}%</b>\n\n"
+            f"⚠️ AI 분석 불가 (GOOGLE_AI_API_KEY 미설정)"
+        )
+
+    price_line = f"{current_price:,}원 ({profit_pct:+.1f}%)" if current_price > 0 else "조회불가"
+    prompt = f"""당신은 한국 단타 매매 전문가입니다. 보유 종목을 간결하게 분석해주세요.
+
+[보유 종목]
+종목명: {stock_name} ({ticker})
+평균 매수가: {avg_price:,}원
+현재가/수익률: {price_line}
+시장 환경: {market_env or "미확인"}
+
+[과거 거래 이력]
+{journal_ctx or "이력 없음"}
+
+[참고 원칙]
+{principles_ctx or "없음"}
+
+[분석 요청]
+1. 현재 수익률 상황 평가 (hold/익절/손절 판단 포함)
+2. 이 종목 특이사항 또는 주의점 (과거 이력 있으면 반영)
+3. 단기(오늘~내일) 대응 전략 한 줄
+
+간결하고 실용적으로 3~5문장 이내로 작성하세요."""
+
+    try:
+        response = google_client.models.generate_content(
+            model="gemma-3-27b-it",
+            contents=prompt,
+            config=_gtypes.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=400,
+            ),
+        )
+        analysis = (response.text or "분석 결과 없음").strip()
+    except Exception as e:
+        analysis = f"AI 분석 실패: {str(e)[:50]}"
+
+    emoji = "📈" if profit_pct >= 0 else "📉"
+    price_display = f"{current_price:,}원" if current_price > 0 else "조회불가"
+
+    return (
+        f"{emoji} <b>{stock_name}</b> ({ticker}) AI 분석\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"평균매수가: {avg_price:,}원 | 현재가: {price_display}\n"
+        f"수익률: <b>{profit_pct:+.2f}%</b>  시장: {market_env or 'N/A'}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{analysis}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 # 핸들러 시작 (main.py에서 호출)
 # ══════════════════════════════════════════════════════════════
 
@@ -256,7 +508,27 @@ async def start_interactive_handler() -> None:
         app.add_handler(TGCommandHandler("holdings",   _cmd_holdings))
         app.add_handler(TGCommandHandler("principles", _cmd_principles))
 
-        logger.info("[interactive] 텔레그램 명령어 핸들러 시작 (/status /holdings /principles)")
+        # [v6.0 P2] /evaluate ConversationHandler 등록
+        try:
+            from telegram.ext import ConversationHandler as TGConvHandler, MessageHandler as TGMsgHandler, filters as TGFilters
+            eval_timeout = getattr(config, "EVALUATE_CONV_TIMEOUT_SEC", 120)
+            eval_conv = TGConvHandler(
+                entry_points=[TGCommandHandler("evaluate", _cmd_evaluate_start)],
+                states={
+                    _EVAL_TICKER: [TGMsgHandler(TGFilters.TEXT & ~TGFilters.COMMAND, _cmd_evaluate_ticker)],
+                    _EVAL_PRICE:  [TGMsgHandler(TGFilters.TEXT & ~TGFilters.COMMAND, _cmd_evaluate_price)],
+                },
+                fallbacks=[TGCommandHandler("cancel", _cmd_evaluate_cancel)],
+                conversation_timeout=eval_timeout,
+            )
+            app.add_handler(eval_conv)
+            logger.info(f"[interactive] /evaluate 핸들러 등록 (타임아웃 {eval_timeout}초)")
+        except ImportError:
+            logger.info("[interactive] ConversationHandler 없음 — /evaluate 비활성 (pip install python-telegram-bot>=20)")
+        except Exception as e:
+            logger.warning(f"[interactive] /evaluate 핸들러 등록 실패 (비치명적): {e}")
+
+        logger.info("[interactive] 텔레그램 명령어 핸들러 시작 (/status /holdings /principles /evaluate)")
         await app.initialize()
         await app.start()
         await app.updater.start_polling(

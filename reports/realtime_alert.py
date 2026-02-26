@@ -289,8 +289,18 @@ async def _send_ai_followup(analysis: dict) -> None:
         if not config.AUTO_TRADE_ENABLED:
             return
 
+        # [v6.0 이슈① 명문화] AI 실패/불명확 시 fail-safe = "차단"
+        # analyze_spike() 예외 시 판단=""(빈 문자열) 또는 "판단불가" 반환
+        # verdict != "진짜급등" → return (자동매매 차단)
+        # 즉: Gemma API 장기 다운 시 모든 AI 판단 함수가 "판단불가" 반환
+        # → 자동매매 진입 불가 (안전 방향으로 fail-safe)
         verdict = ai_result.get("판단", "")
         if verdict != "진짜급등":
+            if verdict in ("판단불가", ""):
+                logger.info(
+                    f"[realtime] AI 판단불가/실패 → 자동매매 차단 (fail-safe=차단). "
+                    f"종목: {analysis.get('종목명', ticker)}"
+                )
             return
 
         change_rate = analysis.get("등락률", 0.0)

@@ -258,19 +258,51 @@ def get_journal_context(ticker: str) -> str:
     ai_context.build_spike_context() 에서 호출 — 같은 종목 과거 일지 조회.
     현재 매수 결정에 과거 교훈을 주입 (Prism 벤치마킹).
 
+    [v6.0 이슈② 수정] JOURNAL_MAX_CONTEXT_CHARS / JOURNAL_MAX_ITEMS 제한 적용.
+    기존: 항목 수 제한 없이 쌓이면 토큰 무한 증가
+    수정: config.JOURNAL_MAX_ITEMS(기본 3) 항목, config.JOURNAL_MAX_CONTEXT_CHARS(기본 2000자) 제한
+
+    compression_layer 필드가 있으면 레이어별로 다른 포맷 사용:
+    - Layer 1 (0~7일): 상세 포맷 (원문 one_line_summary 포함)
+    - Layer 2 (8~30일): 요약 포맷 (situation_analysis summary만)
+    - Layer 3 (31일~): 한 줄 핵심만
+
     Returns:
         프롬프트 주입용 문자열. 이력 없으면 "".
     """
+    import config as _config
+    max_items = getattr(_config, 'JOURNAL_MAX_ITEMS', 3)
+    max_chars = getattr(_config, 'JOURNAL_MAX_CONTEXT_CHARS', 2000)
+
     conn = db_schema.get_conn()
     try:
         c = conn.cursor()
-        c.execute("""
-            SELECT profit_rate, close_reason, pattern_tags, one_line_summary, created_at
-            FROM trading_journal
-            WHERE ticker = ?
-            ORDER BY created_at DESC
-            LIMIT 3
-        """, (ticker,))
+        # compression_layer 컬럼 존재 여부 확인 (v6.0 마이그레이션)
+        c.execute("PRAGMA table_info(trading_journal)")
+        cols = {row[1] for row in c.fetchall()}
+        has_layer = "compression_layer" in cols
+        has_summary_text = "summary_text" in cols
+
+        if has_layer:
+            c.execute("""
+                SELECT profit_rate, close_reason, pattern_tags, one_line_summary,
+                       created_at, compression_layer,
+                       {} AS summary_text
+                FROM trading_journal
+                WHERE ticker = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """.format('"summary_text"' if has_summary_text else 'NULL'),
+                (ticker, max_items))
+        else:
+            c.execute("""
+                SELECT profit_rate, close_reason, pattern_tags, one_line_summary,
+                       created_at, 1 AS compression_layer, NULL AS summary_text
+                FROM trading_journal
+                WHERE ticker = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (ticker, max_items))
         rows = c.fetchall()
     except Exception as e:
         logger.debug(f"[journal] get_journal_context 조회 실패: {e}")
@@ -282,7 +314,7 @@ def get_journal_context(ticker: str) -> str:
         return ""
 
     lines = [f"[{ticker} 과거 거래 일지]"]
-    for profit_rate, close_reason, raw_tags, summary, created_at in rows:
+    for profit_rate, close_reason, raw_tags, summary, created_at, layer, summary_text in rows:
         try:
             tags = json.loads(raw_tags or "[]")
             tags_str = "/".join(tags[:3]) if tags else ""
@@ -290,14 +322,33 @@ def get_journal_context(ticker: str) -> str:
             tags_str = ""
         date_str = created_at[:10] if created_at else "?"
         profit_emoji = "✅" if (profit_rate or 0) > 0 else "❌"
-        lines.append(
-            f"  {date_str} {profit_emoji} {profit_rate:+.1f}% [{close_reason}] "
-            f"{tags_str}"
-        )
-        if summary:
-            lines.append(f"    └ {summary[:40]}")
 
-    return "\n".join(lines)
+        if layer == 3:
+            # Layer 3: 한 줄 핵심만 (최소 토큰)
+            core = summary_text or summary or ""
+            lines.append(f"  {date_str} {profit_emoji} {profit_rate:+.1f}% [{core[:30]}]")
+        elif layer == 2:
+            # Layer 2: 요약 포맷
+            core = summary_text or summary or tags_str
+            lines.append(
+                f"  {date_str} {profit_emoji} {profit_rate:+.1f}% [{close_reason}] {core[:40]}"
+            )
+        else:
+            # Layer 1: 상세 포맷
+            lines.append(
+                f"  {date_str} {profit_emoji} {profit_rate:+.1f}% [{close_reason}] "
+                f"{tags_str}"
+            )
+            if summary:
+                lines.append(f"    └ {summary[:40]}")
+
+    result = "\n".join(lines)
+
+    # [v6.0 이슈②] 최대 문자 수 제한
+    if len(result) > max_chars:
+        result = result[:max_chars] + "...(압축됨)"
+
+    return result
 
 
 # ── 내부 함수 ─────────────────────────────────────────────────

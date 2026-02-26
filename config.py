@@ -25,6 +25,15 @@ Railway: 서버 Variables에 입력
         ORDERBOOK_TOP3_RATIO_MIN — 상위 3호가 집중도 (얕은 벽 감지)
         ORDERBOOK_ENABLED — 호가 분석 활성화 여부 (기본 True)
         WS_ORDERBOOK_ENABLED — WebSocket H0STASP0 호가 구독 여부 (기본 False, 체결과 한도 공유)
+- v6.0: [잠재 이슈 해결 & Prism 개선 흡수]
+        REAL_MODE_CONFIRM_DELAY_SEC — TRADING_MODE=REAL 전환 시 확인 딜레이 (이슈④)
+        REAL_MODE_CONFIRM_ENABLED  — REAL 전환 확인 절차 활성화 여부
+        KIS_FAILURE_SAFE_LOSS_PCT  — KIS API 장애 시 보수적 미실현 손익 기본값 (이슈⑤)
+        JOURNAL_MAX_CONTEXT_TOKENS — 거래 일지 컨텍스트 최대 토큰 수 (이슈②)
+        JOURNAL_MAX_ITEMS          — 일지 컨텍스트 최대 항목 수 (이슈②)
+        MEMORY_COMPRESS_LAYER1_DAYS — 기억 압축 Layer1 보존 기간 (5번 기억 압축)
+        MEMORY_COMPRESS_LAYER2_DAYS — 기억 압축 Layer2 요약 보존 기간
+        EVALUATE_CONV_TIMEOUT_SEC  — /evaluate 대화 타임아웃 (P2)
 """
 
 import os
@@ -253,3 +262,32 @@ COMMODITY_KR_INDUSTRY = {
 
 SECTOR_TOP_N         = 5
 US_SECTOR_SIGNAL_MIN = 1.0
+
+# ── v6.0: 잠재 이슈 해결 & Prism 개선 흡수 ─────────────────────
+
+# [이슈④] TRADING_MODE=REAL 전환 안전장치
+# REAL 전환 감지 시 텔레그램 확인 메시지 발송 후 딜레이 적용
+REAL_MODE_CONFIRM_ENABLED  = os.environ.get("REAL_MODE_CONFIRM_ENABLED",  "true").lower() == "true"
+REAL_MODE_CONFIRM_DELAY_SEC = int(os.environ.get("REAL_MODE_CONFIRM_DELAY_SEC", "300"))  # 기본 5분
+
+# [이슈⑤] KIS API 장애 시 미실현 손익 보수적 기본값
+# KIS 장애 시 0 대신 POSITION_BUY_AMOUNT × 이 비율(%)을 손실로 추정해 보수적 처리
+# -1.5% 기준: 평균 정도의 손실이 있다고 가정
+KIS_FAILURE_SAFE_LOSS_PCT = float(os.environ.get("KIS_FAILURE_SAFE_LOSS_PCT", "-1.5"))
+
+# [이슈②] 기억 토큰 무제한 증가 방지
+# trading_journal 컨텍스트의 최대 문자 수 (약 500~600 토큰에 해당)
+JOURNAL_MAX_CONTEXT_CHARS = int(os.environ.get("JOURNAL_MAX_CONTEXT_CHARS", "2000"))
+# 컨텍스트에 포함할 최대 일지 항목 수
+JOURNAL_MAX_ITEMS = int(os.environ.get("JOURNAL_MAX_ITEMS", "3"))
+
+# [5번/P1] 기억 압축 (Prism CompressionManager 경량화)
+# Layer 1 (0~N일): 원문 보존
+MEMORY_COMPRESS_LAYER1_DAYS = int(os.environ.get("MEMORY_COMPRESS_LAYER1_DAYS", "7"))
+# Layer 2 (N+1~M일): AI 요약 (get_journal_context 조회 시 요약본 사용)
+MEMORY_COMPRESS_LAYER2_DAYS = int(os.environ.get("MEMORY_COMPRESS_LAYER2_DAYS", "30"))
+# Layer 3 (M+1일~): 핵심 인사이트만 보존 (summary만 남기고 상세 필드 압축)
+MEMORY_COMPRESS_ENABLED = os.environ.get("MEMORY_COMPRESS_ENABLED", "true").lower() == "true"
+
+# [P2] /evaluate 명령어 대화 타임아웃 (초)
+EVALUATE_CONV_TIMEOUT_SEC = int(os.environ.get("EVALUATE_CONV_TIMEOUT_SEC", "120"))

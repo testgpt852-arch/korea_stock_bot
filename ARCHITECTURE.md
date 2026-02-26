@@ -86,6 +86,8 @@ korea_stock_bot/
 │   ├── telegram_bot.py      ← 텔레그램 포맷 + 발송 [v5.0: send_photo_async, format_morning_summary 추가]
 │   ├── chart_generator.py   ← [v5.0 Phase 5 신규] 차트 이미지 생성 (종목별 + 주간 성과)
 │   └── telegram_interactive.py ← [v5.0 Phase 5 신규] /status /holdings /principles 명령어 처리
+│                               [v6.0 P2] /evaluate 추가: 종목코드+평균매수가 입력 → Gemma AI 맞춤 분석
+│                               ConversationHandler 2단계 대화 플로우 (_EVAL_TICKER → _EVAL_PRICE)
 │
 ├── reports/
 │   ├── morning_report.py    ← 아침봇 08:30
@@ -108,15 +110,22 @@ korea_stock_bot/
 │
 └── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
 │   ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
+│   │                           [v6.0] _migrate_v60(): compression_layer/summary_text 컬럼
 │   ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
 │   ├── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
 │   ├── ai_context.py        ← [v3.5] AI 프롬프트 컨텍스트 조회 전담 (Phase 5 신규)
 │   │                           [v4.3] trading_journal 컨텍스트 추가 (종목 과거 일지)
 │   ├── principles_extractor.py ← [v3.5] 매매 원칙 추출 배치 (Phase 5 신규)
 │   │                             [v4.3] trading_journal 패턴 통합 (_integrate_journal_patterns)
-│   └── trading_journal.py   ← [v4.3 Phase3 신규] 거래 완료 시 AI 회고 분석 일지
-│                               Prism trading_journal_agent 경량화 구현
-│                               record_journal() / get_weekly_patterns() / get_journal_context()
+│   ├── trading_journal.py   ← [v4.3 Phase3 신규] 거래 완료 시 AI 회고 분석 일지
+│   │                           Prism trading_journal_agent 경량화 구현
+│   │                           record_journal() / get_weekly_patterns() / get_journal_context()
+│   │                           [v6.0 이슈②] get_journal_context() 토큰 제한 (JOURNAL_MAX_ITEMS/CHARS)
+│   │                           compression_layer별 포맷 분기 (Layer1 상세 / Layer2 요약 / Layer3 핵심)
+│   └── memory_compressor.py ← [v6.0 5번/P1 신규] 3계층 기억 압축 배치
+│                               Prism CompressionManager 경량화 구현 (동기 Gemma)
+│                               Layer1(0~7일) → Layer2(AI요약) → Layer3(핵심한줄)
+│                               run_compression() — main.py 매주 일요일 03:30 호출
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
     └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록 [v4.2 Phase 2: Trailing Stop]
@@ -196,6 +205,9 @@ notifiers/telegram_interactive.py ← main.py (asyncio.create_task — 백그라
 notifiers/telegram_interactive.py → tracking/db_schema (get_conn — /status /holdings /principles)  ← v5.0 추가
 notifiers/telegram_interactive.py → utils/watchlist_state (get_market_env — /status)  ← v5.0 추가
 notifiers/telegram_interactive.py → kis/order_client (get_balance — AUTO_TRADE=true 시만)  ← v5.0 추가
+notifiers/telegram_interactive.py → tracking/trading_journal (get_journal_context — /evaluate)  ← v6.0 추가
+tracking/memory_compressor.py     ← main.py (run_compression — 일요일 03:30)  ← v6.0 추가
+tracking/memory_compressor.py     → tracking/db_schema (get_conn)  ← v6.0 추가
 ```
 
 ---
@@ -682,6 +694,29 @@ gemini-2.5-flash   20회/일   ❌ 부족
     다른 모듈에서 직접 실행 금지 — 중복 롱폴링 방지
     핸들러 실패 시 봇 전체 영향 없음 — try/except로 감싸 비치명적 처리
 
+[v6.0 잠재 이슈 해결 & Prism 흡수 규칙]
+66. [이슈①] analyze_spike() 실패 / "판단불가" 반환 시 자동매매 fail-safe = 차단
+    verdict != "진짜급등" 이면 즉시 return — AI 오류가 매수 허용이 되는 구조 절대 금지
+    Gemma API 장기 다운 → 모든 AI 판단 "판단불가" → 자동매매 전면 차단 (안전 방향)
+    이 원칙은 realtime_alert._send_ai_followup() 내부 구조로 강제됨 — 변경 금지
+71. TRADING_MODE=REAL 전환 시 반드시 _check_real_mode_safety() 대기 완료 후 자동매매 활성
+    REAL_MODE_CONFIRM_ENABLED=false 설정 시에만 안전장치 우회 가능 (기본 true — 우회 금지)
+    대기 중 컨테이너 재시작 = 안전한 취소 방법 (딜레이 중 재배포 → VTS 상태로 복귀)
+71. _calc_unrealized_pnl() KIS 조회 실패 포지션 → KIS_FAILURE_SAFE_LOSS_PCT(기본 -1.5%) 추정 적용
+    0 반환 금지 — 보수적 기본값으로 daily_loss_limit 보호
+    KIS_FAILURE_SAFE_LOSS_PCT는 config에서만 변경 (코드 내 하드코딩 금지)
+71. get_journal_context()는 JOURNAL_MAX_ITEMS / JOURNAL_MAX_CONTEXT_CHARS 제한 필수 준수
+    제한 없는 전체 조회 절대 금지 — 장기 운영 토큰 증가 방지
+    압축 레이어(compression_layer)별 다른 포맷 사용 (Layer1 상세 / Layer2 요약 / Layer3 핵심)
+71. tracking/memory_compressor.py는 trading_journal UPDATE만 담당
+    텔레그램 발송·KIS API 호출·AI 분석(요약 제외) 금지
+    run_compression()은 main.py 일요일 03:30에서만 호출 (중복 실행 방지)
+    압축 실패 시 비치명적 처리 — 예외 발생 대신 logger.warning + 건너뜀
+71. /evaluate 명령어는 telegram_interactive.py ConversationHandler에서만 구현
+    AI 호출(Gemma)은 run_in_executor 경유 필수 (동기 SDK — 이벤트 루프 차단 방지)
+    대화 타임아웃 EVALUATE_CONV_TIMEOUT_SEC(기본 120초) 반드시 적용
+    KIS get_current_price 실패 시 현재가 없이 수익률 0% 표시 (비치명적)
+
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
 52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
     watchlist_state.get_sector()로 조회 — 아침봇 미실행 시 "" (빈 문자열) 허용
@@ -903,6 +938,33 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | - 🧠 이번 주 학습한 패턴 Top5 섹션 추가 (태그·빈도·승률·교훈샘플) |
 |      |            | 절대 금지 규칙 45~51 추가 (Phase 3 거래 일지 규칙) |
 | v5.0 | 2026-02-26 | **Phase 5 — 리포트 품질 & UX 강화** |
+| v6.0 | 2026-02-27 | **잠재 이슈 해결 & Prism 개선 흡수** |
+|      |            | [이슈④] TRADING_MODE=REAL 전환 안전장치: _check_real_mode_safety() 신규 |
+|      |            | → REAL 감지 시 텔레그램 경고 + REAL_MODE_CONFIRM_DELAY_SEC(기본 5분) 대기 |
+|      |            | → 대기 완료 후 "REAL 모드 활성화" 알림 → 이후 자동매매 실행 |
+|      |            | → REAL_MODE_CONFIRM_ENABLED=false 시 건너뜀 (기본 true) |
+|      |            | [이슈⑤] _calc_unrealized_pnl() KIS 장애 시 보수적 기본값 적용 |
+|      |            | → 기존: KIS 실패 → 0 반환 → daily_loss_limit 통과 위험 |
+|      |            | → 수정: KIS 실패 → POSITION_BUY_AMOUNT × KIS_FAILURE_SAFE_LOSS_PCT(-1.5%) 추정 |
+|      |            | [이슈②] get_journal_context() 토큰 무제한 증가 방지 |
+|      |            | → JOURNAL_MAX_ITEMS(기본 3) / JOURNAL_MAX_CONTEXT_CHARS(기본 2000자) 제한 |
+|      |            | → compression_layer별 포맷 분기 (Layer1 상세 / Layer2 요약 / Layer3 핵심) |
+|      |            | [5번/P1] tracking/memory_compressor.py 신규: 3계층 기억 압축 |
+|      |            | → Prism CompressionManager 경량화 (비동기 MCP 대신 동기 Gemma) |
+|      |            | → Layer1→2: 7일 이상 항목 AI 요약 압축 |
+|      |            | → Layer2→3: 30일 이상 항목 핵심 한 줄만 |
+|      |            | → Layer3 정리: 90일 이상 상세 필드 초기화 |
+|      |            | → db_schema: _migrate_v60() — compression_layer/summary_text/compressed_at 컬럼 추가 |
+|      |            | → main.py: 매주 일요일 03:30 run_memory_compression() 스케줄 추가 |
+|      |            | [P2] /evaluate 명령어 신규: 보유 종목 AI 맞춤 분석 |
+|      |            | → telegram_interactive.py: ConversationHandler 2단계 대화 플로우 |
+|      |            | → 종목코드 입력 → 평균매수가 입력 → Gemma AI 분석 반환 |
+|      |            | → 과거 거래 일지 + 매매 원칙 주입으로 맞춤 분석 품질 향상 |
+|      |            | → EVALUATE_CONV_TIMEOUT_SEC(기본 120초) 타임아웃 |
+|      |            | config.py: v6.0 상수 추가 (REAL_MODE_CONFIRM_*, KIS_FAILURE_SAFE_LOSS_PCT, |
+|      |            |            JOURNAL_MAX_CONTEXT_CHARS, JOURNAL_MAX_ITEMS, |
+|      |            |            MEMORY_COMPRESS_*, EVALUATE_CONV_TIMEOUT_SEC) |
+|      |            | 절대 금지 규칙 66~70 추가 (v6.0 이슈 해결 규칙) |
 |      |            | notifiers/chart_generator.py 신규 |
 |      |            | - generate_stock_chart(ticker, name, days): pykrx OHLCV + matplotlib 캔들차트 PNG |
 |      |            | - generate_weekly_performance_chart(stats): 트리거별 승률 + 수익률 비교 차트 PNG |
@@ -1096,6 +1158,17 @@ KIS_VTS_ACCOUNT_NO=
 # Phase 5: 리포트 품질 & UX (선택 — 미설정 시 기본값 적용)
 REPORT_CHART_ENABLED=true   # 차트 이미지 생성 활성화 (false로 끄면 텍스트만 발송)
 CHART_DAYS=30               # 차트 조회 기간 (영업일 기준 일수)
+
+# v6.0: 잠재 이슈 해결 & Prism 흡수
+REAL_MODE_CONFIRM_ENABLED=true    # REAL 전환 시 확인 절차 (false로 끄면 즉시 활성, 위험)
+REAL_MODE_CONFIRM_DELAY_SEC=300   # REAL 전환 확인 딜레이 (초, 기본 5분)
+KIS_FAILURE_SAFE_LOSS_PCT=-1.5    # KIS 장애 시 미실현 손익 추정값 (%)
+JOURNAL_MAX_CONTEXT_CHARS=2000    # 거래 일지 컨텍스트 최대 문자 수
+JOURNAL_MAX_ITEMS=3               # 거래 일지 컨텍스트 최대 항목 수
+MEMORY_COMPRESS_ENABLED=true      # 기억 압축 활성화
+MEMORY_COMPRESS_LAYER1_DAYS=7     # Layer1 보존 기간 (일)
+MEMORY_COMPRESS_LAYER2_DAYS=30    # Layer2 요약 보존 기간 (일)
+EVALUATE_CONV_TIMEOUT_SEC=120     # /evaluate 대화 타임아웃 (초)
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*
