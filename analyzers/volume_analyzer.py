@@ -109,12 +109,22 @@ def poll_all_markets() -> list[dict]:
             if prev_price <= 0:
                 continue
 
+            # ── [버그픽스] 전일거래량 최솟값 체크 ───────────────────
+            # prdy_vol이 너무 작으면 1분 거래량 배율이 수십만~수백만배로 폭발
+            # 예: 전일 1주 거래된 종목이 오늘 1분에 185,805주 → 185,805배
+            prdy_vol = row["전일거래량"]
+            if prdy_vol < config.MIN_PREV_VOL:
+                logger.debug(
+                    f"[volume] {row['종목명']} 전일거래량 {prdy_vol:,}주 < "
+                    f"최솟값 {config.MIN_PREV_VOL:,}주 → 스킵"
+                )
+                continue
+
             # ── 1분간 추가 등락률 ────────────────────────────
             delta_rate = (curr_price - prev_price) / prev_price * 100
 
             # ── 1분간 추가 체결량 → 전일거래량 대비 배율 ────
             delta_vol       = max(0, row["누적거래량"] - prev["누적거래량"])
-            prdy_vol        = row["전일거래량"]
             delta_vol_ratio = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
             single_ok = (
@@ -202,8 +212,16 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         if change_rate < config.GAP_UP_MIN * 2:
             continue
 
+        prdy_vol = row.get("전일거래량", 1)
+        # [버그픽스] 전일거래량 최솟값 체크 — 배율 폭발 방지
+        if prdy_vol < config.MIN_PREV_VOL:
+            logger.debug(
+                f"[volume] T2 {row.get('종목명', ticker)} 전일거래량 {prdy_vol:,}주 < "
+                f"최솟값 {config.MIN_PREV_VOL:,}주 → 스킵"
+            )
+            continue
+
         _gap_alerted.add(ticker)
-        prdy_vol    = row.get("전일거래량", 1)
         acml_vol    = row.get("누적거래량", 0)
         vol_ratio   = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
 
