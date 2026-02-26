@@ -197,6 +197,12 @@ MARKET_OPEN_TIME   = "09:00"
 MARKET_CLOSE_TIME  = "15:30"
 CLOSING_TIME       = "18:30"
 
+# ── [v5.0 Phase 5] 리포트 품질 & UX 설정 ─────────────────────
+# 종목 차트 이미지 생성 여부 (realtime_alert / closing_report 등에서 활용)
+REPORT_CHART_ENABLED = os.environ.get("REPORT_CHART_ENABLED", "true").lower() == "true"
+# 차트 조회 기간 (영업일 기준 일수)
+CHART_DAYS = int(os.environ.get("CHART_DAYS", "30"))
+
 # ── DART 공시 필터 키워드 ────────────────────────────────────
 DART_KEYWORDS = [
     "수주",

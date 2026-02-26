@@ -31,6 +31,10 @@ reports/morning_report.py
 - v4.2: watchlist_state.determine_and_set_market_env(price_data) 추가
         → 전날 KOSPI 등락률로 "강세장"/"약세장/횡보"/"횡보" 판단
         → 장중봇 can_buy() R/R 필터 + analyze_spike() 분기 전략에 활용
+- v5.0: [Phase 5] 핵심 요약 선발송 추가
+        → telegram_bot.format_morning_summary() 300자 핵심 요약 먼저 발송
+        → 상세 리포트(format_morning_report)는 요약 이후 후발송
+        → 리포트 내부 섹션 순서 개선 (시장환경 → 공시AI → 추천테마 → 기타)
 """
 
 from utils.logger import logger
@@ -149,6 +153,11 @@ async def run() -> None:
 
         # ── ⑦ 텔레그램 발송 ──────────────────────────────────
         logger.info("[morning] 텔레그램 발송 중...")
+
+        # [v5.0 Phase 5] 300자 핵심 요약 선발송 → 상세 리포트 후발송
+        summary_msg = telegram_bot.format_morning_summary(report)
+        await telegram_bot.send_async(summary_msg)
+
         message = telegram_bot.format_morning_report(report)
         await telegram_bot.send_async(message)
 

@@ -10,3 +10,4 @@ python-dotenv
 yfinance
 google-genai
 websockets
+matplotlib

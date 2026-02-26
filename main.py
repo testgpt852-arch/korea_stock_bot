@@ -257,6 +257,15 @@ async def main():
     else:
         logger.info("  강제청산: 매일 14:50 (Phase 4)\n  원칙추출: 매주 일요일 03:00 (Phase 5) ⏸ 비활성 (AUTO_TRADE_ENABLED=false)")
 
+    # [v5.0 Phase 5] 텔레그램 인터랙티브 명령어 핸들러 백그라운드 시작
+    # /status, /holdings, /principles 명령어 처리
+    try:
+        from notifiers.telegram_interactive import start_interactive_handler
+        asyncio.create_task(start_interactive_handler())
+        logger.info("  인터랙티브 핸들러: /status /holdings /principles (Phase 5) ✅")
+    except Exception as e:
+        logger.warning(f"  인터랙티브 핸들러 시작 실패 (비치명적): {e}")
+
     # 장중 재시작 감지 → 즉시 실행 (KST 기준)
     await _maybe_start_now()
 

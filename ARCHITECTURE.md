@@ -83,7 +83,9 @@ korea_stock_bot/
 │   └── fund_inflow_analyzer.py   ← [v3.2] T3 시총 대비 자금유입 (마감봇용, pykrx)
 │
 ├── notifiers/
-│   └── telegram_bot.py      ← 텔레그램 포맷 + 발송
+│   ├── telegram_bot.py      ← 텔레그램 포맷 + 발송 [v5.0: send_photo_async, format_morning_summary 추가]
+│   ├── chart_generator.py   ← [v5.0 Phase 5 신규] 차트 이미지 생성 (종목별 + 주간 성과)
+│   └── telegram_interactive.py ← [v5.0 Phase 5 신규] /status /holdings /principles 명령어 처리
 │
 ├── reports/
 │   ├── morning_report.py    ← 아침봇 08:30
@@ -187,6 +189,13 @@ tracking/ai_context.py            → tracking/trading_journal (get_journal_cont
 tracking/principles_extractor.py  ← main.py (일요일 03:00), tracking/trading_journal (_integrate)     ← v4.3
 reports/weekly_report.py          ← main.py (월요일 08:45 cron)
 reports/weekly_report.py          → tracking/performance_tracker, notifiers/telegram_bot
+reports/weekly_report.py          → notifiers/chart_generator (주간 성과 차트)  ← v5.0 추가
+notifiers/chart_generator.py      ← reports/weekly_report (generate_weekly_performance_chart)  ← v5.0 추가
+notifiers/chart_generator.py      → pykrx (종목별 OHLCV, 마감 확정치 전용)  ← v5.0 추가
+notifiers/telegram_interactive.py ← main.py (asyncio.create_task — 백그라운드)  ← v5.0 추가
+notifiers/telegram_interactive.py → tracking/db_schema (get_conn — /status /holdings /principles)  ← v5.0 추가
+notifiers/telegram_interactive.py → utils/watchlist_state (get_market_env — /status)  ← v5.0 추가
+notifiers/telegram_interactive.py → kis/order_client (get_balance — AUTO_TRADE=true 시만)  ← v5.0 추가
 ```
 
 ---
@@ -276,7 +285,7 @@ graph TD
            실패 시 기존 신호4 유지 (graceful fallback)
        ⑧ theme_analyzer — AI 테마 기반 소외도 계산
        ⑨ morning_report 조립
-       ⑩ telegram_bot 발송
+       ⑩ telegram_bot 발송 (요약 선발송 → 상세 리포트 후발송)  ← v5.0 변경
 
 09:00  ─── 장중봇 시작 ──────────────────────────────────────
        (컨테이너가 이미 장중에 있으면 시작 시 즉시 실행됨)
@@ -379,11 +388,14 @@ graph TD
        → 오픈 포지션 peak_price / stop_loss 종가 기준 상향 조정
        → AUTO_TRADE_ENABLED=false 시 즉시 return (안전, 비치명적)
 
-매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3 / v4.3 업데이트) ────────
+매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3 / v4.3 업데이트 / v5.0 차트 추가) ──
        performance_tracker.get_weekly_stats() → 지난 7일 DB 조회
        [v4.3] trading_journal.get_weekly_patterns() → 이번 주 학습한 패턴 (30일 거래일지 집계)
+       [v5.0] chart_generator.generate_weekly_performance_chart(stats) → PNG 차트 생성
        telegram_bot.format_weekly_report(stats, weekly_patterns) → 메시지 포맷
-       → 텔레그램 발송 (트리거별 승률 + 상위/하위 종목 + 🧠 이번 주 학습한 패턴 Top5)
+       → [v5.0] send_photo_async(chart) — 성과 차트 이미지 먼저 발송
+       → send_async(message) — 텍스트 리포트 후발송
+       → (트리거별 승률 + 상위/하위 종목 + 🧠 이번 주 학습한 패턴 Top5)
 
 ───────────────────── v3.1 방법B+A 하이브리드 ──────────────────────
 08:30  아침봇 완료 후 ⑧ 추가:
@@ -656,6 +668,20 @@ gemini-2.5-flash   20회/일   ❌ 부족
 51. trading_journal 테이블: position_manager만 INSERT, 다른 모듈은 SELECT 전용
     외부에서 직접 UPDATE / DELETE 절대 금지
 
+[Phase 5 리포트 품질 & UX 규칙 — v5.0 추가]
+61. chart_generator.py는 차트 이미지 생성만 담당 — 텔레그램 발송·DB 기록·AI 호출 금지
+    생성 실패 시 반드시 None 반환 (비치명적) — 예외 발생 대신 logger.warning + return None
+62. generate_stock_chart()는 pykrx 사용 → 마감 후 확정치 전용 (장중 호출 금지 — 규칙 #10)
+    장중 실시간 차트가 필요하면 KIS REST로 별도 구현 (chart_generator 아닌 다른 모듈)
+63. send_photo_async()는 telegram_bot.py에만 위치
+    chart_generator나 weekly_report에서 직접 Bot() 객체 생성 금지 — telegram_bot 경유 필수
+64. telegram_interactive.py는 DB 조회 + KIS 잔고 조회 + 텔레그램 응답만 담당
+    KIS 매수/매도/포지션 기록 금지 — position_manager 직접 호출 금지
+    AI 분석 호출 금지 — 응답 지연 방지
+65. start_interactive_handler()는 main.py에서만 asyncio.create_task()로 실행
+    다른 모듈에서 직접 실행 금지 — 중복 롱폴링 방지
+    핸들러 실패 시 봇 전체 영향 없음 — try/except로 감싸 비치명적 처리
+
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
 52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
     watchlist_state.get_sector()로 조회 — 아침봇 미실행 시 "" (빈 문자열) 허용
@@ -876,6 +902,33 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | - weekly_patterns 파라미터 추가 (선택, 하위 호환) |
 |      |            | - 🧠 이번 주 학습한 패턴 Top5 섹션 추가 (태그·빈도·승률·교훈샘플) |
 |      |            | 절대 금지 규칙 45~51 추가 (Phase 3 거래 일지 규칙) |
+| v5.0 | 2026-02-26 | **Phase 5 — 리포트 품질 & UX 강화** |
+|      |            | notifiers/chart_generator.py 신규 |
+|      |            | - generate_stock_chart(ticker, name, days): pykrx OHLCV + matplotlib 캔들차트 PNG |
+|      |            | - generate_weekly_performance_chart(stats): 트리거별 승률 + 수익률 비교 차트 PNG |
+|      |            | - 생성 실패 시 None 반환 (비치명적) — 호출처 None 체크 필수 |
+|      |            | notifiers/telegram_interactive.py 신규 |
+|      |            | - /status: 오늘 알림 수 + 포지션 수 + 시장 환경 + 당일 실현 손익 |
+|      |            | - /holdings: 보유 종목 (AUTO_TRADE=true 시 KIS 실시간, 아니면 DB) |
+|      |            | - /principles: 매매 원칙 Top5 (confidence='high') |
+|      |            | - python-telegram-bot Application 기반 롱폴링 |
+|      |            | - main.py 에서 asyncio.create_task()로 백그라운드 실행 |
+|      |            | notifiers/telegram_bot.py 수정 |
+|      |            | - send_photo_async(): BytesIO PNG 텔레그램 전송 |
+|      |            | - format_morning_report(): 섹션 순서 재배치 (시장환경 → 공시AI → 추천테마 → 기타) |
+|      |            | - format_morning_summary(): 300자 이내 핵심 요약 (선발송용) |
+|      |            | reports/morning_report.py 수정 |
+|      |            | - 300자 핵심 요약 선발송 → 상세 리포트 후발송 (2단계 발송) |
+|      |            | reports/weekly_report.py 수정 |
+|      |            | - chart_generator.generate_weekly_performance_chart() 호출 |
+|      |            | - send_photo_async(chart) → send_async(message) 순 발송 |
+|      |            | main.py 수정 |
+|      |            | - asyncio.create_task(start_interactive_handler()) 등록 |
+|      |            | config.py 수정 |
+|      |            | - REPORT_CHART_ENABLED(bool), CHART_DAYS(int=30) 신규 추가 |
+|      |            | requirements.txt 수정 |
+|      |            | - matplotlib 추가 |
+|      |            | 절대 금지 규칙 61~65 추가 (Phase 5 차트 & UX 규칙) |
 | v4.4 | 2026-02-26 | **Phase 4 — 포트폴리오 인텔리전스 강화 (Prism portfolio_intelligence 경량화)** |
 |      |            | config.py: Phase 4 상수 추가 |
 |      |            | - POSITION_MAX_BULL(5) / POSITION_MAX_NEUTRAL(3) / POSITION_MAX_BEAR(2) |
@@ -1039,6 +1092,10 @@ POSITION_BUY_AMOUNT=1000000         # 1회 매수 금액 (원, 기본 100만원)
 KIS_VTS_APP_KEY=
 KIS_VTS_APP_SECRET=
 KIS_VTS_ACCOUNT_NO=
+
+# Phase 5: 리포트 품질 & UX (선택 — 미설정 시 기본값 적용)
+REPORT_CHART_ENABLED=true   # 차트 이미지 생성 활성화 (false로 끄면 텍스트만 발송)
+CHART_DAYS=30               # 차트 조회 기간 (영업일 기준 일수)
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*

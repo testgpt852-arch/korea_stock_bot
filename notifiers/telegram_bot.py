@@ -22,10 +22,16 @@ notifiers/telegram_bot.py
 - v4.0: format_realtime_alert/ai — 호가 분석 결과 표시 (호가강도/매수매도비율/상위3집중도)
         format_trade_executed() — 모의/실전 매수 체결 알림
         format_trade_closed()   — 포지션 청산 알림 (익절/손절/강제청산)
+- v5.0: [Phase 5] 리포트 품질 & UX 강화
+        send_photo_async() — 차트 이미지(BytesIO) 텔레그램 전송
+        format_morning_report() — 구조 개선: 시장환경 → 주요공시 → AI추천 순 재배치
+        format_morning_summary() — 300자 이내 핵심 요약 (아침봇 요약 발송용)
+        format_weekly_report()  — 요약 최적화 (상세링크 구조)
 """
 
 import asyncio
-from telegram import Bot
+from io import BytesIO
+from telegram import Bot, InputFile
 import config
 from utils.logger import logger
 
@@ -53,11 +59,41 @@ async def send_async(text: str) -> None:
     await _send(text)
 
 
+async def send_photo_async(photo: BytesIO, caption: str = "") -> None:
+    """
+    [v5.0 Phase 5] 차트 이미지(BytesIO) 텔레그램 전송.
+
+    Args:
+        photo:   BytesIO PNG — chart_generator.py 반환값
+        caption: 이미지 설명 (HTML, 최대 1024자)
+    """
+    try:
+        bot = Bot(token=config.TELEGRAM_TOKEN)
+        photo.seek(0)
+        await bot.send_photo(
+            chat_id=config.TELEGRAM_CHAT_ID,
+            photo=InputFile(photo, filename="chart.png"),
+            caption=caption[:1024] if caption else None,
+            parse_mode="HTML" if caption else None,
+        )
+    except Exception as e:
+        logger.warning(f"[telegram] 이미지 전송 실패: {e}")
+
+
 # ══════════════════════════════════════════════════════════════
 # 아침봇 보고서 포맷
 # ══════════════════════════════════════════════════════════════
 
 def format_morning_report(report: dict) -> str:
+    """
+    [v5.0 Phase 5] 아침봇 리포트 구조 개선.
+
+    섹션 순서 재배치:
+    ① 헤더 + 시장 환경 요약 (전날 지수 + 미국증시 + 원자재)
+    ② 주요 공시 AI 분석 (가장 임팩트 높은 정보 먼저)
+    ③ AI 추천 테마 / 발화 신호 (테마발화 + 기관/외인 수급)
+    ④ 순환매 지도 + 증권사 리포트 (보조 정보)
+    """
     today_str        = report.get("today_str", "")
     prev_str         = report.get("prev_str", "")
     signals          = report.get("signals", [])
@@ -67,19 +103,19 @@ def format_morning_report(report: dict) -> str:
     volatility       = report.get("volatility", "판단불가")
     reports          = report.get("report_picks", [])
     ai_dart          = report.get("ai_dart_results", [])
-    prev_kospi       = report.get("prev_kospi", {})         # v2.1
-    prev_kosdaq      = report.get("prev_kosdaq", {})        # v2.1
-    prev_institutional = report.get("prev_institutional", [])  # v2.2
+    prev_kospi       = report.get("prev_kospi", {})
+    prev_kosdaq      = report.get("prev_kosdaq", {})
+    prev_institutional = report.get("prev_institutional", [])
 
     lines = []
 
-    # ── 헤더
+    # ══ ① 헤더 + 시장환경 요약 ══════════════════════════════
     lines.append("📡 <b>아침 테마 레이더</b>")
     lines.append(f"📅 {today_str}  |  기준: {prev_str} 마감")
     lines.append(f"📊 전날 장세: <b>{volatility}</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
-    # ── 전날 지수 (v2.1 추가) ─────────────────────────────────
+    # 전날 지수
     if prev_kospi or prev_kosdaq:
         lines.append(f"\n📈 <b>전날 지수 ({prev_str})</b>")
         if prev_kospi:
@@ -95,34 +131,7 @@ def format_morning_report(report: dict) -> str:
                 f"  ({sign}{prev_kosdaq.get('change_rate', 0):.2f}%)"
             )
 
-    # ── 테마 발화 신호 (강도 3 이상만)
-    lines.append("\n🔴 <b>테마 발화 신호</b>")
-    top = [s for s in signals if s.get("강도", 0) >= 3][:5]
-    if top:
-        for s in top:
-            star    = "★" * min(s["강도"], 5)
-            ai_memo = f"  ✦ {s['ai_메모']}" if s.get("ai_메모") else ""
-            lines.append(f"\n{star} [{s['상태']}] <b>{s['테마명']}</b>")
-            lines.append(f"   └ {s['발화신호']}")
-            if ai_memo:
-                lines.append(f"   {ai_memo}")
-    else:
-        lines.append("   감지된 주요 신호 없음")
-
-    # ── AI 공시 분석
-    if ai_dart:
-        lines.append("\n🤖 <b>AI 공시 분석 (Gemma)</b>")
-        for r in ai_dart[:5]:
-            점수 = r.get("점수", 5)
-            확률 = r.get("상한가확률", "낮음")
-            이유 = r.get("이유", "")
-            bar  = "■" * 점수 + "□" * (10 - 점수)
-            lines.append(
-                f"  <b>{r['종목명']}</b>  [{bar}] {점수}/10  상한가:{확률}\n"
-                f"  └ {이유}"
-            )
-
-    # ── 미국증시
+    # 미국증시
     lines.append("\n🌏 <b>미국증시 (전날 마감)</b>")
     nasdaq = us.get("nasdaq", "N/A")
     sp500  = us.get("sp500",  "N/A")
@@ -132,8 +141,7 @@ def format_morning_report(report: dict) -> str:
     if summary:
         lines.append(f"  📌 {summary}")
 
-    # ── 미국 섹터 연동 (v2.1 추가)
-    # v2.2: 표시 임계값 1.5% → 1.0% (config.US_SECTOR_SIGNAL_MIN과 일관성)
+    # 미국 섹터 연동
     sectors = us.get("sectors", {})
     sector_lines = []
     for sector_name, sdata in sectors.items():
@@ -144,16 +152,15 @@ def format_morning_report(report: dict) -> str:
             pct = float(change.replace("%", "").replace("+", ""))
         except ValueError:
             continue
-        if abs(pct) < config.US_SECTOR_SIGNAL_MIN:   # config 상수 사용
+        if abs(pct) < config.US_SECTOR_SIGNAL_MIN:
             continue
         arrow = "↑" if pct > 0 else "↓"
         sector_lines.append(f"  {arrow} {sector_name}: {change}")
-
     if sector_lines:
         lines.append("\n🏭 <b>미국 섹터 → 국내 연동 예상</b>")
-        lines.extend(sector_lines[:4])  # 최대 4개
+        lines.extend(sector_lines[:4])
 
-    # ── 원자재
+    # 원자재
     lines.append("\n🪙 <b>원자재 (전날 마감)</b>")
     for name, key in [
         ("구리 (LME)", "copper"),
@@ -170,9 +177,21 @@ def format_morning_report(report: dict) -> str:
         else:
             lines.append(f"  {name}: N/A")
 
-    # ── 전날 기관/외인 순매수 (v2.2 신규) ──────────────────────
-    # 전날 기관·외인이 집중 매수한 종목 = 오늘 장에서 추가 매수 가능성 있음
-    # 상한가·급등 종목 대상으로만 조회하므로 모멘텀+수급 교차 확인에 유용
+    # ══ ② 주요 공시 AI 분석 ═════════════════════════════════
+    # [v5.0] 공시 AI 분석을 앞으로 이동 — 가장 임팩트 높은 정보 우선 제공
+    if ai_dart:
+        lines.append("\n🤖 <b>AI 공시 분석</b>  ← 오늘 주목 종목")
+        for r in ai_dart[:5]:
+            점수 = r.get("점수", 5)
+            확률 = r.get("상한가확률", "낮음")
+            이유 = r.get("이유", "")
+            bar  = "■" * 점수 + "□" * (10 - 점수)
+            lines.append(
+                f"  <b>{r['종목명']}</b>  [{bar}] {점수}/10  상한가:{확률}\n"
+                f"  └ {이유}"
+            )
+
+    # 전날 기관/외인 순매수
     if prev_institutional:
         inst_top = sorted(
             prev_institutional,
@@ -198,7 +217,21 @@ def format_morning_report(report: dict) -> str:
         lines.append(f"  기관: {',  '.join(inst_items) if inst_items else 'N/A'}")
         lines.append(f"  외인: {',  '.join(frgn_items) if frgn_items else 'N/A'}")
 
-    # ── 순환매 지도 (v2.1: 마감봇 의존 메시지 제거)
+    # ══ ③ AI 추천 테마 / 발화 신호 ═════════════════════════
+    lines.append("\n🔴 <b>AI 추천 테마 발화 신호</b>")
+    top = [s for s in signals if s.get("강도", 0) >= 3][:5]
+    if top:
+        for s in top:
+            star    = "★" * min(s["강도"], 5)
+            ai_memo = f"  ✦ {s['ai_메모']}" if s.get("ai_메모") else ""
+            lines.append(f"\n{star} [{s['상태']}] <b>{s['테마명']}</b>")
+            lines.append(f"   └ {s['발화신호']}")
+            if ai_memo:
+                lines.append(f"   {ai_memo}")
+    else:
+        lines.append("   감지된 주요 신호 없음")
+
+    # ══ ④ 순환매 지도 + 증권사 리포트 ═════════════════════
     lines.append("\n🗺️ <b>순환매 지도</b>")
     valid = [t for t in theme_map if t.get("종목들")]
     if valid:
@@ -221,7 +254,6 @@ def format_morning_report(report: dict) -> str:
                     f"  등락:{등락_str}  소외:{소외_str}"
                 )
     else:
-        # v2.1: 저변동 장세이거나 데이터 없을 때 구체적 안내
         if "저변동" in str(report.get("volatility", "")):
             lines.append(
                 "  ⚪ 저변동 장세 — 순환매 에너지 없음\n"
@@ -230,7 +262,7 @@ def format_morning_report(report: dict) -> str:
         else:
             lines.append("  전날 급등 테마 없음 (상한가·급등 종목 미감지)")
 
-    # ── 증권사 리포트
+    # 증권사 리포트
     lines.append("\n📋 <b>오늘 증권사 리포트</b>")
     if reports:
         for r in reports[:5]:
@@ -246,6 +278,40 @@ def format_morning_report(report: dict) -> str:
     lines.append("⚠️ 투자 판단은 본인 책임. 참고용 정보입니다.")
 
     return "\n".join(lines)
+
+
+def format_morning_summary(report: dict) -> str:
+    """
+    [v5.0 Phase 5] 아침봇 300자 이내 핵심 요약.
+    상세 리포트 발송 전 선발송하는 초간결 버전.
+
+    구성: 장세 + 주목 공시 1개 + 추천 테마 1~2개 → 300자 이내
+    """
+    volatility = report.get("volatility", "판단불가")
+    signals    = report.get("signals", [])
+    ai_dart    = report.get("ai_dart_results", [])
+    today_str  = report.get("today_str", "")
+
+    lines = [f"⚡ <b>오늘의 핵심 요약</b>  {today_str}"]
+    lines.append(f"장세: <b>{volatility}</b>")
+
+    # 최고 점수 공시 1개
+    if ai_dart:
+        top = max(ai_dart, key=lambda r: r.get("점수", 0))
+        if top.get("점수", 0) >= 7:
+            lines.append(f"🤖 주목공시: <b>{top['종목명']}</b> — {top.get('이유','')[:30]}")
+
+    # 최강 신호 테마 1~2개
+    top_signals = sorted(signals, key=lambda s: s.get("강도", 0), reverse=True)[:2]
+    for s in top_signals:
+        if s.get("강도", 0) >= 3:
+            lines.append(f"🔴 <b>{s['테마명']}</b>  {'★'*min(s['강도'],5)}")
+
+    summary = "\n".join(lines)
+    # 300자 초과 시 자름
+    if len(summary) > 300:
+        summary = summary[:297] + "..."
+    return summary
 
 
 # ══════════════════════════════════════════════════════════════
