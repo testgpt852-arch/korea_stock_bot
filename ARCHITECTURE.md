@@ -131,7 +131,7 @@ news_collector.py         → morning_report, signal_analyzer
 volume_analyzer.py        → realtime_alert
 theme_analyzer.py         → closing_report, morning_report
 signal_analyzer.py        → morning_report
-ai_analyzer.py            → morning_report, closing_report, realtime_alert
+ai_analyzer.py            → morning_report (analyze_dart + analyze_closing v2.4), closing_report, realtime_alert
 telegram_bot.py           → morning_report, closing_report, realtime_alert
 kis/auth.py               → kis/rest_client, kis/websocket_client
 kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 + 시가 제공)
@@ -235,8 +235,11 @@ graph TD
        ④ news_collector → 리포트
        ⑤ price_collector → 전날 가격·수급 (pykrx 확정치)
        ⑥ signal_analyzer → 신호 1~5
-       ⑦ ai_analyzer.analyze_dart()
-       ⑧ theme_analyzer
+       ⑦ ai_analyzer.analyze_dart() — 공시 호재/악재 점수화
+       ⑦-b ai_analyzer.analyze_closing(price_data) — 신호4 AI 교체 (v2.4 신규)
+           "상한가 순환매"/"KOSPI 급등 순환매" → 실제 테마명(바이오신약 등)
+           실패 시 기존 신호4 유지 (graceful fallback)
+       ⑧ theme_analyzer — AI 테마 기반 소외도 계산
        ⑨ morning_report 조립
        ⑩ telegram_bot 발송
 
@@ -305,10 +308,10 @@ graph TD
        price_collector → 마감 확정치
        ai_analyzer.analyze_closing()
        theme_analyzer → 순환매 지도
-       [v3.2 추가] closing_strength → T5 마감 강도 상위 종목
-       [v3.2 추가] volume_flat     → T6 횡보 거래량 급증 종목
-       [v3.2 추가] fund_inflow_analyzer → T3 시총 대비 자금유입 종목
-       [v3.2 추가] watchlist_state 보강: T5+T6 종목 → 내일 WebSocket 워치리스트 추가
+       [v3.2] closing_strength → T5 마감 강도 상위 종목   ← v3.6에서 dead code 복원
+       [v3.2] volume_flat     → T6 횡보 거래량 급증 종목  ← v3.6에서 dead code 복원
+       [v3.2] fund_inflow_analyzer → T3 시총 자금유입     ← v3.6에서 dead code 복원
+       [v3.2] watchlist_state 보강: T5+T6 종목 → 내일 WebSocket 워치리스트 추가  ← v3.6 복원
        telegram_bot 발송 (T3/T5/T6 섹션 포함)
 
 18:45  ─── 수익률 추적 배치 (Phase 3, v3.3) ────────────────────
@@ -548,6 +551,12 @@ gemini-2.5-flash   20회/일   ❌ 부족
     AI API 호출·텔레그램 직접 발송·매수 로직 절대 금지
     main.py 매주 일요일 03:00 cron에서만 호출
     데이터 부족(total < 5건) 시 원칙 등록 건너뜀 — 신뢰도 없는 원칙 방지
+
+[아침봇 AI 순환매 규칙 — v3.6 추가]
+31. ai_analyzer.analyze_closing()은 morning_report에서도 호출 가능 (v2.4~)
+    → 전날 price_data를 전달해 신호4 제네릭 라벨을 실제 테마명으로 교체
+    → T5/T6/T3 분석기(rule #16)와 달리 ai_analyzer는 양쪽 호출 허용
+    → AI 실패 시 기존 신호4(상한가 순환매 등) 유지 — 의존성 없는 graceful fallback
 ```
 
 ---
@@ -649,6 +658,27 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | 등락률 범위 0~10% (FID_RSFL_RATE2="10") — 상한가 전 초기 급등 포착 |
 |      |            | FID_COND_MRKT_DIV_CODE 항상 "J" 고정 (rate API도 통일) |
 |      |            | 내부 헬퍼 _fetch_rate_once() 분리 |
+| v3.6 | 2026-02-26 | **버그 수정 6종 — 아침봇 AI 순환매 강화 + Phase 2/4 안정화** |
+|      |            | [BUG-1] collectors/price_collector.py: _fetch_index() 등락률 0% 버그 수정 |
+|      |            | pykrx 등락률 컬럼 의존 제거 → 마지막 두 행 종가로 직접 계산 |
+|      |            | 조회 범위 10일 → 20일 확장 (공휴일 연속 구간 안전 마진) |
+|      |            | [BUG-2] reports/morning_report.py: 순환매 지도 제네릭 라벨 수정 |
+|      |            | 신호4 "상한가 순환매"/"KOSPI 급등 순환매" → ai_analyzer.analyze_closing()으로 교체 |
+|      |            | Gemma가 전날 상한가+급등 종목을 실제 테마명(바이오신약, 방산 등)으로 그룹핑 |
+|      |            | AI 실패 시 기존 신호4 유지 (graceful fallback) |
+|      |            | [BUG-3] reports/closing_report.py: T5/T6/T3 데드코드 복원 |
+|      |            | closing_strength / volume_flat / fund_inflow_analyzer .analyze() 호출 추가 |
+|      |            | _update_watchlist_from_closing() 호출 추가 (이전엔 정의만 되고 호출 없음) |
+|      |            | report 딕셔너리에 "closing_strength" / "volume_flat" / "fund_inflow" 키 추가 |
+|      |            | [BUG-4] traders/position_manager.py: DATE() 포맷 불일치 수정 |
+|      |            | strftime("%Y%m%d") → "%Y-%m-%d" (SQLite DATE() 반환 형식과 통일) |
+|      |            | 기존: 당일 손실 한도 체크 항상 0 → 안전장치 무력화됨 |
+|      |            | [BUG-5] utils/rate_limiter.py: VTS 모의투자 rate limit 수정 |
+|      |            | 기존: TRADING_MODE 무관하게 REAL(19req/s) 고정 |
+|      |            | 수정: TRADING_MODE=VTS → 2req/s / REAL → 19req/s 동적 선택 |
+|      |            | [BUG-6] analyzers/closing_strength.py, volume_flat.py: 주말 전일 버그 수정 |
+|      |            | _get_prev_date() timedelta(days=1) → get_prev_trading_day() |
+|      |            | 월요일 입력 시 일요일(데이터 없음) 반환 → 금요일 반환으로 수정 |
 
 ---
 
