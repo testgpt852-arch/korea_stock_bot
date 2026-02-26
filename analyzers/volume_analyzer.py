@@ -33,8 +33,14 @@ analyzers/volume_analyzer.py
         WebSocket 체결 급등 감지 → REST 호가 조회 → 동일 분석 적용
 """
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from utils.logger import logger
+
+_KST = timezone(timedelta(hours=9))  # [v4.1] Railway UTC 서버 KST 보정
+
+def _now_kst() -> str:
+    """KST(한국 표준시) 현재 시각 → HH:MM:SS 문자열"""
+    return datetime.now(_KST).strftime("%H:%M:%S")
 import config
 
 # ── 모듈 레벨 상태 ────────────────────────────────────────────
@@ -231,7 +237,7 @@ def poll_all_markets() -> list[dict]:
                     "거래량배율": round(acml_rvol / 100, 2),
                     "순간강도":   round(순간강도, 1),
                     "조건충족":   True,
-                    "감지시각":   datetime.now().strftime("%H:%M:%S"),
+                    "감지시각":   _now_kst(),
                     "감지소스":   row.get("_source", "volume"),
                     "호가분석":   호가분석,    # v4.0 신규
                 })
@@ -321,7 +327,7 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
             "거래량배율": round(acml_rvol, 2),
             "순간강도":   0.0,
             "조건충족":   True,
-            "감지시각":   datetime.now().strftime("%H:%M:%S"),
+            "감지시각":   _now_kst(),
             "감지소스":   "gap_up",
             "호가분석":   호가분석,    # v4.0 신규
         })
@@ -366,7 +372,7 @@ def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
         "거래량배율": round(acml_rvol, 2),
         "순간강도":   0.0,
         "조건충족":   True,
-        "감지시각":   체결시각 or datetime.now().strftime("%H:%M:%S"),
+        "감지시각":   체결시각 or _now_kst(),
         "감지소스":   "websocket",
         "호가분석":   None,   # v4.0: realtime_alert.on_tick()에서 REST 호가 조회 후 채움
     }
@@ -422,7 +428,7 @@ def analyze(tick: dict) -> dict:
         "거래량배율": round(volume_ratio / 100, 2),
         "순간강도":   0.0,
         "조건충족":   confirmed,
-        "감지시각":   datetime.now().strftime("%H:%M:%S"),
+        "감지시각":   _now_kst(),
         "감지소스":   "volume",
         "호가분석":   None,
     }
