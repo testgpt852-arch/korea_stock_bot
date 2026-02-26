@@ -6,35 +6,33 @@ reports/morning_report.py
 ① dart_collector    → 전날 공시 수집
 ② market_collector  → 미국증시·원자재·섹터 ETF
 ③ news_collector    → 리포트·정책뉴스
-④ price_collector   → 전날 가격 데이터 (상한가·급등·기관/외인) ← v2.1 추가
+④ price_collector   → 전날 가격 데이터 (상한가·급등·기관/외인)      ← v2.1 추가
 ⑤ signal_analyzer   → 신호 1~5 통합 판단 (신호4 price_data 활용)    ← v2.1 변경
 ⑥ ai_analyzer.analyze_dart()  → 주요 공시 호재/악재 점수화
 ⑦ ai_analyzer.analyze_closing() → 신호4 제네릭 라벨 교체             ← v2.4 추가
    ("상한가 순환매"/"KOSPI 급등 순환매" → "바이오신약", "방산" 등 실제 테마명)
 ⑧ theme_analyzer    → 순환매 지도 (price_data로 소외도 계산)
+⑧-b oracle_analyzer → 테마·수급·공시 종합 → 오늘 픽 + 진입조건       ← v8.1 신규
+   ※ T5/T6/T3 없음 (rule #16: 마감봇 전용) — 수급·공시·소외도 기반만 활용
 ⑨ watchlist_state   → WebSocket 워치리스트 저장 (장중봇용)            ← v3.1 추가
 ⑩ watchlist_state   → 시장 환경 판단 + 저장 (장중봇 R/R 필터용)      ← v4.2 추가
-⑪ 보고서 조립 → 텔레그램 발송
+⑪ 보고서 조립 → 쪽집게 섹션 선발송 → 핵심 요약 중간발송 → 상세 리포트 후발송
+                                                                       ← v8.1 발송 순서 변경
 
 [수정이력]
 - v1.0: 기본 구조
 - v1.3: ai_analyzer.analyze_dart() 호출 추가
 - v2.1: price_collector.collect_daily() 직접 호출 추가
         → 마감봇(closing_report) 의존 완전 제거
-        → 순환매 지도가 아침봇 단독으로 작동
         signal_analyzer에 price_data 전달
         theme_analyzer에 price_data["by_name"] 전달
 - v2.2: 전날 기관/외인 순매수 데이터 보고서에 추가
-        (price_data["institutional"] → report["prev_institutional"])
-- v2.4: ai_analyzer.analyze_closing(price_data) 추가
-        신호4 "상한가 순환매" 제네릭 라벨을 AI 실제 테마명으로 교체
+- v2.4: ai_analyzer.analyze_closing(price_data) 추가 (신호4 테마명 교체)
 - v4.2: watchlist_state.determine_and_set_market_env(price_data) 추가
-        → 전날 KOSPI 등락률로 "강세장"/"약세장/횡보"/"횡보" 판단
-        → 장중봇 can_buy() R/R 필터 + analyze_spike() 분기 전략에 활용
-- v5.0: [Phase 5] 핵심 요약 선발송 추가
-        → telegram_bot.format_morning_summary() 300자 핵심 요약 먼저 발송
-        → 상세 리포트(format_morning_report)는 요약 이후 후발송
-        → 리포트 내부 섹션 순서 개선 (시장환경 → 공시AI → 추천테마 → 기타)
+- v5.0: 핵심 요약 선발송 추가 (format_morning_summary)
+- v8.1: oracle_analyzer 통합
+        쪽집게 섹션(format_oracle_section) 최우선 발송
+        T5/T6/T3 미전달 (rule #16: 마감봇 전용) — 수급+공시+소외도 기반만
 """
 
 from utils.logger import logger
@@ -46,6 +44,7 @@ import collectors.price_collector  as price_collector   # v2.1 추가
 import analyzers.signal_analyzer   as signal_analyzer
 import analyzers.theme_analyzer    as theme_analyzer
 import analyzers.ai_analyzer       as ai_analyzer
+import analyzers.oracle_analyzer   as oracle_analyzer   # v8.1 추가
 import notifiers.telegram_bot      as telegram_bot
 import utils.watchlist_state        as watchlist_state   # v3.1 추가
 
@@ -68,9 +67,6 @@ async def run() -> None:
         news_data   = news_collector.collect(today)
 
         # ── ② 전날 가격 데이터 수집 (v2.1 추가) ───────────────
-        # 마감봇 의존 없이 직접 pykrx로 전날 상한가·급등·기관/외인 수집
-        # → signal_analyzer 신호4(순환매) + theme_analyzer 소외도 계산에 사용
-        # → 아침봇 기관/외인 섹션에도 활용 (v2.2 추가)
         price_data = None
         if prev:
             logger.info("[morning] 전날 가격 데이터 수집 중 (순환매 지도 + 기관/외인용)...")
@@ -102,16 +98,11 @@ async def run() -> None:
                 _enrich_signals_with_ai(signal_result["signals"], ai_dart_results)
 
         # ── ④-b AI 순환매 테마 그룹핑 (v2.4) ────────────────
-        # signal4 "상한가 순환매"/"KOSPI 급등 순환매" 제네릭 라벨을
-        # ai_analyzer.analyze_closing()으로 실제 테마명(바이오신약, 방산 등)으로 교체
-        # ARCHITECTURE 규칙: T5/T6/T3 분석기 호출 금지지만
-        # ai_analyzer.analyze_closing()은 허용 (ai_analyzer → morning_report 의존성 기존 존재)
         if price_data:
             try:
                 logger.info("[morning] AI 순환매 테마 그룹핑 중 (신호4 교체)...")
                 ai_closing_signals = ai_analyzer.analyze_closing(price_data)
                 if ai_closing_signals:
-                    # 신호4(순환매) 엔트리만 교체 — 신호1/2/3/5는 유지
                     non_signal4 = [
                         s for s in signal_result["signals"]
                         if "신호4" not in s.get("발화신호", "")
@@ -127,10 +118,30 @@ async def run() -> None:
                 logger.warning(f"[morning] AI 테마 그룹핑 실패 ({e}) — 기존 신호4 유지")
 
         # ── ⑤ 테마 분석 (v2.1: price_data["by_name"] 전달) ───
-        # theme_analyzer가 price_data로 소외도를 실제 수치로 계산
         logger.info("[morning] 테마 분석 중...")
         price_by_name = price_data.get("by_name", {}) if price_data else {}
         theme_result = theme_analyzer.analyze(signal_result, price_by_name)
+
+        # ── ⑤-b 쪽집게 분석 (v8.1 신규) ──────────────────────
+        # T5/T6/T3 없음: rule #16 준수 (마감봇 전용 트리거)
+        # 수급 + 공시 AI + 소외도 기반으로만 아침봇 픽 생성
+        logger.info("[morning] 쪽집게 분석 중 (수급+공시 기반 픽)...")
+        market_env_val = watchlist_state.get_market_env() or ""
+        try:
+            oracle_result = oracle_analyzer.analyze(
+                theme_map=theme_result.get("theme_map", []),
+                price_by_name=price_by_name,
+                institutional=price_data.get("institutional", []) if price_data else [],
+                ai_dart_results=ai_dart_results,
+                signals=signal_result["signals"],
+                market_env=market_env_val,
+                closing_strength=None,   # T5 없음 — rule #16
+                volume_flat=None,        # T6 없음 — rule #16
+                fund_inflow=None,        # T3 없음 — rule #16
+            )
+        except Exception as _e:
+            logger.warning(f"[morning] 쪽집게 분석 실패 (비치명적): {_e}")
+            oracle_result = None
 
         # ── ⑥ 보고서 조립 ─────────────────────────────────────
         report = {
@@ -144,26 +155,33 @@ async def run() -> None:
             "policy_summary":     signal_result["policy_summary"],
             "theme_map":          theme_result["theme_map"],
             "ai_dart_results":    ai_dart_results,
-            # v2.1: 전날 지수 정보 추가 (telegram_bot 포맷용)
+            # v2.1: 전날 지수 정보
             "prev_kospi":         price_data.get("kospi",  {}) if price_data else {},
             "prev_kosdaq":        price_data.get("kosdaq", {}) if price_data else {},
-            # v2.2: 전날 기관/외인 순매수 추가
+            # v2.2: 전날 기관/외인 순매수
             "prev_institutional": price_data.get("institutional", []) if price_data else [],
+            # v8.1: 쪽집게 분석 결과
+            "oracle":             oracle_result,
         }
 
-        # ── ⑦ 텔레그램 발송 ──────────────────────────────────
+        # ── ⑦ 텔레그램 발송 (v8.1: 쪽집게 최우선 발송) ─────────
         logger.info("[morning] 텔레그램 발송 중...")
 
-        # [v5.0 Phase 5] 300자 핵심 요약 선발송 → 상세 리포트 후발송
+        # [v8.1] 쪽집게 픽 섹션 최우선 발송 (결론 → 요약 → 상세 순)
+        if oracle_result and oracle_result.get("has_data"):
+            oracle_msg = telegram_bot.format_oracle_section(oracle_result)
+            if oracle_msg:
+                await telegram_bot.send_async(oracle_msg)
+
+        # [v5.0] 300자 핵심 요약 중간 발송
         summary_msg = telegram_bot.format_morning_summary(report)
         await telegram_bot.send_async(summary_msg)
 
+        # 상세 리포트 후발송
         message = telegram_bot.format_morning_report(report)
         await telegram_bot.send_async(message)
 
         # ── ⑧ WebSocket 워치리스트 저장 (v3.1) ──────────────
-        # 장중봇(09:00)이 시작될 때 이 목록으로 WebSocket 구독
-        # price_data 없으면 워치리스트 빈 상태 유지 (장중봇은 REST 폴링만 사용)
         ws_watchlist = _build_ws_watchlist(price_data, signal_result)
         watchlist_state.set_watchlist(ws_watchlist)
         logger.info(
@@ -171,16 +189,11 @@ async def run() -> None:
             f"(장중봇이 09:00에 구독 예정)"
         )
 
-        # ── ⑨ 시장 환경 판단 + 저장 (v4.2 Phase 2 신규) ─────
-        # 전날 KOSPI 등락률 기준으로 "강세장" / "약세장/횡보" / "횡보" 결정
-        # → 장중봇 can_buy() R/R 필터 (강세 1.2+ / 약세 2.0+) 에 활용
-        # → analyze_spike() market_env 파라미터에 주입 → 오닐 전략 자동 분기
+        # ── ⑨ 시장 환경 판단 + 저장 (v4.2) ─────────────────
         market_env = watchlist_state.determine_and_set_market_env(price_data)
         logger.info(f"[morning] 시장 환경 판단 완료: {market_env or '(미지정)'}")
 
-        # ── ⑩ 섹터 맵 저장 (v4.4 Phase 4 신규) ──────────────
-        # price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵 생성
-        # → 장중봇 can_buy() 섹터 분산 체크 + open_position() DB 기록에 활용
+        # ── ⑩ 섹터 맵 저장 (v4.4) ──────────────────────────
         sector_map = _build_sector_map(price_data)
         watchlist_state.set_sector_map(sector_map)
         logger.info(f"[morning] 섹터 맵 저장 완료 — {len(sector_map)}종목")
@@ -224,10 +237,6 @@ def _build_ws_watchlist(
     3. 기관 순매수 상위 10 (institutional) — 스마트머니 추적
     4. 신호 관련종목 각 3개 (signal_result) — 공시·섹터·리포트 종목
 
-    [중복 제거]
-    종목코드 기준. 먼저 등장한 우선순위가 유지됨.
-    config.WS_WATCHLIST_MAX(50)개 초과 시 우선순위 낮은 것부터 제거.
-
     반환: {종목코드: {"종목명": str, "전일거래량": int, "우선순위": int}}
     """
     import config as _config
@@ -244,31 +253,23 @@ def _build_ws_watchlist(
         code = info.get("종목코드", "")
         if not code or len(code) != 6:
             return
-        if code not in watchlist:   # 먼저 등록된 우선순위 유지
+        if code not in watchlist:
             watchlist[code] = {
                 "종목명":     종목명,
-                "전일거래량": max(info.get("거래량", 0), 1),  # 0 나누기 방지
+                "전일거래량": max(info.get("거래량", 0), 1),
                 "우선순위":   priority,
             }
 
-    # ① 전날 상한가 (전체)
     for s in price_data.get("upper_limit", []):
         add(s["종목명"], 1)
-
-    # ② 전날 급등 상위 20 (7%↑, 상한가 제외)
     for s in price_data.get("top_gainers", [])[:20]:
         add(s["종목명"], 2)
-
-    # ③ 기관 순매수 상위 10
     for s in price_data.get("institutional", [])[:10]:
         add(s.get("종목명", ""), 3)
-
-    # ④ 신호 관련종목 (각 신호의 대장+소외 상위 3개)
     for signal in signal_result.get("signals", []):
         for 종목명 in signal.get("관련종목", [])[:3]:
             add(종목명, 4)
 
-    # 우선순위 정렬 → 상위 WS_WATCHLIST_MAX개만
     sorted_items = sorted(watchlist.items(), key=lambda x: x[1]["우선순위"])
     result = dict(sorted_items[:_config.WS_WATCHLIST_MAX])
 
@@ -286,17 +287,8 @@ def _build_ws_watchlist(
 
 def _build_sector_map(price_data: dict | None) -> dict[str, str]:
     """
-    [v4.4 Phase 4] price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵 생성.
-    morning_report 에서 워치리스트 저장 직후 호출.
-    watchlist_state.set_sector_map() 에 저장 → 장중봇 섹터 분산 체크에 활용.
-
-    Args:
-        price_data: price_collector.collect_daily() 반환값.
-                    {"by_sector": {"섹터명": [{"종목명": str, "종목코드": str, ...}]}}
-
-    Returns:
-        {종목코드: 섹터명} — 예: {"005930": "반도체", "035420": "인터넷"}
-        price_data 없거나 by_sector 없으면 빈 dict 반환
+    [v4.4] price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵 생성
+    Returns: {종목코드: 섹터명} 또는 빈 dict
     """
     if not price_data:
         return {}
