@@ -31,6 +31,7 @@ closing_strength → utils/watchlist_state (선택적 저장 — 내일 워치�
 
 from datetime import datetime, timedelta
 from utils.logger import logger
+from utils.date_utils import get_prev_trading_day  # v3.2 수정: 영업일 보장
 from pykrx import stock as pykrx_stock
 import config
 
@@ -118,7 +119,17 @@ def analyze(date_str: str, top_n: int = None) -> list[dict]:
 
 
 def _get_prev_date(date_str: str) -> str:
-    """YYYYMMDD 기준 직전 캘린더일 (영업일 보장 안 함, 충분히 이전 날짜 사용)"""
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    prev = dt - timedelta(days=1)
+    """
+    YYYYMMDD 기준 직전 영업일 반환 (주말 대응)
+
+    [v3.2 버그 수정]
+    기존: timedelta(days=1) → 월요일이면 일요일 반환 → pykrx 빈 DataFrame
+    → 월요일 vol_ratio = 0.0 (데이터 오염) 또는 시장 전체 스킵 발생
+    수정: get_prev_trading_day()로 실제 직전 영업일 계산
+    """
+    dt   = datetime.strptime(date_str, "%Y%m%d")
+    prev = get_prev_trading_day(dt)
+    if prev is None:
+        # 토/일이 입력된 경우(정상 운영에선 발생 안 함) — 안전 fallback
+        prev = dt - timedelta(days=1)
     return prev.strftime("%Y%m%d")
