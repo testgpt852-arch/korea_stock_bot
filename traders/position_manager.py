@@ -348,6 +348,7 @@ def close_position(pos_id: int, ticker: str, name: str,
     포지션 청산 실행 — 시장가 매도 후 DB 기록.
 
     [v4.2] close_reason에 "trailing_stop" 추가
+    [v4.3] 청산 완료 후 trading_journal.record_journal() 자동 호출 (Phase 3)
 
     Args:
         pos_id:    positions.id
@@ -375,9 +376,28 @@ def close_position(pos_id: int, ticker: str, name: str,
     now_kst       = datetime.now(KST)
     sell_time     = now_kst.isoformat(timespec="seconds")
 
+    # [v4.3] journal 기록용 — DELETE 전에 추가 컬럼 수집
+    trading_id     = None
+    trigger_source = ""
+    market_env     = ""
+    buy_time       = ""
+
     conn = db_schema.get_conn()
     try:
         c = conn.cursor()
+
+        # [v4.3] journal에 필요한 정보 먼저 조회 (DELETE 전)
+        c.execute("""
+            SELECT trading_id, trigger_source, market_env, buy_time
+            FROM positions WHERE id = ?
+        """, (pos_id,))
+        extra = c.fetchone()
+        if extra:
+            trading_id, trigger_source, market_env, buy_time = extra
+            trigger_source = trigger_source or ""
+            market_env     = market_env or ""
+            buy_time       = buy_time or ""
+
         c.execute("""
             UPDATE trading_history
             SET sell_time=?, sell_price=?, profit_rate=?, profit_amount=?, close_reason=?
@@ -395,6 +415,25 @@ def close_position(pos_id: int, ticker: str, name: str,
         f"매수가 {buy_price:,}원 → 매도가 {sell_price:,}원  "
         f"수익률 {profit_rate:+.2f}%  손익 {profit_amount:+,}원"
     )
+
+    # [v4.3] 거래 일지 기록 — 비치명적, 실패해도 청산 결과 반환
+    try:
+        from tracking.trading_journal import record_journal
+        record_journal(
+            trading_id    = trading_id,
+            ticker        = ticker,
+            name          = name,
+            buy_time      = buy_time,
+            sell_time     = sell_time,
+            buy_price     = buy_price,
+            sell_price    = sell_price,
+            profit_rate   = profit_rate,
+            trigger_source= trigger_source,
+            close_reason  = reason,
+            market_env    = market_env,
+        )
+    except Exception as e:
+        logger.warning(f"[position] journal 기록 실패 (비치명적): {e}")
 
     return {
         "ticker":        ticker,

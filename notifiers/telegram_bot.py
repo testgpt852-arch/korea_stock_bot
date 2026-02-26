@@ -616,12 +616,14 @@ def _split_message(text: str, limit: int = 4096) -> list[str]:
         text = text[limit:]
     return chunks
 
-def format_weekly_report(stats: dict) -> str:
+def format_weekly_report(stats: dict, weekly_patterns: list | None = None) -> str:
     """
-    주간 성과 리포트 텔레그램 메시지 포맷 (Phase 3, v3.3)
+    주간 성과 리포트 텔레그램 메시지 포맷 (Phase 3, v3.3 / v4.3 Phase3 업데이트)
 
     Args:
-        stats: performance_tracker.get_weekly_stats() 반환값
+        stats:           performance_tracker.get_weekly_stats() 반환값
+        weekly_patterns: [v4.3] trading_journal.get_weekly_patterns() 반환값 (선택)
+                         None 또는 빈 리스트면 패턴 섹션 생략
 
     Returns:
         HTML 포맷 텔레그램 메시지
@@ -683,6 +685,39 @@ def format_weekly_report(stats: dict) -> str:
             src  = p.get("source", "?")
             sign = "+" if ret >= 0 else ""
             lines.append(f"  {name}  <b>{sign}{ret:.1f}%</b>  [{src}]")
+        lines.append("")
+
+    # ── [v4.3 Phase 3] 이번 주 학습한 패턴 ──────────────────
+    if weekly_patterns:
+        lines.append("🧠 <b>이번 주 학습한 패턴 Top5</b>")
+        tag_emoji = {
+            "강세장진입":      "📈",
+            "약세장진입":      "📉",
+            "원칙준수익절":    "✅",
+            "트레일링스탑작동": "🔄",
+            "손절지연":        "⚠️",
+            "갭상승성공":      "⚡",
+            "갭상승실패":      "❌",
+            "워치리스트조기":  "🎯",
+            "큰수익":          "💰",
+            "큰손실":          "🔴",
+            "강제청산":        "⏰",
+        }
+        for p in weekly_patterns[:5]:
+            tag     = p.get("tag", "?")
+            count   = p.get("count", 0)
+            win_r   = p.get("win_rate", 0.0)
+            avg_p   = p.get("avg_profit", 0.0)
+            lesson  = p.get("lesson_sample", "")
+            emoji   = tag_emoji.get(tag, "•")
+            avg_sign = "+" if avg_p >= 0 else ""
+            line = (
+                f"  {emoji} <b>{tag}</b>: {count}회 / "
+                f"승률 {win_r:.0f}% / 평균 {avg_sign}{avg_p:.1f}%"
+            )
+            if lesson:
+                line += f"\n    └ {lesson[:35]}"
+            lines.append(line)
         lines.append("")
 
     if not trigger_stats and not top_picks:

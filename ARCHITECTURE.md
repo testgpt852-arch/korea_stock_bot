@@ -109,7 +109,12 @@ korea_stock_bot/
 │   ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
 │   ├── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
 │   ├── ai_context.py        ← [v3.5] AI 프롬프트 컨텍스트 조회 전담 (Phase 5 신규)
-│   └── principles_extractor.py ← [v3.5] 매매 원칙 추출 배치 (Phase 5 신규)
+│   │                           [v4.3] trading_journal 컨텍스트 추가 (종목 과거 일지)
+│   ├── principles_extractor.py ← [v3.5] 매매 원칙 추출 배치 (Phase 5 신규)
+│   │                             [v4.3] trading_journal 패턴 통합 (_integrate_journal_patterns)
+│   └── trading_journal.py   ← [v4.3 Phase3 신규] 거래 완료 시 AI 회고 분석 일지
+│                               Prism trading_journal_agent 경량화 구현
+│                               record_journal() / get_weekly_patterns() / get_journal_context()
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
     └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록 [v4.2 Phase 2: Trailing Stop]
@@ -160,6 +165,13 @@ traders/position_manager.py ← tracking/performance_tracker (update_trailing_st
 tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
 tracking/alert_recorder.py        ← reports/realtime_alert (유일 호출처)
 tracking/performance_tracker.py   ← main.py (18:45 cron), reports/weekly_report
+tracking/trading_journal.py       ← traders/position_manager (record_journal — close_position 후 자동)  ← v4.3
+tracking/trading_journal.py       ← tracking/ai_context (get_journal_context — 읽기 전용)              ← v4.3
+tracking/trading_journal.py       ← reports/weekly_report (get_weekly_patterns — 읽기 전용)            ← v4.3
+tracking/trading_journal.py       → tracking/principles_extractor (_integrate_journal_patterns)         ← v4.3
+tracking/ai_context.py            ← reports/realtime_alert (build_spike_context)
+tracking/ai_context.py            → tracking/trading_journal (get_journal_context)                     ← v4.3
+tracking/principles_extractor.py  ← main.py (일요일 03:00), tracking/trading_journal (_integrate)     ← v4.3
 reports/weekly_report.py          ← main.py (월요일 08:45 cron)
 reports/weekly_report.py          → tracking/performance_tracker, notifiers/telegram_bot
 ```
@@ -342,10 +354,11 @@ graph TD
        → 오픈 포지션 peak_price / stop_loss 종가 기준 상향 조정
        → AUTO_TRADE_ENABLED=false 시 즉시 return (안전, 비치명적)
 
-매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3) ────────
+매주 월요일 08:45  ─── 주간 성과 리포트 (Phase 3, v3.3 / v4.3 업데이트) ────────
        performance_tracker.get_weekly_stats() → 지난 7일 DB 조회
-       telegram_bot.format_weekly_report() → 메시지 포맷
-       → 텔레그램 발송 (트리거별 승률 + 상위/하위 종목)
+       [v4.3] trading_journal.get_weekly_patterns() → 이번 주 학습한 패턴 (30일 거래일지 집계)
+       telegram_bot.format_weekly_report(stats, weekly_patterns) → 메시지 포맷
+       → 텔레그램 발송 (트리거별 승률 + 상위/하위 종목 + 🧠 이번 주 학습한 패턴 Top5)
 
 ───────────────────── v3.1 방법B+A 하이브리드 ──────────────────────
 08:30  아침봇 완료 후 ⑧ 추가:
@@ -594,6 +607,23 @@ gemini-2.5-flash   20회/일   ❌ 부족
     main.py 매주 일요일 03:00 cron에서만 호출
     데이터 부족(total < 5건) 시 원칙 등록 건너뜀 — 신뢰도 없는 원칙 방지
 
+[Phase 3 거래 일지 & 패턴 학습 규칙 — v4.3 추가]
+45. tracking/trading_journal.py는 DB 기록 + AI 회고 분석만 담당
+    텔레그램 발송·KIS API 호출·매수 로직 절대 금지
+    모든 함수는 동기(sync)
+46. record_journal()은 traders/position_manager.close_position() 에서만 호출
+    (다른 모듈에서 직접 호출 금지 — 청산 직후 자동 기록이 원칙)
+47. AI 회고 분석 실패 시 rule-based fallback으로 패턴 태그만 기록
+    실패해도 DB INSERT는 반드시 완료 (비치명적 처리 필수)
+48. get_journal_context()는 ai_context.py에서만 호출
+    (realtime_alert가 직접 호출 금지 — ai_context 경유 필수)
+49. get_weekly_patterns()는 weekly_report.py에서만 호출
+    (30일 기준 집계, 데이터 없으면 빈 리스트 반환 — 섹션 생략)
+50. _integrate_journal_patterns()는 principles_extractor.run_weekly_extraction() 내부에서만 호출
+    journal 패턴은 기존 원칙 보강에만 사용 (신규 INSERT 금지 — 트리거 집계 역할 유지)
+51. trading_journal 테이블: position_manager만 INSERT, 다른 모듈은 SELECT 전용
+    외부에서 직접 UPDATE / DELETE 절대 금지
+
 [Phase 2 Trailing Stop & 매매전략 규칙 — v4.2 추가]
 39. positions 테이블 peak_price / stop_loss / market_env 컬럼은 position_manager만 관리
     외부에서 직접 UPDATE 금지 — _update_peak() / update_trailing_stops() 경유 필수
@@ -765,7 +795,35 @@ gemini-2.5-flash   20회/일   ❌ 부족
 | v4.0 | 2026-02-26 | **소~중형주 필터 + WebSocket 호가 분석 통합** |
 | v4.1 | 2026-02-26 | **장중봇 소스 단일화 — 거래량 순위 제거, 등락률 순위만 사용** |
 | v4.2 | 2026-02-26 | **Phase 1 벤치마킹 — AI 프롬프트 전면 강화 (Prism 흡수)** |
-| v4.3 | 2026-02-26 | **Phase 2 — Trailing Stop & 매매전략 고도화** |
+| v4.3 | 2026-02-26 | **Phase 3 — 거래 일지 & 패턴 학습 (Prism trading_journal_agent 경량화 구현)** |
+|      |            | tracking/trading_journal.py 신규: 거래 완료 시 AI 회고 분석 + 패턴 태그 추출 |
+|      |            | - record_journal(): Gemma AI 회고 분석 (situation_analysis / judgment_evaluation / lessons) |
+|      |            | - rule-based 패턴 태그 (강세장진입/원칙준수익절/트레일링스탑작동/손절지연 등 11종) |
+|      |            | - AI + rule-based 태그 병합 후 trading_journal 테이블 INSERT |
+|      |            | - get_weekly_patterns(): 최근 N일 패턴 빈도·승률 집계 |
+|      |            | - get_journal_context(): 같은 종목 과거 일지 → AI 프롬프트 주입 |
+|      |            | - _push_lessons_to_principles(): AI 교훈 → trading_principles 반영 |
+|      |            | tracking/db_schema.py: trading_journal 테이블 추가 |
+|      |            | - situation_analysis / judgment_evaluation / lessons / pattern_tags / one_line_summary 컬럼 |
+|      |            | - _migrate_v43(): 기존 DB 자동 마이그레이션 (idempotent) |
+|      |            | - trading_principles.is_active 컬럼 추가 (마이그레이션 포함) |
+|      |            | traders/position_manager.py: close_position() 수정 |
+|      |            | - DELETE 전에 trigger_source / market_env / buy_time 조회 저장 |
+|      |            | - 청산 완료 후 trading_journal.record_journal() 자동 호출 (비치명적) |
+|      |            | tracking/ai_context.py: build_spike_context()에 journal 컨텍스트 추가 |
+|      |            | - _get_journal_context(): 같은 종목 과거 일지 → 프롬프트 주입 (Prism 벤치마킹) |
+|      |            | - _get_high_conf_principles(): is_active 필터 추가, 구버전 DB 호환 |
+|      |            | tracking/principles_extractor.py: _integrate_journal_patterns() 추가 |
+|      |            | - run_weekly_extraction() 완료 후 자동 호출 |
+|      |            | - journal 패턴 태그 집계 → 기존 원칙 total_count / confidence 보강 |
+|      |            | - 신규 INSERT 금지 — 트리거 기반 집계 역할 유지 |
+|      |            | reports/weekly_report.py: 패턴 섹션 추가 |
+|      |            | - trading_journal.get_weekly_patterns() 조회 |
+|      |            | - format_weekly_report(stats, weekly_patterns) 호출 |
+|      |            | notifiers/telegram_bot.py: format_weekly_report() 업데이트 |
+|      |            | - weekly_patterns 파라미터 추가 (선택, 하위 호환) |
+|      |            | - 🧠 이번 주 학습한 패턴 Top5 섹션 추가 (태그·빈도·승률·교훈샘플) |
+|      |            | 절대 금지 규칙 45~51 추가 (Phase 3 거래 일지 규칙) |
 |      |            | tracking/db_schema.py: positions 테이블 3개 컬럼 추가 (peak_price, stop_loss, market_env) |
 |      |            | _migrate_v42(): 기존 DB 자동 마이그레이션 (idempotent, ALTER TABLE) |
 |      |            | traders/position_manager.py: Trailing Stop 전면 구현 |

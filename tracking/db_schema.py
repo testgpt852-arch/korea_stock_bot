@@ -1,6 +1,7 @@
 """
 tracking/db_schema.py
-SQLite DB 스키마 정의 + 초기화 (Phase 3, v3.3 신규 / v3.4 업데이트 / v3.5 업데이트 / v4.2 업데이트)
+SQLite DB 스키마 정의 + 초기화
+(Phase 3, v3.3 신규 / v3.4 / v3.5 / v4.2 / v4.3 Phase3 업데이트)
 
 [역할]
 DDL(테이블·인덱스·뷰 생성) + init_db() + get_conn() 만 담당.
@@ -14,15 +15,19 @@ main.py 시작 시 init_db() 1회 호출.
   positions              ← [v3.4] 현재 오픈 포지션 (position_manager 전용)
                            [v4.2] peak_price / stop_loss / market_env 컬럼 추가 (Trailing Stop)
   trading_principles     ← [v3.5] AI 학습용 매매 원칙 DB (principles_extractor가 기록)
+  trading_journal        ← [v4.3 Phase3] 거래 완료 시 AI 회고 일지 (trading_journal 모듈)
+                           Prism trading_journal_agent 기능 경량화 구현.
+                           situation_analysis / judgment_evaluation / lessons / pattern_tags 포함.
 
 [뷰]
   trigger_stats          ← 트리거별 7일 승률 집계 (weekly_report 조회용)
 
 [ARCHITECTURE 의존성]
-db_schema ← tracking/alert_recorder   (get_conn 사용)
-db_schema ← tracking/performance_tracker (get_conn 사용)
-db_schema ← traders/position_manager  (get_conn 사용)
+db_schema ← tracking/alert_recorder       (get_conn 사용)
+db_schema ← tracking/performance_tracker  (get_conn 사용)
+db_schema ← traders/position_manager      (get_conn 사용)
 db_schema ← tracking/principles_extractor (get_conn 사용)  ← v3.5 추가
+db_schema ← tracking/trading_journal      (get_conn 사용)  ← v4.3 추가
 db_schema ← main.py  (init_db 1회 호출)
 db_schema → (없음, 최하위 모듈)
 
@@ -152,8 +157,44 @@ def init_db() -> None:
                 total_count     INTEGER DEFAULT 0,  -- 총 발생 횟수
                 win_rate        REAL    DEFAULT 0.0, -- 승률 (%)
                 confidence      TEXT    DEFAULT 'low', -- low / medium / high
+                is_active       INTEGER DEFAULT 1,  -- 1=활성 / 0=비활성
                 trigger_source  TEXT,               -- 어떤 트리거에서 파생됐는지
                 last_updated    TEXT                -- 마지막 업데이트 KST
+            )
+        """)
+
+        # ── 6. 거래 일지 (Phase 3, v4.3 신규) ────────────────
+        # Prism trading_journal_agent 기능 경량화 구현.
+        # position_manager.close_position() 직후 trading_journal.record_journal() 자동 기록.
+        #
+        # situation_analysis : JSON — 매수/매도 당시 상황 비교
+        #   {"buy_context_summary": str, "sell_context_summary": str, "key_changes": [str]}
+        # judgment_evaluation : JSON — 판단 품질 평가
+        #   {"buy_quality": str, "sell_quality": str, "missed_signals": [str]}
+        # lessons : JSON 배열 — 추출된 교훈 (principles_extractor로 전달)
+        #   [{"condition": str, "action": str, "priority": "high/medium/low"}]
+        # pattern_tags : JSON 배열 — 패턴 태그
+        #   ["강세장진입", "원칙준수익절", "트레일링스탑작동", ...]
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS trading_journal (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                trading_id          INTEGER REFERENCES trading_history(id),
+                ticker              TEXT    NOT NULL,
+                name                TEXT,
+                buy_time            TEXT,               -- ISO 8601 KST (매수 시각)
+                sell_time           TEXT,               -- ISO 8601 KST (매도 시각)
+                buy_price           INTEGER,
+                sell_price          INTEGER,
+                profit_rate         REAL,               -- 수익률 (%)
+                trigger_source      TEXT,               -- 진입 트리거
+                close_reason        TEXT,               -- 청산 사유
+                market_env          TEXT,               -- 시장 환경
+                situation_analysis  TEXT    DEFAULT '{}',   -- JSON: 매수/매도 상황 비교
+                judgment_evaluation TEXT    DEFAULT '{}',   -- JSON: 판단 품질 평가
+                lessons             TEXT    DEFAULT '[]',   -- JSON 배열: 교훈 목록
+                pattern_tags        TEXT    DEFAULT '[]',   -- JSON 배열: 패턴 태그
+                one_line_summary    TEXT,               -- 한 줄 요약 (장기 기억용)
+                created_at          TEXT    NOT NULL    -- ISO 8601 KST
             )
         """)
 
@@ -197,6 +238,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_principles_confidence
             ON trading_principles(confidence, trigger_source)
         """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_journal_ticker
+            ON trading_journal(ticker, created_at)
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_journal_pattern
+            ON trading_journal(pattern_tags)
+        """)
 
         conn.commit()
         logger.info(f"[db] DB 초기화 완료 — {db_path}")
@@ -209,6 +258,8 @@ def init_db() -> None:
 
     # [v4.2] 기존 DB에 Trailing Stop 컬럼 마이그레이션 (idempotent)
     _migrate_v42(db_path)
+    # [v4.3] trading_journal 테이블 마이그레이션 (idempotent)
+    _migrate_v43(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -243,6 +294,66 @@ def _migrate_v42(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v4.2 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v43(db_path: str) -> None:
+    """
+    [v4.3 Phase 3] trading_journal 테이블 생성 (기존 DB에 없을 경우).
+    trading_principles 테이블에 is_active 컬럼 추가 (없을 경우).
+    idempotent — 여러 번 실행해도 안전.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+
+        # trading_journal 테이블 (없으면 생성)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS trading_journal (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                trading_id          INTEGER REFERENCES trading_history(id),
+                ticker              TEXT    NOT NULL,
+                name                TEXT,
+                buy_time            TEXT,
+                sell_time           TEXT,
+                buy_price           INTEGER,
+                sell_price          INTEGER,
+                profit_rate         REAL,
+                trigger_source      TEXT,
+                close_reason        TEXT,
+                market_env          TEXT,
+                situation_analysis  TEXT    DEFAULT '{}',
+                judgment_evaluation TEXT    DEFAULT '{}',
+                lessons             TEXT    DEFAULT '[]',
+                pattern_tags        TEXT    DEFAULT '[]',
+                one_line_summary    TEXT,
+                created_at          TEXT    NOT NULL
+            )
+        """)
+
+        # 인덱스
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_journal_ticker
+            ON trading_journal(ticker, created_at)
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_journal_pattern
+            ON trading_journal(pattern_tags)
+        """)
+
+        # trading_principles.is_active 컬럼 추가 (기존 DB 호환)
+        c.execute("PRAGMA table_info(trading_principles)")
+        existing_cols = {row[1] for row in c.fetchall()}
+        if "is_active" not in existing_cols:
+            c.execute("ALTER TABLE trading_principles ADD COLUMN is_active INTEGER DEFAULT 1")
+            logger.info("[db] v4.3 마이그레이션 — trading_principles.is_active 추가")
+
+        conn.commit()
+        logger.info("[db] v4.3 마이그레이션 완료 — trading_journal 테이블 확인")
+
+    except Exception as e:
+        logger.warning(f"[db] v4.3 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

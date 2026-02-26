@@ -1,10 +1,15 @@
 """
 tracking/principles_extractor.py
-매매 이력 → Trading Principles DB 자동 추출 배치 (Phase 5, v3.5 신규)
+매매 이력 → Trading Principles DB 자동 추출 배치 (Phase 5, v3.5 신규 / v4.3 Phase3 업데이트)
 
 [역할]
 trading_history 에서 완료된 거래를 집계해 trading_principles 를 자동으로 갱신.
 매매 패턴(트리거 × 수익/손실)을 통계적으로 분석해 "고신뢰 원칙"을 추출.
+
+[v4.3 추가]
+trading_journal.pattern_tags 도 집계에 반영:
+→ AI가 추출한 패턴 태그 빈도 + 승률 → principles 품질 향상
+→ run_weekly_extraction() 완료 후 _integrate_journal_patterns() 추가 호출
 
 [실행 시점]
 main.py → 매주 일요일 03:00 run_weekly_extraction() 호출 (cron)
@@ -16,6 +21,7 @@ main.py → 매주 일요일 03:00 run_weekly_extraction() 호출 (cron)
 3. 총 거래 >= MIN_SAMPLE(5건) 이상일 때만 원칙 등록
 4. win_rate >= 65% → confidence='high' / 50~65% → 'medium' / < 50% → 'low'
 5. 이미 존재하는 원칙은 win_count / total_count / win_rate / confidence 업데이트
+6. [v4.3] trading_journal 패턴 태그 집계 → 고빈도 패턴에 원칙 보강
 
 [반환값]
 {"inserted": int, "updated": int, "total_principles": int}
@@ -126,6 +132,10 @@ def run_weekly_extraction() -> dict:
             f"[principles] 배치 완료 — 신규:{inserted} 업데이트:{updated} "
             f"총 원칙:{total_p}개"
         )
+
+        # [v4.3 Phase 3] trading_journal 패턴 태그 집계 → 원칙 DB 보강
+        _integrate_journal_patterns()
+
         return {"inserted": inserted, "updated": updated, "total_principles": total_p}
 
     except Exception as e:
@@ -136,6 +146,72 @@ def run_weekly_extraction() -> dict:
 
 
 # ── 내부 함수 ─────────────────────────────────────────────────
+
+def _integrate_journal_patterns() -> None:
+    """
+    [v4.3 Phase 3] trading_journal.pattern_tags 집계 → trading_principles 보강.
+
+    동작:
+    1. trading_journal에서 최근 30일 pattern_tags + profit_rate 조회
+    2. 태그별 빈도 + 승률 계산
+    3. 이미 존재하는 원칙의 total_count 갱신 (win_count는 수익률 기준)
+    4. 데이터 부족(건수 < MIN_SAMPLE) 시 건너뜀
+
+    원칙 INSERT는 하지 않음 — 트리거 기반 집계(_aggregate_by_trigger)가 신규 INSERT 담당.
+    journal 패턴은 기존 원칙의 신뢰도 보강에만 사용.
+    """
+    try:
+        from tracking.trading_journal import get_weekly_patterns
+        patterns = get_weekly_patterns(days=30)   # 30일 기준
+        if not patterns:
+            logger.debug("[principles] journal 패턴 없음 — 보강 건너뜀")
+            return
+
+        conn = db_schema.get_conn()
+        try:
+            c = conn.cursor()
+            now_kst = datetime.now(KST).isoformat()
+            updated = 0
+
+            for p in patterns:
+                tag      = p["tag"]
+                count    = p["count"]
+                wins     = p["win_count"]
+                win_rate = p["win_rate"]
+
+                if count < MIN_SAMPLE:
+                    continue
+
+                # tag 기반으로 condition_desc 에 매핑되는 원칙 찾기
+                c.execute("""
+                    SELECT id, total_count, win_count
+                    FROM trading_principles
+                    WHERE condition_desc LIKE ? OR action LIKE ?
+                """, (f"%{tag}%", f"%{tag}%"))
+                row = c.fetchone()
+
+                if row:
+                    pid, old_total, old_win = row
+                    # 일지 데이터로 카운트 보강 (중복 방지: 기존값보다 크면 갱신)
+                    new_total = max(old_total, count)
+                    new_win   = max(old_win, wins)
+                    new_conf  = _calc_confidence(win_rate, new_total)
+                    c.execute("""
+                        UPDATE trading_principles
+                        SET total_count=?, win_count=?, win_rate=?,
+                            confidence=?, last_updated=?
+                        WHERE id=?
+                    """, (new_total, new_win, win_rate, new_conf, now_kst, pid))
+                    updated += 1
+
+            conn.commit()
+            if updated:
+                logger.info(f"[principles] journal 패턴 보강 완료 — {updated}개 원칙 갱신")
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logger.warning(f"[principles] journal 패턴 보강 실패 (비치명적): {e}")
 
 def _aggregate_by_trigger(conn) -> list[dict]:
     """

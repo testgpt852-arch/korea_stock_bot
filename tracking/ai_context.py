@@ -1,12 +1,14 @@
 """
 tracking/ai_context.py
-AI 프롬프트에 주입할 컨텍스트 조회 전담 (Phase 5, v3.5 신규)
+AI 프롬프트에 주입할 컨텍스트 조회 전담 (Phase 5, v3.5 신규 / v4.3 Phase3 업데이트)
 
 [역할]
-DB에서 세 가지 컨텍스트를 읽어 문자열로 조합해 반환:
+DB에서 네 가지 컨텍스트를 읽어 문자열로 조합해 반환:
   1. 트리거별 7일 승률  (trigger_stats 뷰 → performance_tracker)
   2. 종목별 과거 거래 이력  (trading_history 테이블)
   3. 고신뢰(high) 매매 원칙  (trading_principles 테이블)
+  4. [v4.3] 종목별 거래 일지 요약  (trading_journal 테이블) — Prism 벤치마킹
+     → 매수 당시 판단 + 교훈이 다음 매수 결정에 반영
 
 반환된 문자열은 ai_analyzer.analyze_spike() 에 ai_context 파라미터로 전달된다.
 프롬프트 주입 방식은 ai_analyzer가 담당 — 이 모듈은 "텍스트 조합"만 한다.
@@ -20,11 +22,12 @@ realtime_alert._send_ai_followup() → build_spike_context(ticker, source) 동�
 AI 프롬프트에서 컨텍스트 없으면 기존 방식대로 판단.
 
 [ARCHITECTURE 의존성]
-ai_context ← tracking/db_schema  (get_conn)
+ai_context ← tracking/db_schema       (get_conn)
 ai_context ← tracking/performance_tracker  (trigger_stats 뷰)
 ai_context ← traders/position_manager  (trading_history — 읽기 전용)
-ai_context → analyzers/ai_analyzer  (문자열 반환만 — 직접 의존 없음)
-ai_context → reports/realtime_alert  (build_spike_context 호출)
+ai_context ← tracking/trading_journal  (get_journal_context — 읽기 전용)  ← v4.3 추가
+ai_context → analyzers/ai_analyzer    (문자열 반환만 — 직접 의존 없음)
+ai_context → reports/realtime_alert   (build_spike_context 호출)
 
 [절대 금지 규칙 — ARCHITECTURE #29]
 이 파일은 DB 조회 + 문자열 반환만 담당.
@@ -46,6 +49,9 @@ def build_spike_context(ticker: str, source: str) -> str:
     급등 종목 AI 분석용 컨텍스트 문자열 조합.
     realtime_alert._send_ai_followup() 에서 호출.
 
+    [v4.3] trading_journal 컨텍스트 추가:
+    → 같은 종목을 과거에 매매한 경험 + 추출된 교훈이 이번 판단에 반영
+
     Args:
         ticker: 종목코드 (6자리)
         source: 감지 소스 (volume / rate / gap_up / websocket 등)
@@ -63,6 +69,11 @@ def build_spike_context(ticker: str, source: str) -> str:
     history_line = _get_ticker_history(ticker)
     if history_line:
         parts.append(history_line)
+
+    # [v4.3] 거래 일지 컨텍스트 (Prism 벤치마킹 — 매수 vs 매도 교훈)
+    journal_line = _get_journal_context(ticker)
+    if journal_line:
+        parts.append(journal_line)
 
     principles_line = _get_high_conf_principles(source)
     if principles_line:
@@ -165,19 +176,40 @@ def _get_ticker_history(ticker: str) -> str:
         conn.close()
 
 
+def _get_journal_context(ticker: str) -> str:
+    """
+    [v4.3 Phase 3] trading_journal에서 같은 종목 과거 일지 조회 → 프롬프트용 반환.
+    Prism get_context_for_ticker() 벤치마킹 — 매수 당시 vs 매도 당시 교훈 주입.
+    최근 2건만 (토큰 절약).
+    """
+    try:
+        from tracking.trading_journal import get_journal_context
+        return get_journal_context(ticker)
+    except Exception as e:
+        logger.debug(f"[ai_context] journal 컨텍스트 조회 실패 ({ticker}): {e}")
+        return ""
+
+
 def _get_high_conf_principles(source: str) -> str:
     """
     trading_principles 에서 confidence='high' 원칙 최대 3개 조회 → 프롬프트용 반환.
     trigger_source 가 source 와 일치하거나 NULL인 원칙만.
+    [v4.3] is_active=1 필터 추가 (db_schema v4.3에서 컬럼 추가)
     """
     conn = db_schema.get_conn()
     try:
         c = conn.cursor()
-        c.execute("""
+        # is_active 컬럼 존재 여부 확인 (구버전 DB 호환)
+        c.execute("PRAGMA table_info(trading_principles)")
+        cols = {row[1] for row in c.fetchall()}
+        active_filter = "AND is_active = 1" if "is_active" in cols else ""
+
+        c.execute(f"""
             SELECT condition_desc, action, result_summary, win_rate
             FROM trading_principles
             WHERE confidence = 'high'
               AND (trigger_source = ? OR trigger_source IS NULL)
+              {active_filter}
             ORDER BY win_rate DESC
             LIMIT 3
         """, (source,))
