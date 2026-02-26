@@ -178,6 +178,18 @@ MAX_ENTRY_CHANGE = 10.0
 
 FORCE_CLOSE_TIME = "14:50"
 
+# v4.4: Phase 4 포트폴리오 인텔리전스 설정
+# 동적 POSITION_MAX — 시장 환경별 최대 보유 종목 수
+POSITION_MAX_BULL    = int(os.environ.get("POSITION_MAX_BULL",    "5"))  # 강세장
+POSITION_MAX_NEUTRAL = int(os.environ.get("POSITION_MAX_NEUTRAL", "3"))  # 횡보
+POSITION_MAX_BEAR    = int(os.environ.get("POSITION_MAX_BEAR",    "2"))  # 약세장/횡보
+
+# 동일 섹터 집중 한도 — 초과 시 매수 차단
+SECTOR_CONCENTRATION_MAX = int(os.environ.get("SECTOR_CONCENTRATION_MAX", "2"))
+
+# 선택적 강제청산 — 이 수익률 이상이면 14:50에 청산하지 않고 유지
+SELECTIVE_CLOSE_PROFIT_THRESHOLD = float(os.environ.get("SELECTIVE_CLOSE_PROFIT_THRESHOLD", "3.0"))
+
 # ── 스케줄 시간 ──────────────────────────────────────────────
 TOKEN_REFRESH_TIME = "07:00"
 MORNING_TIME       = "08:30"

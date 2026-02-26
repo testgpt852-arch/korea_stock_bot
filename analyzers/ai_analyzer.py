@@ -551,3 +551,134 @@ def _recover_json(broken: str):
     if results:
         return results
     raise ValueError("JSON 복구 실패")
+
+
+# ─────────────────────────────────────────────────────────────
+# [v4.4 Phase 4] analyze_selective_close — 선택적 강제청산 판단
+# ─────────────────────────────────────────────────────────────
+
+def analyze_selective_close(
+    positions: list[dict],
+    market_env: str = "",
+) -> dict[str, str]:
+    """
+    [v4.4 Phase 4] 14:50 강제청산 전 각 포지션에 대해 청산/유지 AI 판단.
+    Prism force_close 고도화 벤치마킹 — 수익 중인 종목은 15:20까지 유지 허용.
+
+    Args:
+        positions: get_open_positions() 반환값 리스트
+                   각 항목: {ticker, name, buy_price, qty, peak_price, stop_loss,
+                              market_env, profit_rate(실시간, 호출부에서 계산)}
+        market_env: 오늘 시장 환경 (아침봇 설정값)
+
+    Returns:
+        {ticker: "청산" | "유지"} — 판단 결과 맵.
+        AI 실패 시 rule-based fallback (SELECTIVE_CLOSE_PROFIT_THRESHOLD 기준).
+
+    [규칙 우선순위 (AI 판단 전 rule-based 사전 필터)]
+        1. profit_rate >= SELECTIVE_CLOSE_PROFIT_THRESHOLD(3%) → 유지 (수익 중)
+        2. profit_rate <= config.STOP_LOSS(-3%)               → 청산 (손실 확정)
+        3. 나머지                                              → AI 판단
+    """
+    if not positions:
+        return {}
+
+    result: dict[str, str] = {}
+    ai_candidates: list[dict] = []
+
+    # ── 1단계: rule-based 사전 필터 ──────────────────────────
+    for pos in positions:
+        ticker      = pos.get("ticker", "")
+        profit_rate = pos.get("profit_rate", 0.0) or 0.0
+
+        if profit_rate >= config.SELECTIVE_CLOSE_PROFIT_THRESHOLD:
+            result[ticker] = "유지"
+            logger.info(
+                f"[ai_analyzer] 선택적청산 사전필터 — {pos.get('name',ticker)} "
+                f"수익 {profit_rate:+.1f}% → 유지"
+            )
+        elif profit_rate <= config.STOP_LOSS:
+            result[ticker] = "청산"
+            logger.info(
+                f"[ai_analyzer] 선택적청산 사전필터 — {pos.get('name',ticker)} "
+                f"손실 {profit_rate:+.1f}% → 청산"
+            )
+        else:
+            ai_candidates.append(pos)
+
+    if not ai_candidates:
+        return result
+
+    # ── 2단계: AI 판단 (중간 수익률 종목) ─────────────────────
+    try:
+        prompt = _build_selective_close_prompt(ai_candidates, market_env)
+        raw    = _call_api(prompt)
+        parsed = _extract_json(raw)
+
+        if isinstance(parsed, dict):
+            for ticker, verdict in parsed.items():
+                if verdict in ("청산", "유지"):
+                    result[ticker] = verdict
+                else:
+                    result[ticker] = "청산"  # 불명확 응답 → 안전하게 청산
+        elif isinstance(parsed, list):
+            for item in parsed:
+                t = item.get("ticker", "")
+                v = item.get("판단", "청산")
+                if t:
+                    result[t] = v if v in ("청산", "유지") else "청산"
+
+    except Exception as e:
+        logger.warning(f"[ai_analyzer] 선택적청산 AI 실패 → rule-based fallback: {e}")
+        # AI 실패 시 fallback: 손익 0 이상이면 유지, 미만이면 청산
+        for pos in ai_candidates:
+            ticker      = pos.get("ticker", "")
+            profit_rate = pos.get("profit_rate", 0.0) or 0.0
+            result[ticker] = "유지" if profit_rate >= 0 else "청산"
+
+    return result
+
+
+def _build_selective_close_prompt(
+    positions: list[dict],
+    market_env: str,
+) -> str:
+    """[v4.4] 선택적 강제청산 판단 프롬프트 생성"""
+    time_ctx = _get_market_time_context()
+    pos_lines = []
+    for pos in positions:
+        name        = pos.get("name", pos.get("ticker", ""))
+        profit_rate = pos.get("profit_rate", 0.0) or 0.0
+        buy_price   = pos.get("buy_price", 0)
+        peak_price  = pos.get("peak_price", buy_price)
+        stop_loss   = pos.get("stop_loss", 0)
+        src         = pos.get("source", "unknown")
+        pos_lines.append(
+            f"  - 종목: {name}  수익률: {profit_rate:+.1f}%  "
+            f"매수가: {buy_price:,}원  고점: {peak_price:,}원  "
+            f"손절가: {stop_loss:,}원  진입소스: {src}"
+        )
+
+    positions_text = "\n".join(pos_lines)
+    market_text    = f"오늘 시장 환경: {market_env or '미지정'}"
+
+    return f"""당신은 한국 주식 트레이더입니다.
+{time_ctx}
+현재 장 마감 30분 전(14:50)입니다.
+{market_text}
+
+아래 포지션들 중 15:30 장 마감까지 계속 보유할지, 지금 즉시 청산할지 판단하세요.
+
+[현재 포지션 목록]
+{positions_text}
+
+[판단 기준]
+- 15:20 이전 추세가 살아있고 고점 근처 유지 중 → 유지 고려
+- 고점 대비 크게 이탈하거나 하락 가속 중 → 청산
+- {market_env or '시장 환경 미지정'} 에서 단기 모멘텀 지속 가능성 판단
+
+반드시 아래 JSON 형식만 응답 (설명 금지):
+{{
+  "종목코드1": "유지",
+  "종목코드2": "청산"
+}}"""

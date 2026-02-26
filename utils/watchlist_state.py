@@ -1,6 +1,7 @@
 """
 utils/watchlist_state.py
-아침봇 → 장중봇 간 WebSocket 워치리스트 + 시장 환경 공유 상태 (v3.1 신규 / v4.2 확장)
+아침봇 → 장중봇 간 WebSocket 워치리스트 + 시장 환경 + 섹터 맵 공유 상태
+(v3.1 신규 / v4.2 확장 / v4.4 Phase4 섹터 맵 추가)
 
 [역할]
 morning_report(08:30) 가 전날 수급·신호 데이터로 워치리스트를 생성해 저장.
@@ -11,6 +12,10 @@ morning_report 가 price_data(kospi)로 시장 환경을 판단해 저장.
 realtime_alert 가 읽어 analyze_spike() market_env 파라미터와
 position_manager.can_buy() R/R 필터에 활용.
 
+[v4.4 추가] 섹터 맵 저장/조회 기능
+morning_report 가 price_data["by_sector"]로 ticker→sector 맵을 생성해 저장.
+position_manager.open_position() 에서 섹터 분산 체크 + DB 기록에 활용.
+
 [판단 기준 — _determine_market_env()]
   전날 KOSPI 등락률 기준 (단순 당일 기준, pykrx 확정치 사용):
   +1.0% 이상 → "강세장"   (R/R 1.2+ 기준)
@@ -18,18 +23,21 @@ position_manager.can_buy() R/R 필터에 활용.
   그 외      → "횡보"       (R/R 1.5+ 기준)
 
 [ARCHITECTURE 의존성]
-morning_report  → watchlist_state (write: set_watchlist, set_market_env)
-realtime_alert  → watchlist_state (read: get_watchlist, get_market_env)
+morning_report  → watchlist_state (write: set_watchlist, set_market_env, set_sector_map)
+realtime_alert  → watchlist_state (read: get_watchlist, get_market_env, get_sector)
 수집/분석/발송 로직 없음 — 상태 공유만
 """
 
 from utils.logger import logger
 
-# {종목코드: {"종목명": str, "전일거래량": int, "우선순위": int}}
+# {종목코드: {\"종목명\": str, \"전일거래량\": int, \"우선순위\": int}}
 _watchlist: dict[str, dict] = {}
 
-# [v4.2] 시장 환경 — "강세장" / "약세장/횡보" / "횡보" / ""
+# [v4.2] 시장 환경 — \"강세장\" / \"약세장/횡보\" / \"횡보\" / \"\"
 _market_env: str = ""
+
+# [v4.4] 섹터 맵 — {종목코드: 섹터명}  (아침봇 price_data["by_sector"] 기반)
+_sector_map: dict[str, str] = {}
 
 
 # ── 워치리스트 ────────────────────────────────────────────────
@@ -53,10 +61,11 @@ def is_ready() -> bool:
 
 def clear() -> None:
     """장 마감 후 초기화 (다음날 아침봇이 덮어쓰므로 선택적)"""
-    global _watchlist, _market_env
+    global _watchlist, _market_env, _sector_map
     _watchlist  = {}
     _market_env = ""
-    logger.info("[watchlist] 워치리스트 + 시장 환경 초기화")
+    _sector_map = {}
+    logger.info("[watchlist] 워치리스트 + 시장 환경 + 섹터 맵 초기화")
 
 
 # ── [v4.2] 시장 환경 ──────────────────────────────────────────
@@ -122,3 +131,37 @@ def determine_and_set_market_env(price_data: dict | None) -> str:
         f"[watchlist] 시장 환경 판단: KOSPI {change_rate:+.2f}% → {env}"
     )
     return env
+
+
+# ── [v4.4] 섹터 맵 ────────────────────────────────────────────
+
+def set_sector_map(sector_map: dict[str, str]) -> None:
+    """
+    [v4.4] 아침봇에서 호출 — 종목코드→섹터 맵 저장.
+    morning_report.py 가 price_data["by_sector"] 로 맵 생성 후 저장.
+
+    Args:
+        sector_map: {종목코드: 섹터명} — 예: {"005930": "반도체", "035420": "인터넷"}
+    """
+    global _sector_map
+    _sector_map = sector_map
+    logger.info(f"[watchlist] 섹터 맵 저장 완료 — {len(_sector_map)}종목")
+
+
+def get_sector(ticker: str) -> str:
+    """
+    [v4.4] 장중봇에서 호출 — 종목코드의 섹터명 반환.
+    position_manager.open_position() / can_buy() 에서 섹터 분산 체크에 활용.
+
+    Args:
+        ticker: 종목코드 (6자리)
+
+    Returns:
+        섹터명 (예: "반도체") / "" (매핑 없으면 빈 문자열)
+    """
+    return _sector_map.get(ticker, "")
+
+
+def get_sector_map() -> dict[str, str]:
+    """[v4.4] 전체 섹터 맵 반환 (복사본)"""
+    return _sector_map.copy()

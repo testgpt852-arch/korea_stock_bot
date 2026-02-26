@@ -75,6 +75,12 @@ def build_spike_context(ticker: str, source: str) -> str:
     if journal_line:
         parts.append(journal_line)
 
+    # [v4.4] 포트폴리오 현황 컨텍스트 (Phase 4 신규)
+    # 현재 보유 종목 목록 + 총 노출도 + 당일 P&L → AI가 집중 위험 판단 가능
+    portfolio_line = _get_portfolio_context()
+    if portfolio_line:
+        parts.append(portfolio_line)
+
     principles_line = _get_high_conf_principles(source)
     if principles_line:
         parts.append(principles_line)
@@ -228,3 +234,77 @@ def _get_high_conf_principles(source: str) -> str:
         return ""
     finally:
         conn.close()
+
+
+def _get_portfolio_context() -> str:
+    """
+    [v4.4 Phase 4] 현재 오픈 포지션 현황 → 프롬프트용 문자열 반환.
+    AI가 기존 보유 종목·섹터·총 노출도를 인식하고 신규 매수 판단에 반영할 수 있게 함.
+    Prism portfolio_intelligence_agent 경량화 구현.
+
+    반환 예시:
+    [현재 포트폴리오] 보유 2종목 (A주 +3.2% 반도체, B주 -0.5% 바이오)
+                     총 노출 200만원 / 당일 미실현 P&L: +13,400원
+    """
+    conn = db_schema.get_conn()
+    try:
+        c = conn.cursor()
+        import config as _config
+        c.execute("""
+            SELECT ticker, name, buy_price, qty, peak_price, stop_loss, market_env, sector
+            FROM positions WHERE mode = ?
+            ORDER BY buy_time
+        """, (_config.TRADING_MODE,))
+        rows = c.fetchall()
+    except Exception as e:
+        logger.debug(f"[ai_context] 포트폴리오 조회 실패: {e}")
+        return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    # 현재가 조회 시도 (실패해도 매수가 기준으로 표시)
+    try:
+        from kis import order_client
+        price_getter = lambda ticker: (
+            order_client.get_current_price(ticker).get("현재가", 0)
+        )
+    except Exception:
+        price_getter = lambda ticker: 0
+
+    total_invested  = 0
+    total_unrealized = 0
+    items: list[str] = []
+
+    for row in rows:
+        ticker, name, buy_price, qty, peak_price, stop_loss, menv, sector = row
+        try:
+            cur = price_getter(ticker)
+        except Exception:
+            cur = 0
+        if cur <= 0:
+            cur = buy_price  # 조회 실패 시 매수가로 대체
+
+        invested   = buy_price * qty
+        unrealized = (cur - buy_price) * qty
+        profit_pct = (cur - buy_price) / buy_price * 100 if buy_price > 0 else 0
+
+        total_invested   += invested
+        total_unrealized += unrealized
+
+        sector_tag = f" {sector}" if sector else ""
+        items.append(
+            f"{name}({ticker}) {profit_pct:+.1f}%{sector_tag}"
+        )
+
+    if not items:
+        return ""
+
+    pnl_sign = "+" if total_unrealized >= 0 else ""
+    return (
+        f"[현재 포트폴리오] 보유 {len(items)}종목 ({', '.join(items)}) | "
+        f"총 노출 {total_invested//10000}만원 / "
+        f"미실현 P&L: {pnl_sign}{total_unrealized:,}원"
+    )

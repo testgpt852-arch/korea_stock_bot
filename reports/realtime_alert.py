@@ -322,8 +322,10 @@ async def _send_ai_followup(analysis: dict) -> None:
 
         # [v4.2] stop_loss_price + market_env 전달
         stop_loss_price = ai_result.get("stop_loss")
+        # [v4.4] sector 조회 (아침봇 섹터 맵 기반)
+        sector = watchlist_state.get_sector(ticker)
         asyncio.create_task(
-            _handle_trade_signal(ticker, name, source, stop_loss_price, market_env)
+            _handle_trade_signal(ticker, name, source, stop_loss_price, market_env, sector)
         )
 
     except Exception as e:
@@ -334,11 +336,13 @@ async def _handle_trade_signal(
     ticker: str, name: str, source: str,
     stop_loss_price: int | None = None,   # [v4.2] AI 제공 손절가
     market_env: str = "",                  # [v4.2] 시장 환경
+    sector: str = "",                      # [v4.4] 종목 섹터
 ) -> None:
     """
     매수 체결 → DB 기록 → 텔레그램 알림 (v3.4)
     [v4.2] stop_loss_price / market_env → open_position() 에 전달
            → Trailing Stop peak_price 초기화 + 손절가 설정
+    [v4.4] sector → open_position() 에 전달 → 섹터 분산 DB 기록
     """
     from traders import position_manager
     from kis import order_client
@@ -361,12 +365,14 @@ async def _handle_trade_signal(
         total_amt = buy_result["total_amt"]
 
         # [v4.2] stop_loss_price + market_env 전달 → Trailing Stop 초기화
+        # [v4.4] sector 전달 → 섹터 분산 체크 DB 기록
         await loop.run_in_executor(
             None,
             lambda: position_manager.open_position(
                 ticker, name, buy_price, qty, source,
                 stop_loss_price=stop_loss_price,
                 market_env=market_env,
+                sector=sector,
             )
         )
 

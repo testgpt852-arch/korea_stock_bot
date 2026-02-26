@@ -121,13 +121,16 @@ def init_db() -> None:
             )
         """)
 
-        # ── 4. 오픈 포지션 (Phase 4, v3.4 신규 / v4.2 확장) ──
+        # ── 4. 오픈 포지션 (Phase 4, v3.4 신규 / v4.2 / v4.4 확장) ──
         # [v4.2] Trailing Stop 지원을 위해 3개 컬럼 추가:
         #   peak_price  — 진입 후 최고가. Trailing Stop 기준점.
         #   stop_loss   — 현재 손절가 (원). AI 제공값 or config 기본값에서 시작,
         #                  peak_price 갱신 시 자동 상향 (하향 불가).
         #   market_env  — 진입 시 시장 환경 ("강세장" / "약세장/횡보" / "").
         #                  Trailing Stop 비율 결정에 사용 (강세 0.92, 약세 0.95).
+        # [v4.4] 섹터 분산 체크 지원을 위해 1개 컬럼 추가:
+        #   sector      — 진입 종목의 섹터 (아침봇 price_data["by_sector"] 기반).
+        #                  동일 섹터 SECTOR_CONCENTRATION_MAX 초과 시 can_buy=False.
         c.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,7 +144,8 @@ def init_db() -> None:
                 mode            TEXT DEFAULT 'VTS',
                 peak_price      INTEGER DEFAULT 0,  -- [v4.2] 진입 후 최고가 (Trailing Stop 기준)
                 stop_loss       REAL,               -- [v4.2] 현재 손절가 (원, AI 제공 or 기본값)
-                market_env      TEXT DEFAULT ''     -- [v4.2] 진입 시 시장 환경
+                market_env      TEXT DEFAULT '',    -- [v4.2] 진입 시 시장 환경
+                sector          TEXT DEFAULT ''     -- [v4.4] 진입 종목 섹터 (섹터 분산 체크용)
             )
         """)
 
@@ -260,6 +264,8 @@ def init_db() -> None:
     _migrate_v42(db_path)
     # [v4.3] trading_journal 테이블 마이그레이션 (idempotent)
     _migrate_v43(db_path)
+    # [v4.4] positions.sector 컬럼 마이그레이션 (idempotent)
+    _migrate_v44(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -354,6 +360,31 @@ def _migrate_v43(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v4.3 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v44(db_path: str) -> None:
+    """
+    [v4.4 Phase 4] positions 테이블에 sector 컬럼 추가.
+    섹터 분산 체크 기능을 위해 진입 시 섹터 정보를 저장.
+    이미 존재하는 컬럼은 건너뜀 (idempotent — 여러 번 실행해도 안전).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(positions)")
+        existing_cols = {row[1] for row in c.fetchall()}
+
+        if "sector" not in existing_cols:
+            c.execute("ALTER TABLE positions ADD COLUMN sector TEXT DEFAULT ''")
+            conn.commit()
+            logger.info("[db] v4.4 마이그레이션 완료 — positions.sector 컬럼 추가")
+        else:
+            logger.info("[db] v4.4 마이그레이션 — 이미 최신 스키마")
+
+    except Exception as e:
+        logger.warning(f"[db] v4.4 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

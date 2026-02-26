@@ -101,8 +101,9 @@ async def run_principles_extraction():
 
 async def run_force_close():
     """
-    14:50 강제 청산 (Phase 4, v3.4)
-    미청산 포지션 전부 시장가 매도.
+    14:50 선택적 강제 청산 (Phase 4, v3.4 / v4.4 AI 기반 선택적 청산으로 업그레이드)
+    수익 유망 종목은 유지, 손실/중립 종목은 즉시 청산.
+    유지 종목은 15:20 final_close에서 최종 청산.
     AUTO_TRADE_ENABLED=false 이면 아무것도 하지 않음.
     """
     if not config.AUTO_TRADE_ENABLED:
@@ -116,7 +117,7 @@ async def run_force_close():
 
     closed_list = await loop.run_in_executor(None, force_close_all)
     if not closed_list:
-        logger.info("[main] 강제청산 — 미청산 포지션 없음")
+        logger.info("[main] 선택적 강제청산 — 즉시 청산 대상 없음 (또는 전종목 유지)")
         return
 
     for closed in closed_list:
@@ -126,7 +127,37 @@ async def run_force_close():
         except Exception as e:
             logger.warning(f"[main] 강제청산 알림 발송 실패: {e}")
 
-    logger.info(f"[main] 강제청산 완료 — {len(closed_list)}종목")
+    logger.info(f"[main] 선택적 강제청산 완료 — 즉시청산 {len(closed_list)}종목")
+
+
+async def run_final_close():
+    """
+    [v4.4 신규] 15:20 최종 청산 — 14:50 '유지' 판정 종목 최종 청산.
+    장 마감 10분 전으로 충분한 유동성 내 청산 가능.
+    AUTO_TRADE_ENABLED=false 이면 아무것도 하지 않음.
+    """
+    if not config.AUTO_TRADE_ENABLED:
+        return
+    if not is_market_open(get_today()):
+        return
+
+    loop = asyncio.get_event_loop()
+    from traders.position_manager import final_close_all
+    import notifiers.telegram_bot as telegram_bot
+
+    closed_list = await loop.run_in_executor(None, final_close_all)
+    if not closed_list:
+        logger.info("[main] 최종 청산 — 대상 없음 (이미 청산 완료)")
+        return
+
+    for closed in closed_list:
+        try:
+            msg = telegram_bot.format_trade_closed(closed)
+            await telegram_bot.send_async(msg)
+        except Exception as e:
+            logger.warning(f"[main] 최종청산 알림 발송 실패: {e}")
+
+    logger.info(f"[main] 최종 청산 완료 — {len(closed_list)}종목")
 
 
 async def start_realtime_bot():
@@ -201,8 +232,10 @@ async def main():
     # Phase 3: 주간 성과 리포트 — 매주 월요일 08:45 (아침봇 완료 후) (v3.3)
     scheduler.add_job(run_weekly_report, "cron", hour=8, minute=45, id="weekly_report")
 
-    # Phase 4: 강제 청산 — 14:50 (v3.4, AUTO_TRADE_ENABLED=true 시에만 의미 있음)
+    # Phase 4: 강제 청산 — 14:50 (v3.4 / v4.4 AI 선택적 청산으로 업그레이드)
     scheduler.add_job(run_force_close, "cron", hour=14, minute=50, id="force_close")
+    # Phase 4: 최종 청산 — 15:20 (v4.4 신규: 14:50 '유지' 종목 최종 청산)
+    scheduler.add_job(run_final_close, "cron", hour=15, minute=20, id="final_close")
     # v3.5 Phase 5: 매주 일요일 03:00 매매 원칙 추출 배치
     scheduler.add_job(
         run_principles_extraction, "cron",

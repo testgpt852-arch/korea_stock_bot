@@ -169,6 +169,13 @@ async def run() -> None:
         market_env = watchlist_state.determine_and_set_market_env(price_data)
         logger.info(f"[morning] 시장 환경 판단 완료: {market_env or '(미지정)'}")
 
+        # ── ⑩ 섹터 맵 저장 (v4.4 Phase 4 신규) ──────────────
+        # price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵 생성
+        # → 장중봇 can_buy() 섹터 분산 체크 + open_position() DB 기록에 활용
+        sector_map = _build_sector_map(price_data)
+        watchlist_state.set_sector_map(sector_map)
+        logger.info(f"[morning] 섹터 맵 저장 완료 — {len(sector_map)}종목")
+
         logger.info("[morning] 아침봇 완료 ✅")
 
     except Exception as e:
@@ -266,3 +273,36 @@ def _build_ws_watchlist(
         f"합계:{len(result)}/{_config.WS_WATCHLIST_MAX}"
     )
     return result
+
+
+def _build_sector_map(price_data: dict | None) -> dict[str, str]:
+    """
+    [v4.4 Phase 4] price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵 생성.
+    morning_report 에서 워치리스트 저장 직후 호출.
+    watchlist_state.set_sector_map() 에 저장 → 장중봇 섹터 분산 체크에 활용.
+
+    Args:
+        price_data: price_collector.collect_daily() 반환값.
+                    {"by_sector": {"섹터명": [{"종목명": str, "종목코드": str, ...}]}}
+
+    Returns:
+        {종목코드: 섹터명} — 예: {"005930": "반도체", "035420": "인터넷"}
+        price_data 없거나 by_sector 없으면 빈 dict 반환
+    """
+    if not price_data:
+        return {}
+
+    by_sector: dict[str, list] = price_data.get("by_sector", {})
+    if not by_sector:
+        return {}
+
+    sector_map: dict[str, str] = {}
+    for sector_name, stocks in by_sector.items():
+        if not isinstance(stocks, list):
+            continue
+        for stock in stocks:
+            code = stock.get("종목코드", "")
+            if code and len(code) == 6:
+                sector_map[code] = sector_name
+
+    return sector_map

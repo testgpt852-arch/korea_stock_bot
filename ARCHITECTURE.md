@@ -118,6 +118,8 @@ korea_stock_bot/
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
     └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록 [v4.2 Phase 2: Trailing Stop]
+                                [v4.4 Phase 4: 섹터 분산, 동적 POSITION_MAX, 강화된 손실 한도,
+                                               AI 선택적 강제청산, final_close_all 신규]
 ```
 
 ---
@@ -156,12 +158,23 @@ traders/position_manager.py → tracking/db_schema (get_conn)
 traders/position_manager.py → kis/order_client (buy, sell, get_current_price)
 traders/position_manager.py → notifiers/telegram_bot (format_trade_executed, format_trade_closed)
 traders/position_manager.py ← reports/realtime_alert (can_buy, open_position, check_exit)
-traders/position_manager.py ← main.py (force_close_all 14:50 cron)
+traders/position_manager.py ← main.py (force_close_all 14:50 / final_close_all 15:20)  ← v4.4 추가
 traders/position_manager.py ← tracking/performance_tracker (update_trailing_stops)  ← v4.2 추가
                               [v4.2] can_buy(ai_result, market_env): R/R 필터 적용
                               [v4.2] open_position(stop_loss_price, market_env): Trailing Stop 초기화
                               [v4.2] check_exit(): Trailing Stop 포함 (peak_price × 0.92/0.95)
                               [v4.2] update_trailing_stops(): 18:45 배치에서 종가 기준 일괄 갱신
+                              [v4.4] can_buy(): 섹터 집중 체크(SECTOR_CONCENTRATION_MAX) 추가
+                              [v4.4] can_buy(): 동적 POSITION_MAX (강세장 5/횡보 3/약세장 2)
+                              [v4.4] can_buy(): 미실현 손익 포함 당일 손실 한도 강화
+                              [v4.4] open_position(sector): 섹터 파라미터 추가
+                              [v4.4] force_close_all(): AI 선택적 청산 (유망 종목 유지)
+                              [v4.4] final_close_all(): 15:20 최종 청산 (유지 종목)
+                              [v4.4] get_effective_position_max(market_env): 동적 POSITION_MAX
+utils/watchlist_state.py      ← morning_report (set_sector_map)  ← v4.4 추가
+                               ← realtime_alert (get_sector)    ← v4.4 추가
+tracking/ai_context.py         → _get_portfolio_context(): 오픈 포지션 현황 → AI 프롬프트 주입  ← v4.4
+analyzers/ai_analyzer.py       → analyze_selective_close(positions, market_env): 선택적 청산 판단  ← v4.4
 tracking/db_schema.py             → tracking/alert_recorder, tracking/performance_tracker
 tracking/alert_recorder.py        ← reports/realtime_alert (유일 호출처)
 tracking/performance_tracker.py   ← main.py (18:45 cron), reports/weekly_report
@@ -321,12 +334,24 @@ graph TD
        → win_rate >= 65% → confidence='high' (AI 프롬프트 주입 대상)
        → 텔레그램 원칙 DB 업데이트 요약 알림
 
-14:50  ─── 강제청산 (Phase 4, v3.4) ─────────────────────────
+14:50  ─── 선택적 강제청산 (Phase 4, v3.4 / v4.4 AI 선택적 청산으로 업그레이드) ──
        AUTO_TRADE_ENABLED=true 일 때만 실행
        position_manager.force_close_all()
-       → positions 테이블에서 미청산 전종목 시장가 매도
-       → trading_history UPDATE (close_reason="force_close")
-       → 텔레그램 청산 알림 발송
+       → 각 포지션 현재가 조회 + 수익률 계산
+       → ai_analyzer.analyze_selective_close() AI 판단:
+         · profit >= SELECTIVE_CLOSE_PROFIT_THRESHOLD(3%) → 사전 필터: 유지
+         · profit <= STOP_LOSS(-3%) → 사전 필터: 청산
+         · 중간 수익률 → Gemma AI가 모멘텀 지속 여부 판단 (청산/유지)
+       → "청산" 종목: 즉시 시장가 매도 + 텔레그램 알림 (close_reason="force_close")
+       → "유지" 종목: _deferred_close_list 등록 → 15:20 final_close 대기
+       → AI 실패 시 rule-based fallback (수익>0 → 유지, 손실 → 청산)
+
+15:20  ─── 최종 청산 (Phase 4, v4.4 신규) ──────────────────────────────
+       AUTO_TRADE_ENABLED=true 일 때만 실행
+       position_manager.final_close_all()
+       → _deferred_close_list 꺼내기 (14:50 유지 판정 종목)
+       → 폴링에서 이미 청산된 종목 자동 스킵 (positions 존재 여부 확인)
+       → 잔여 종목 시장가 매도 + 텔레그램 알림 (close_reason="final_close")
 
 15:30  ─── 장중봇 종료 ──────────────────────────────────────
        _poll_task.cancel()
@@ -419,7 +444,7 @@ KIS_VTS_APP_KEY      = ...            # 환경변수 (없으면 KIS_APP_KEY 폴�
 KIS_VTS_APP_SECRET   = ...            # 환경변수 (없으면 KIS_APP_SECRET 폴백)
 KIS_VTS_ACCOUNT_NO   = ...            # 환경변수 (없으면 KIS_ACCOUNT_NO 폴백)
 KIS_VTS_ACCOUNT_CODE = "01"
-POSITION_MAX         = 3              # 동시 보유 한도 (환경변수 POSITION_MAX)
+POSITION_MAX         = 3              # 동시 보유 한도 기본값 (환경변수 POSITION_MAX)
 POSITION_BUY_AMOUNT  = 1_000_000      # 1회 매수 금액 원 (환경변수 POSITION_BUY_AMOUNT)
 TAKE_PROFIT_1        = 5.0            # 1차 익절 기준 (%)
 TAKE_PROFIT_2        = 10.0           # 2차 익절 기준 (%)
@@ -427,7 +452,14 @@ STOP_LOSS            = -3.0           # 손절 기준 (%)
 DAILY_LOSS_LIMIT     = -3.0           # 당일 누적 손실 한도 (%)
 MIN_ENTRY_CHANGE     = 3.0            # 매수 진입 최소 등락률 (%)
 MAX_ENTRY_CHANGE     = 10.0           # 추격 금지 상한 등락률 (%)
-FORCE_CLOSE_TIME     = "14:50"        # 강제 청산 시각
+FORCE_CLOSE_TIME     = "14:50"        # 선택적 강제 청산 시각
+
+# v4.4: Phase 4 포트폴리오 인텔리전스 설정
+POSITION_MAX_BULL    = 5              # 강세장 최대 보유 종목 (환경변수 POSITION_MAX_BULL)
+POSITION_MAX_NEUTRAL = 3              # 횡보장 최대 보유 종목 (환경변수 POSITION_MAX_NEUTRAL)
+POSITION_MAX_BEAR    = 2              # 약세장 최대 보유 종목 (환경변수 POSITION_MAX_BEAR)
+SECTOR_CONCENTRATION_MAX = 2          # 동일 섹터 최대 보유 종목 (환경변수 SECTOR_CONCENTRATION_MAX)
+SELECTIVE_CLOSE_PROFIT_THRESHOLD = 3.0  # 선택적 청산 시 유지 기준 수익률 (%)
 
 # v4.0: 소~중형주 필터 + 호가 분석
 VOLUME_RANK_KOSPI_SIZE_CLS = ["2", "3"]  # 거래량순위 코스피 규모구분 (중형+소형)
@@ -623,6 +655,26 @@ gemini-2.5-flash   20회/일   ❌ 부족
     journal 패턴은 기존 원칙 보강에만 사용 (신규 INSERT 금지 — 트리거 집계 역할 유지)
 51. trading_journal 테이블: position_manager만 INSERT, 다른 모듈은 SELECT 전용
     외부에서 직접 UPDATE / DELETE 절대 금지
+
+[Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
+52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
+    watchlist_state.get_sector()로 조회 — 아침봇 미실행 시 "" (빈 문자열) 허용
+53. 섹터 분산 체크(SECTOR_CONCENTRATION_MAX)는 can_buy()에서만 수행
+    realtime_alert 에서 직접 섹터 체크 금지 — position_manager 경유 필수
+54. get_effective_position_max()는 can_buy() 내부에서만 POSITION_MAX 대신 사용
+    config.POSITION_MAX 직접 참조 금지 (can_buy 내부) — 동적 조정 무효화 방지
+55. force_close_all()의 AI 판단 실패 시 반드시 rule-based fallback 실행
+    AI 오류로 청산 누락 시 미결 포지션 발생 — 비치명적 처리 필수
+56. _deferred_close_list는 force_close_all() → _register_deferred_close() 경로로만 등록
+    외부에서 직접 _deferred_close_list 조작 금지
+57. final_close_all()은 main.py 15:20 cron에서만 호출
+    장중 직접 호출 금지 — 유동성 있는 15:20 이전 청산 원칙 준수
+58. _calc_unrealized_pnl()은 KIS API 실패 시 0 반환 (비치명적)
+    KIS 조회 실패가 can_buy() 차단으로 이어지지 않도록 예외 처리 필수
+59. _get_portfolio_context()는 ai_context.build_spike_context() 내부에서만 호출
+    외부에서 직접 호출 금지 — ai_context 경유 필수 (규칙 #29 준수)
+60. analyze_selective_close()는 position_manager.force_close_all() 에서만 호출
+    AI API 호출이 포함되므로 장중 폴링 루프에서 직접 호출 금지
 
 [Phase 2 Trailing Stop & 매매전략 규칙 — v4.2 추가]
 39. positions 테이블 peak_price / stop_loss / market_env 컬럼은 position_manager만 관리
@@ -824,6 +876,44 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | - weekly_patterns 파라미터 추가 (선택, 하위 호환) |
 |      |            | - 🧠 이번 주 학습한 패턴 Top5 섹션 추가 (태그·빈도·승률·교훈샘플) |
 |      |            | 절대 금지 규칙 45~51 추가 (Phase 3 거래 일지 규칙) |
+| v4.4 | 2026-02-26 | **Phase 4 — 포트폴리오 인텔리전스 강화 (Prism portfolio_intelligence 경량화)** |
+|      |            | config.py: Phase 4 상수 추가 |
+|      |            | - POSITION_MAX_BULL(5) / POSITION_MAX_NEUTRAL(3) / POSITION_MAX_BEAR(2) |
+|      |            | - SECTOR_CONCENTRATION_MAX(2): 동일 섹터 최대 보유 종목 한도 |
+|      |            | - SELECTIVE_CLOSE_PROFIT_THRESHOLD(3.0): 선택적 청산 유지 기준 수익률 |
+|      |            | tracking/db_schema.py: positions.sector 컬럼 추가 |
+|      |            | - _migrate_v44(): 기존 DB 자동 마이그레이션 (idempotent) |
+|      |            | utils/watchlist_state.py: 섹터 맵 기능 추가 |
+|      |            | - set_sector_map() / get_sector() / get_sector_map() 신규 |
+|      |            | - clear(): _sector_map도 함께 초기화 |
+|      |            | reports/morning_report.py: 섹터 맵 빌드 + 저장 단계(⑩) 추가 |
+|      |            | - _build_sector_map(price_data): by_sector → {코드:섹터} 역방향 맵 |
+|      |            | - watchlist_state.set_sector_map() 호출 |
+|      |            | traders/position_manager.py: 포트폴리오 인텔리전스 전면 강화 |
+|      |            | - get_effective_position_max(market_env): 동적 POSITION_MAX (강세 5/횡보 3/약세 2) |
+|      |            | - can_buy(): 섹터 집중 체크 추가 (동일 섹터 2종목 초과 시 차단) |
+|      |            | - can_buy(): 동적 POSITION_MAX 적용 (get_effective_position_max) |
+|      |            | - can_buy(): 미실현 손익(_calc_unrealized_pnl) 포함 당일 손실 한도 강화 |
+|      |            | - open_position(sector): sector 파라미터 추가 → positions.sector 기록 |
+|      |            | - force_close_all(): AI 선택적 청산으로 전면 업그레이드 |
+|      |            |   analyze_selective_close() → 청산/유지 판단 → 유지 종목 deferred 등록 |
+|      |            | - final_close_all(): 15:20 최종 청산 (14:50 유지 종목) 신규 |
+|      |            | - _register_deferred_close() / _pop_deferred_close(): 유지 종목 레지스트리 |
+|      |            | - _calc_unrealized_pnl(): 미실현 손익 계산 헬퍼 (비치명적) |
+|      |            | tracking/ai_context.py: 포트폴리오 현황 컨텍스트 추가 |
+|      |            | - _get_portfolio_context(): 오픈 포지션 현황 → AI 프롬프트 주입 |
+|      |            |   보유 종목·섹터·총 노출도·미실현 P&L → AI가 집중 위험 인식 가능 |
+|      |            | analyzers/ai_analyzer.py: 선택적 청산 판단 추가 |
+|      |            | - analyze_selective_close(positions, market_env): 청산/유지 AI 판단 |
+|      |            |   rule-based 사전 필터 → Gemma AI → fallback 3단계 구조 |
+|      |            | - _build_selective_close_prompt(): 청산 판단 프롬프트 생성 |
+|      |            | reports/realtime_alert.py: sector 파라미터 흐름 연동 |
+|      |            | - _send_ai_followup(): watchlist_state.get_sector() 조회 후 sector 추출 |
+|      |            | - _handle_trade_signal(sector): sector 파라미터 추가 → open_position 전달 |
+|      |            | main.py: 15:20 final_close 스케줄 추가 |
+|      |            | - run_final_close(): 14:50 유지 종목 최종 청산 |
+|      |            | - scheduler.add_job(run_final_close, cron, 15:20) |
+|      |            | 절대 금지 규칙 52~60 추가 (Phase 4 포트폴리오 인텔리전스 규칙) |
 |      |            | tracking/db_schema.py: positions 테이블 3개 컬럼 추가 (peak_price, stop_loss, market_env) |
 |      |            | _migrate_v42(): 기존 DB 자동 마이그레이션 (idempotent, ALTER TABLE) |
 |      |            | traders/position_manager.py: Trailing Stop 전면 구현 |
