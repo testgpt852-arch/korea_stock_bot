@@ -32,6 +32,7 @@ auth.py → websocket_client
 
 import asyncio
 import json
+from typing import Callable, Optional
 import websockets
 from utils.logger import logger
 from kis.auth import get_access_token
@@ -183,8 +184,8 @@ class KISWebSocketClient:
 
     # ── 6. 데이터 수신 루프 ───────────────────────────────────
 
-    async def receive_loop(self, on_tick: callable,
-                           on_orderbook: callable | None = None) -> None:
+    async def receive_loop(self, on_tick: Callable,
+                           on_orderbook: Optional[Callable] = None) -> None:
         """
         실시간 데이터 수신 루프
         on_tick(parsed_tick: dict)           → 체결(H0STCNT0) 콜백
