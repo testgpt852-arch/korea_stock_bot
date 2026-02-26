@@ -77,7 +77,9 @@ def can_buy(ticker: str) -> tuple[bool, str]:
             return False, f"동시 보유 한도 초과 ({current_count}/{config.POSITION_MAX})"
 
         # ③ 당일 손실 한도 초과 여부
-        today_str = datetime.now(KST).strftime("%Y%m%d")
+        # [v3.5 버그 수정] DATE(buy_time) 은 "2026-02-26" 형식 반환
+        # 기존 strftime("%Y%m%d") = "20260226" 과 불일치 → 항상 0 조회 → 손실 한도 무력화
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")  # YYYY-MM-DD 형식 통일
         c.execute("""
             SELECT SUM(profit_amount) FROM trading_history
             WHERE DATE(buy_time) = ? AND mode = ? AND sell_time IS NOT NULL
