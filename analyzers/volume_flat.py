@@ -29,6 +29,7 @@ volume_flat → utils/watchlist_state (선택적 저장 — 내일 워치리스�
 
 from datetime import datetime, timedelta
 from utils.logger import logger
+from utils.date_utils import get_prev_trading_day  # v3.2 수정: 영업일 보장
 from pykrx import stock as pykrx_stock
 import config
 
@@ -113,5 +114,16 @@ def analyze(date_str: str, top_n: int = None) -> list[dict]:
 
 
 def _get_prev_date(date_str: str) -> str:
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    return (dt - timedelta(days=1)).strftime("%Y%m%d")
+    """
+    YYYYMMDD 기준 직전 영업일 반환 (주말 대응)
+
+    [v3.2 버그 수정]
+    기존: timedelta(days=1) → 월요일이면 일요일 반환 → pykrx 빈 DataFrame
+    → volume_flat: 시장 전체 스킵 발생
+    수정: get_prev_trading_day()로 실제 직전 영업일 계산
+    """
+    dt   = datetime.strptime(date_str, "%Y%m%d")
+    prev = get_prev_trading_day(dt)
+    if prev is None:
+        prev = dt - timedelta(days=1)
+    return prev.strftime("%Y%m%d")
