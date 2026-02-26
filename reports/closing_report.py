@@ -4,13 +4,18 @@ reports/closing_report.py
 
 [ARCHITECTURE 의존성]
 closing_report → price_collector, theme_analyzer, ai_analyzer, telegram_bot
+closing_report → closing_strength, volume_flat, fund_inflow_analyzer  ← v3.2 T5/T6/T3
 수정 시 이 파일만 수정 (나머지 건드리지 않음)
 
 [실행 흐름]
 ① price_collector  → 전종목 등락률 + 기관/공매도
 ② ai_analyzer      → 테마 그룹핑 + 소외주 식별 (v6.0 #5·#6 자동화)
 ③ theme_analyzer   → 소외도 수치 계산 (ai_analyzer 결과 활용)
-④ telegram_bot     → 발송
+④ closing_strength → T5 마감 강도 상위 종목 (v3.2)
+   volume_flat     → T6 횡보 거래량 급증 종목 (v3.2)
+   fund_inflow_analyzer → T3 시총 대비 자금유입 종목 (v3.2)
+   _update_watchlist_from_closing() → 내일 WebSocket 워치리스트 보강 (v3.2)
+⑤ telegram_bot     → 발송 (T3/T5/T6 섹션 포함)
 """
 
 from datetime import datetime
@@ -65,22 +70,54 @@ async def run() -> None:
         logger.info("[closing] 순환매 소외도 계산 중...")
         theme_result = theme_analyzer.analyze(signal_result, price_result["by_name"])
 
-        # ── 4. 보고서 조립 ─────────────────────────────────────
+        # ── 4. T5/T6/T3 트리거 분석 (v3.2 — 이전에 dead code였던 호출 복원) ──
+        # price_collector 이후 같은 날짜 기준으로 각 분석기 실행
+        target_ymd = target.strftime("%Y%m%d")
+
+        logger.info("[closing] T5 마감 강도 분석 중...")
+        try:
+            cs_result = closing_strength.analyze(target_ymd)
+        except Exception as _e:
+            logger.warning(f"[closing] T5 분석 실패: {_e}")
+            cs_result = []
+
+        logger.info("[closing] T6 횡보 거래량 급증 분석 중...")
+        try:
+            vf_result = volume_flat.analyze(target_ymd)
+        except Exception as _e:
+            logger.warning(f"[closing] T6 분석 실패: {_e}")
+            vf_result = []
+
+        logger.info("[closing] T3 시총 대비 자금 유입 분석 중...")
+        try:
+            fi_result = fund_inflow_analyzer.analyze(target_ymd)
+        except Exception as _e:
+            logger.warning(f"[closing] T3 분석 실패: {_e}")
+            fi_result = []
+
+        # 내일 WebSocket 워치리스트에 T5/T6 종목 추가
+        _update_watchlist_from_closing(cs_result, vf_result, price_result)
+
+        # ── 5. 보고서 조립 ─────────────────────────────────────
         report = {
-            "today_str":     today_str,
-            "target_str":    target_str,
-            "kospi":         price_result.get("kospi",         {}),
-            "kosdaq":        price_result.get("kosdaq",        {}),
-            "upper_limit":   price_result.get("upper_limit",   []),
-            "top_gainers":   price_result.get("top_gainers",   []),
-            "top_losers":    price_result.get("top_losers",    []),
-            "institutional": price_result.get("institutional", []),
-            "short_selling": price_result.get("short_selling", []),
-            "theme_map":     theme_result.get("theme_map",     []),
-            "volatility":    signal_result["volatility"],
+            "today_str":        today_str,
+            "target_str":       target_str,
+            "kospi":            price_result.get("kospi",         {}),
+            "kosdaq":           price_result.get("kosdaq",        {}),
+            "upper_limit":      price_result.get("upper_limit",   []),
+            "top_gainers":      price_result.get("top_gainers",   []),
+            "top_losers":       price_result.get("top_losers",    []),
+            "institutional":    price_result.get("institutional", []),
+            "short_selling":    price_result.get("short_selling", []),
+            "theme_map":        theme_result.get("theme_map",     []),
+            "volatility":       signal_result["volatility"],
+            # v3.2: T5/T6/T3 트리거 결과 (telegram_bot.format_closing_report 에서 사용)
+            "closing_strength": cs_result,
+            "volume_flat":      vf_result,
+            "fund_inflow":      fi_result,
         }
 
-        # ── 5. 텔레그램 발송 ───────────────────────────────────
+        # ── 6. 텔레그램 발송 ───────────────────────────────────
         logger.info("[closing] 텔레그램 발송 중...")
         message = telegram_bot.format_closing_report(report)
         await telegram_bot.send_async(message)
