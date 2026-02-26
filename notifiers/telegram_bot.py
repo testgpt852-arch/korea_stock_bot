@@ -426,10 +426,11 @@ def format_realtime_alert(analysis: dict) -> str:
     return (
         f"🚨 <b>급등 감지</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
-        f"등락률: +{analysis['등락률']:.1f}%  <b>(순간 +{직전대비:.1f}%)</b>\n"
-        f"{rvol_line}\n"
-        f"{ob_line}"
-        f"감지: {analysis['감지시각']}"
+        f"등락률: +{analysis['등락률']:.1f}%"
+        + (f"  <b>(순간 +{직전대비:.1f}%)</b>" if 직전대비 > 0 else "") + "\n"
+        + f"{rvol_line}\n"
+        + f"{ob_line}"
+        + f"감지: {analysis['감지시각']}"
     )
 
 
@@ -464,11 +465,12 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
     return (
         f"🚨 <b>급등 감지 + AI 분석</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
-        f"등락률: +{analysis['등락률']:.1f}%  <b>(순간 +{직전대비:.1f}%)</b>\n"
-        f"{rvol_line}\n"
-        f"{ob_line}\n"
-        f"{이모지} AI 판단: <b>{판단}</b>\n"
-        f"이유: {ai_result.get('이유', 'N/A')}"
+        f"등락률: +{analysis['등락률']:.1f}%"
+        + (f"  <b>(순간 +{직전대비:.1f}%)</b>" if 직전대비 > 0 else "") + "\n"
+        + f"{rvol_line}\n"
+        + f"{ob_line}\n"
+        + f"{이모지} AI 판단: <b>{판단}</b>\n"
+        + f"이유: {ai_result.get('이유', 'N/A')}"
     )
 
 
