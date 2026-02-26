@@ -38,7 +38,18 @@ from utils.logger import logger
 from kis.auth import get_access_token
 import config
 
-_WS_URL = "ws://ops.koreainvestment.com:21000"
+# [v8.0 버그수정] TRADING_MODE에 따라 WebSocket URL 동적 분기
+# 기존 단일 _WS_URL = "ws://ops.koreainvestment.com:21000" (실전 고정) → 오류
+# KIS 공식 스펙:
+#   실전(REAL): ws://ops.koreainvestment.com:21000
+#   모의(VTS):  ws://ops.koreainvestment.com:31000
+_WS_URL_REAL = "ws://ops.koreainvestment.com:21000"
+_WS_URL_VTS  = "ws://ops.koreainvestment.com:31000"
+
+
+def _get_ws_url() -> str:
+    """TRADING_MODE에 따라 VTS 또는 REAL WebSocket URL 반환 (v8.0 신규)"""
+    return _WS_URL_VTS if config.TRADING_MODE == "VTS" else _WS_URL_REAL
 
 
 class KISWebSocketClient:
@@ -68,8 +79,10 @@ class KISWebSocketClient:
             return
 
         try:
+            ws_url = _get_ws_url()   # [v8.0] VTS/REAL 동적 분기
+            logger.info(f"[ws] WebSocket 연결 시도: {ws_url} (모드: {config.TRADING_MODE})")
             self._ws = await websockets.connect(
-                _WS_URL,
+                ws_url,
                 ping_interval=20,
                 ping_timeout=10,
             )

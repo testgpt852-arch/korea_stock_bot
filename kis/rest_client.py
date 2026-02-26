@@ -71,6 +71,7 @@ def get_stock_price(ticker: str) -> dict:
         resp.raise_for_status()
         out = resp.json().get("output", {})
         return {
+            "종목명": out.get("hts_kor_isnm", ""),   # [v8.0 신규] 종목명 추가 (telegram_interactive /report, /evaluate 사용)
             "현재가": int(out.get("stck_prpr", 0)),
             "시가":   int(out.get("stck_oprc", 0)),
             "등락률": float(out.get("prdy_ctrt", 0)),

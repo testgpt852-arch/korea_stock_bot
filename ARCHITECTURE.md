@@ -594,6 +594,9 @@ FUND_INFLOW_TOP_N      = 7
 tr_id            함수명                   용도
 ─────────────────────────────────────────────────
 FHKST01010100    get_stock_price()        단일 종목 현재가
+                                          반환: {종목명, 현재가, 시가, 등락률, 거래량}
+                                          [v8.0] 종목명(hts_kor_isnm) 추가
+                                          → telegram_interactive /report·/evaluate 사용
 FHKST01010200    get_orderbook()          호가잔량 조회 (v4.0 신규)
 FHPST01710000    get_volume_ranking()     거래량 순위 (v4.1: poll_all_markets에서 제거됨 — 대형주 노이즈)
 FHPST01700000    get_rate_ranking()       등락률 순위 (v2.9 신규 / v3.0 개편)
@@ -766,6 +769,18 @@ gemini-2.5-flash   20회/일   ❌ 부족
     [v7.0 수정] watchlist_state.get_kospi_level()로 현재 레벨 읽어 current_kospi에 전달
     아침봇 미실행(레벨=0.0) 시 current_kospi=None으로 전체 Top3 폴백
     데이터 없으면 "" 반환 — AI 프롬프트에서 컨텍스트 없으면 기존 방식으로 판단
+
+[v8.0 버그수정 규칙 — 2026-02-27]
+76. kis/websocket_client.py WebSocket URL은 반드시 _get_ws_url() 경유
+    _WS_URL_REAL/_WS_URL_VTS 상수 직접 사용 금지 — TRADING_MODE 기반 자동 분기 필수
+    TRADING_MODE=VTS → 31000 포트 / REAL → 21000 포트
+77. rest_client.get_stock_price() 반환값에 "종목명" 포함 (v8.0 추가)
+    의존 모듈: telegram_interactive._cmd_evaluate_ticker / _run_report_analysis
+    반환값 키 변경 시 이 두 함수도 반드시 동시 수정 (규칙 #7 준수)
+78. telegram_interactive에서 종목명 조회는 rest_client.get_stock_price() 경유
+    order_client.get_current_price()는 주문·잔고용 — "종목명" 반환 안 함, 혼용 금지
+79. run_memory_compression은 main.py scheduler에서만 호출 (일요일 03:30 cron)
+    함수 정의 추가 시 반드시 scheduler.add_job()도 함께 등록 (누락 방지)
 
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
 52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
@@ -1256,3 +1271,74 @@ EVALUATE_CONV_TIMEOUT_SEC=120     # /evaluate 대화 타임아웃 (초)
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*
+
+---
+
+## 🛠️ v8.0 버그수정 내역 (2026-02-27)
+
+### 수정된 파일 및 변경 내용
+
+| 파일 | 버그 | 수정 내용 |
+|---|---|---|
+| `main.py` | `run_memory_compression` 스케줄 누락 | `scheduler.add_job(run_memory_compression, cron, 일요일 03:30)` 추가 |
+| `main.py` | 아침봇 로그 오타 `07:59` | `07:30`으로 수정 |
+| `kis/websocket_client.py` | WebSocket URL 실전 하드코딩 | `_get_ws_url()` 추가, TRADING_MODE 기반 VTS/REAL 분기 |
+| `kis/rest_client.py` | `get_stock_price()` 반환값에 `종목명` 누락 | `hts_kor_isnm` 파싱 추가 → `/report`, `/evaluate` 정상 표시 |
+| `notifiers/telegram_interactive.py` | `/evaluate`: `order_client.get_current_price()` 에 `종목명` 없음 | `rest_client.get_stock_price()` 로 교체 |
+| `notifiers/telegram_interactive.py` | `/report`: `kis_data.get('누적거래량')` → 키 불일치로 항상 0 | `'거래량'`으로 수정 |
+| `notifiers/telegram_interactive.py` | `_EVAL_CANCEL = -1` 사용 전 정의 순서 혼란 | 상태값 그룹 최상단으로 이동 |
+
+### WebSocket URL 분기 규칙 (v8.0 추가)
+
+```python
+# kis/websocket_client.py
+_WS_URL_REAL = "ws://ops.koreainvestment.com:21000"   # 실전
+_WS_URL_VTS  = "ws://ops.koreainvestment.com:31000"   # 모의투자
+
+def _get_ws_url() -> str:
+    return _WS_URL_VTS if config.TRADING_MODE == "VTS" else _WS_URL_REAL
+```
+
+### `get_stock_price()` 반환값 계약 갱신 (v8.0)
+
+```python
+# rest_client.get_stock_price(ticker) → dict  [v8.0: 종목명 추가]
+{
+    "종목명": str,    # [v8.0 신규] hts_kor_isnm — telegram_interactive /report·/evaluate 사용
+    "현재가": int,
+    "시가":   int,
+    "등락률": float,
+    "거래량": int,
+}
+```
+
+---
+
+## 🔧 Railway Variables 설정 가이드
+
+### 자동매매 사용 안 함 (기본 — 모니터링만)
+별도 설정 불필요. `AUTO_TRADE_ENABLED`는 기본값 `false`.
+
+### 모의투자(VTS) 자동매매 활성화
+Railway 대시보드 → 프로젝트 → Variables 탭에서 추가:
+
+```
+AUTO_TRADE_ENABLED=true
+TRADING_MODE=VTS
+POSITION_BUY_AMOUNT=1000000      # 1회 매수 금액 (원, 기본 100만)
+POSITION_MAX=3                   # 최대 동시 보유 종목 수
+
+# KIS 모의투자 전용 앱키 (실전 키와 다를 경우 반드시 별도 설정)
+# 동일하면 생략 가능 — KIS_APP_KEY/SECRET으로 자동 폴백
+KIS_VTS_APP_KEY=발급받은_모의투자_앱키
+KIS_VTS_APP_SECRET=발급받은_모의투자_앱시크릿
+KIS_VTS_ACCOUNT_NO=모의투자_계좌번호(예:50123456789)
+```
+
+### 실전 자동매매 (⚠️ 극주의)
+```
+AUTO_TRADE_ENABLED=true
+TRADING_MODE=REAL
+# → 봇 시작 시 텔레그램으로 5분 대기 경고 발송됨 (REAL_MODE_CONFIRM_ENABLED=true 기본)
+# → 5분 안에 취소하려면 Railway 재배포 또는 TRADING_MODE=VTS 변경
+```

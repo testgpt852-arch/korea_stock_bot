@@ -326,9 +326,18 @@ async def main():
         id="principles_extract"
     )
 
+    # [v8.0 버그수정] 기억 압축 배치 스케줄 누락 수정
+    # v6.0에서 run_memory_compression 함수는 정의됐으나 scheduler.add_job이 누락됨
+    # → 매주 일요일 03:30 등록 (원칙 추출 03:00 완료 후 30분 여유)
+    scheduler.add_job(
+        run_memory_compression, "cron",
+        day_of_week="sun", hour=3, minute=30,
+        id="memory_compress"
+    )
+
     scheduler.start()
     logger.info("스케줄 등록 완료")
-    logger.info("  아침봇: 매일 08:30 / 07:59")
+    logger.info("  아침봇: 매일 08:30 / 07:30")
     logger.info("  장중봇: 매일 09:00~15:30 (KIS REST 폴링)")
     logger.info("  마감봇: 매일 18:30")
     logger.info("  수익률배치: 매일 18:45 (Phase 3)")

@@ -39,6 +39,14 @@ telegram_interactive ← main.py (start_interactive_handler 호출)
 - v5.0: Phase 5 신규
 - v6.0: /evaluate 명령어 추가 (P2, Prism 경량화)
 - v7.0: /report 명령어 추가 (Priority2, Prism /report 경량화)
+- v8.0: [버그수정]
+        _EVAL_CANCEL = -1 정의 위치를 상태값 그룹 최상단으로 이동 (구조 명확화)
+        _cmd_evaluate_ticker: order_client.get_current_price() → rest_client.get_stock_price()
+          기존: order_client 반환값에 "종목명" 키 없음 → 항상 종목코드로 표시
+          수정: v8.0에서 rest_client.get_stock_price()에 "종목명" 필드 추가됨 → 이를 활용
+        _run_report_analysis: kis_data.get('누적거래량') → kis_data.get('거래량')
+          기존: rest_client.get_stock_price()는 "거래량" 키로 반환하는데 "누적거래량"을 참조 → 항상 0
+          수정: 실제 키명 "거래량"으로 수정
 """
 
 import asyncio
@@ -247,6 +255,10 @@ async def _cmd_principles(update, context) -> None:
 # ConversationHandler 상태값
 _EVAL_TICKER = 0   # 종목코드 입력 대기
 _EVAL_PRICE  = 1   # 평균매수가 입력 대기
+# [v8.0 버그수정] _EVAL_CANCEL 정의를 사용처(_cmd_evaluate_price)보다 앞으로 이동
+# 기존: _cmd_evaluate_price 함수 아래에 _EVAL_CANCEL = -1 정의 → 구조 혼란
+# 수정: 상태값 그룹 최상단에 함께 정의
+_EVAL_CANCEL = -1  # ConversationHandler.END 역할
 
 
 async def _cmd_evaluate_start(update, context) -> int:
@@ -282,12 +294,13 @@ async def _cmd_evaluate_ticker(update, context) -> int:
 
     ticker = ticker_input.zfill(6)
 
-    # 종목명 조회 시도
+    # [v8.0 버그수정] order_client.get_current_price()는 {"현재가", "등락률"}만 반환 → "종목명" 키 없음
+    # 수정: rest_client.get_stock_price()로 교체 → v8.0에서 "종목명"(hts_kor_isnm) 필드 추가됨
     stock_name = ticker
     try:
-        if config.AUTO_TRADE_ENABLED or config.KIS_APP_KEY:
-            from kis.order_client import get_current_price
-            price_info = get_current_price(ticker)
+        if config.KIS_APP_KEY:
+            from kis.rest_client import get_stock_price
+            price_info = get_stock_price(ticker)
             if price_info:
                 stock_name = price_info.get("종목명", ticker) or ticker
     except Exception:
@@ -303,8 +316,6 @@ async def _cmd_evaluate_ticker(update, context) -> int:
         parse_mode="HTML"
     )
     return _EVAL_PRICE
-
-
 async def _cmd_evaluate_price(update, context) -> int:
     """
     /evaluate — 3단계: 평균매수가 수신 → Gemma AI 분석 실행.
@@ -342,9 +353,6 @@ async def _cmd_evaluate_price(update, context) -> int:
         await update.message.reply_text("❌ 분석 중 오류가 발생했습니다.")
 
     return _EVAL_CANCEL  # ConversationHandler 종료
-
-
-_EVAL_CANCEL = -1  # ConversationHandler.END 역할
 
 
 async def _cmd_evaluate_cancel(update, context) -> int:
@@ -686,7 +694,7 @@ def _run_report_analysis(ticker: str, query: str) -> str:
             price_block = ohlcv_summary or (
                 f"현재가: {kis_data.get('현재가', 0):,}원  "
                 f"등락률: {kis_data.get('등락률', 0):+.1f}%  "
-                f"거래량: {kis_data.get('누적거래량', 0):,}주"
+                f"거래량: {kis_data.get('거래량', 0):,}주"  # [v8.0 버그수정] '누적거래량' → '거래량' (rest_client 실제 반환 키)
                 if kis_data else "가격 정보 없음"
             )
 
