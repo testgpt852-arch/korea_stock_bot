@@ -77,7 +77,7 @@ korea_stock_bot/
 │   ├── volume_analyzer.py        ← 장중 급등 감지 (KIS REST 실시간) + T2 갭상승
 │   ├── theme_analyzer.py         ← 테마 그룹핑, 순환매 소외도
 │   ├── signal_analyzer.py        ← 신호 1~5
-│   ├── ai_analyzer.py            ← Gemma-3-27b-it 2차 분석
+│   ├── ai_analyzer.py            ← Gemma-3-27b-it 2차 분석 [v4.2 Phase 1: 프롬프트 전면 강화]
 │   ├── closing_strength.py       ← [v3.2] T5 마감 강도 트리거 (마감봇용, pykrx)
 │   ├── volume_flat.py            ← [v3.2] T6 횡보 거래량 급증 (마감봇용, pykrx)
 │   └── fund_inflow_analyzer.py   ← [v3.2] T3 시총 대비 자금유입 (마감봇용, pykrx)
@@ -134,6 +134,8 @@ volume_analyzer.py        → realtime_alert
 theme_analyzer.py         → closing_report, morning_report
 signal_analyzer.py        → morning_report
 ai_analyzer.py            → morning_report (analyze_dart + analyze_closing v2.4), closing_report, realtime_alert
+                            [v4.2] market_env 파라미터: realtime_alert에서 선택적 주입
+                            [v4.2] 반환값 확장: target_price, stop_loss, risk_reward_ratio 추가
 telegram_bot.py           → morning_report, closing_report, realtime_alert
 kis/auth.py               → kis/rest_client, kis/websocket_client
 kis/rest_client.py        → volume_analyzer (거래량 순위 + 등락률 순위 + 시가 제공)
@@ -279,6 +281,13 @@ graph TD
            → trading_principles: confidence='high' 원칙 최대 3개
            → ai_analyzer.analyze_spike(analysis, ai_context=ctx) 에 주입
            → Gemma가 과거 데이터를 참고해 판단 정확도 향상
+           [v4.2 Phase 1 추가] AI 프롬프트 전면 강화:
+           → 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS (조건부 대기 금지)
+           → 손절 철칙 -7% 절대 + 예외 조건 5개 ALL 충족 시에만
+           → 강세장(R/R 1.2+) / 약세장(R/R 2.0+) 분기 전략
+           → 장중(09:00~15:20) vs 마감 후(15:30+) 데이터 신뢰도 자동 분기
+           → analyze_spike() 반환값: target_price, stop_loss, risk_reward_ratio 추가
+           → market_env 파라미터 추가 (선택적, 빈 문자열이면 AI가 맥락으로 판단)
 
            [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true + AI판단=='진짜급등' 시:
            등락률 3~10% 구간 필터 → position_manager.can_buy() 검사
@@ -442,7 +451,14 @@ FUND_INFLOW_TOP_N      = 7
  "institutional": list, "short_selling": list,
  "by_name": dict, "by_code": dict, "by_sector": dict}
 
-# order_client.buy() → dict
+# ai_analyzer.analyze_spike() → dict  [v4.2 확장]
+{
+    "판단": str,               # "진짜급등" | "작전주의심" | "판단불가"
+    "이유": str,               # 20자 이내 이유
+    "target_price": int|None,  # [v4.2] 추정 목표가 (원). 판단불가 시 None
+    "stop_loss": int|None,     # [v4.2] 권장 손절가 (원). 판단불가 시 None
+    "risk_reward_ratio": float|None  # [v4.2] 손익비 소수점 1자리. 판단불가 시 None
+}
 {"success": bool, "order_no": str|None, "ticker": str, "name": str,
  "qty": int, "buy_price": int, "total_amt": int, "mode": str, "message": str}
 
@@ -565,7 +581,17 @@ gemini-2.5-flash   20회/일   ❌ 부족
     main.py 매주 일요일 03:00 cron에서만 호출
     데이터 부족(total < 5건) 시 원칙 등록 건너뜀 — 신뢰도 없는 원칙 방지
 
-[아침봇 AI 순환매 규칙 — v3.6 추가]
+[Phase 1 벤치마킹 AI 강화 규칙 — v4.2 추가]
+35. analyze_spike() 의 market_env 파라미터는 realtime_alert에서 선택적으로 주입
+    "강세장" / "약세장" / "횡보" 포함 여부로 R/R 기준 자동 분기
+    빈 문자열 허용 — AI가 주어진 컨텍스트로 자체 판단 (하위 호환)
+36. analyze_spike() 반환값에 target_price / stop_loss / risk_reward_ratio 추가
+    판단불가 시 세 필드 모두 None 반환 — 호출처에서 None 체크 필수
+    telegram_bot.py에서 None 처리: 해당 필드는 표시 생략
+37. _get_market_time_context() 는 ai_analyzer.py 내부에서만 사용
+    외부에서 직접 호출 금지 — 프롬프트 주입 전용 내부 유틸
+38. AI 프롬프트에 윌리엄 오닐 인격 / SYSTEM CONSTRAINTS 블록은 유지 필수
+    향후 프롬프트 수정 시 해당 블록 삭제 금지 (판단 일관성의 핵심)
 31. ai_analyzer.analyze_closing()은 morning_report에서도 호출 가능 (v2.4~)
     → 전날 price_data를 전달해 신호4 제네릭 라벨을 실제 테마명으로 교체
     → T5/T6/T3 분석기(rule #16)와 달리 ai_analyzer는 양쪽 호출 허용
@@ -710,6 +736,21 @@ gemini-2.5-flash   20회/일   ❌ 부족
 | v3.8 | 2026-02-26 | **초기 급등 포착 & 뒷북 방지 — 장중봇 핵심 로직 개선** |
 | v4.0 | 2026-02-26 | **소~중형주 필터 + WebSocket 호가 분석 통합** |
 | v4.1 | 2026-02-26 | **장중봇 소스 단일화 — 거래량 순위 제거, 등락률 순위만 사용** |
+| v4.2 | 2026-02-26 | **Phase 1 벤치마킹 — AI 프롬프트 전면 강화 (Prism 흡수)** |
+|      |            | analyzers/ai_analyzer.py: analyze_spike() 프롬프트 전면 개편 |
+|      |            | - 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS 블록 추가 |
+|      |            | - 손절 철칙 -7% 절대 + 예외 조건 5개 ALL 충족 명시 |
+|      |            | - 강세장(R/R 1.2+) / 약세장/횡보(R/R 2.0+) 분기 전략 |
+|      |            | - market_env 파라미터 추가 (선택적, realtime_alert에서 주입 가능) |
+|      |            | - 장중(09:00~15:20) vs 마감 후(15:30+) 데이터 신뢰도 자동 분기 |
+|      |            | - 반환값 확장: target_price, stop_loss, risk_reward_ratio 필드 추가 |
+|      |            | analyzers/ai_analyzer.py: analyze_dart() 강화 |
+|      |            | - 시간 컨텍스트 주입 (_get_market_time_context 공통 함수) |
+|      |            | - 공시 유형별 판단 가이드 (수주/배당/자사주/유상증자/내부자) |
+|      |            | analyzers/ai_analyzer.py: _build_closing_prompt() 강화 |
+|      |            | - 시간 컨텍스트 주입 추가 |
+|      |            | 내부 유틸: _get_market_time_context() 신규 (KST 기준 장중/마감 후 판단) |
+|      |            | 절대 금지 규칙 35~38 추가 (Phase 1 AI 강화 규칙) |
 |      |            | analyzers/volume_analyzer.py: poll_all_markets()에서 get_volume_ranking() 호출 제거 |
 |      |            | 이유: 삼성전자·현대차 등 시총 대형주가 거래량 순위 상위에 항상 포함되어 |
 |      |            |   실질적 급등 신호가 아닌 노이즈 알림 다수 발생 |
