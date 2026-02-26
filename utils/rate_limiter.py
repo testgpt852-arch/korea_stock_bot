@@ -84,8 +84,14 @@ class RateLimiter:
 
 # ── 싱글톤 인스턴스 ───────────────────────────────────────────
 # kis/rest_client.py 에서 import해서 사용
-# 실전: 초당 19회 (config.KIS_RATE_LIMIT_REAL)
-kis_rate_limiter = RateLimiter(
-    rate=config.KIS_RATE_LIMIT_REAL,
-    period=1.0,
+#
+# [v3.2 버그 수정] 기존: 항상 REAL(19req/s) 고정
+# 수정: TRADING_MODE에 따라 VTS(2req/s) / REAL(19req/s) 동적 선택
+# → VTS 모의투자 모드에서 429 에러 방지
+_rate = (
+    config.KIS_RATE_LIMIT_VIRTUAL
+    if getattr(config, "TRADING_MODE", "VTS") == "VTS"
+    else config.KIS_RATE_LIMIT_REAL
 )
+kis_rate_limiter = RateLimiter(rate=_rate, period=1.0)
+logger.debug(f"[rate_limiter] 초기화: TRADING_MODE={getattr(config, 'TRADING_MODE', 'VTS')} → {_rate}req/s")
