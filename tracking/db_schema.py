@@ -1,7 +1,7 @@
 """
 tracking/db_schema.py
 SQLite DB 스키마 정의 + 초기화
-(Phase 3, v3.3 신규 / v3.4 / v3.5 / v4.2 / v4.3 Phase3 업데이트)
+(Phase 3, v3.3 신규 / v3.4 / v3.5 / v4.2 / v4.3 Phase3 업데이트 / v7.0 KOSPI 지수 레벨 학습)
 
 [역할]
 DDL(테이블·인덱스·뷰 생성) + init_db() + get_conn() 만 담당.
@@ -18,6 +18,9 @@ main.py 시작 시 init_db() 1회 호출.
   trading_journal        ← [v4.3 Phase3] 거래 완료 시 AI 회고 일지 (trading_journal 모듈)
                            Prism trading_journal_agent 기능 경량화 구현.
                            situation_analysis / judgment_evaluation / lessons / pattern_tags 포함.
+  kospi_index_stats      ← [v7.0 Priority3 신규] KOSPI/KOSDAQ 지수 레벨별 매매 승률 통계
+                           memory_compressor.update_index_stats()가 매주 배치 업데이트.
+                           kospi_range 기준 레벨별 승률을 AI 프롬프트에 주입 가능.
 
 [뷰]
   trigger_stats          ← 트리거별 7일 승률 집계 (weekly_report 조회용)
@@ -202,7 +205,31 @@ def init_db() -> None:
             )
         """)
 
-        # ── 6. 트리거별 승률 뷰 ────────────────────────────────
+        # ── 6. KOSPI 지수 레벨별 승률 통계 [v7.0 Priority3 신규] ───────
+        # Prism memory_compressor_agent의 지수 변곡점 분석 기능 경량화 구현.
+        # 매매 청산 후 당시 KOSPI 레벨을 기록하고 레벨별 승률을 집계.
+        # 예: "KOSPI 2400~2600: 승률 72%, 평균수익 +4.3%"
+        # → memory_compressor.update_index_stats() 가 매주 배치 업데이트.
+        # → ai_context.py 가 AI 프롬프트에 주입 (buy_at_kospi 레벨 참고용).
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS kospi_index_stats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date      TEXT    NOT NULL,   -- YYYY-MM-DD (마지막 집계 기준일)
+                kospi_level     INTEGER NOT NULL,   -- KOSPI 레벨 대표값 (예: 2500)
+                kospi_range     TEXT    NOT NULL,   -- 레벨 범위 (예: "2400~2600")
+                win_count       INTEGER DEFAULT 0,  -- 해당 레벨에서 승리(수익) 거래 수
+                total_count     INTEGER DEFAULT 0,  -- 해당 레벨 전체 거래 수
+                win_rate        REAL    DEFAULT 0.0, -- 승률 (%)
+                avg_profit_rate REAL    DEFAULT 0.0, -- 평균 수익률 (%)
+                last_updated    TEXT                -- ISO 8601 KST 마지막 업데이트 시각
+            )
+        """)
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kospi_range
+            ON kospi_index_stats(kospi_range)
+        """)
+
+        # ── 7. 트리거별 승률 뷰 ────────────────────────────────
         c.execute("""
             CREATE VIEW IF NOT EXISTS trigger_stats AS
             SELECT
@@ -221,7 +248,7 @@ def init_db() -> None:
             GROUP BY ah.source
         """)
 
-        # ── 7. 인덱스 ─────────────────────────────────────────
+        # ── 8. 인덱스 ─────────────────────────────────────────
         c.execute("""
             CREATE INDEX IF NOT EXISTS idx_alert_date
             ON alert_history(alert_date)
@@ -268,6 +295,8 @@ def init_db() -> None:
     _migrate_v44(db_path)
     # [v6.0] trading_journal 압축 레이어 컬럼 마이그레이션 (idempotent)
     _migrate_v60(db_path)
+    # [v7.0] kospi_index_stats 테이블 마이그레이션 (idempotent)
+    _migrate_v70(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -424,6 +453,44 @@ def _migrate_v60(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v6.0 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v70(db_path: str) -> None:
+    """
+    [v7.0 Priority3] kospi_index_stats 테이블 추가.
+    Prism memory_compressor_agent의 지수 변곡점 분석 기능 경량화 구현.
+    기존 DB에 테이블이 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+
+        # kospi_index_stats 테이블 (없으면 생성)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS kospi_index_stats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date      TEXT    NOT NULL,
+                kospi_level     INTEGER NOT NULL,
+                kospi_range     TEXT    NOT NULL,
+                win_count       INTEGER DEFAULT 0,
+                total_count     INTEGER DEFAULT 0,
+                win_rate        REAL    DEFAULT 0.0,
+                avg_profit_rate REAL    DEFAULT 0.0,
+                last_updated    TEXT
+            )
+        """)
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kospi_range
+            ON kospi_index_stats(kospi_range)
+        """)
+
+        conn.commit()
+        logger.info("[db] v7.0 마이그레이션 완료 — kospi_index_stats 테이블 확인")
+
+    except Exception as e:
+        logger.warning(f"[db] v7.0 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

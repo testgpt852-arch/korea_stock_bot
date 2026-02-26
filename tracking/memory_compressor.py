@@ -61,6 +61,234 @@ except Exception:
 
 # ── 공개 API ──────────────────────────────────────────────────
 
+# [v7.0 Priority3] KOSPI 레벨 범위 구간 크기 (200포인트 단위)
+_KOSPI_BUCKET_SIZE = 200
+
+
+def update_index_stats() -> dict:
+    """
+    [v7.0 Priority3] KOSPI/KOSDAQ 지수 레벨별 매매 승률 통계 집계 배치.
+
+    Prism memory_compressor_agent의 'KOSPI 심리적 지지/저항선, 변곡점 구간별 승률' 기능 구현.
+    → 'KOSPI 2400~2600 진입 시 승률 72%' 같은 통계를 자동 추출.
+
+    [동작]
+    trading_history 테이블에서 청산된 모든 거래를 읽어
+    buy_market_context (매수 당시 KOSPI 레벨) 기준으로 레벨별 승률을 집계.
+    → kospi_index_stats 테이블에 UPSERT.
+
+    buy_market_context 가 없는 거래는 건너뜀 (하위 호환).
+
+    [호출 시점]
+    run_compression() 에서 자동 호출 (매주 일요일 03:30).
+
+    Returns:
+        {
+          "buckets_updated": int,  # 업데이트된 레벨 구간 수
+          "trades_analyzed": int,  # 분석된 거래 수
+        }
+    """
+    conn = db_schema.get_conn()
+    try:
+        c = conn.cursor()
+        # trading_history에서 청산된 거래 + 매수 당시 KOSPI 레벨 조회
+        # buy_market_context 컬럼이 없는 구버전 DB는 graceful 처리
+        try:
+            c.execute("""
+                SELECT profit_rate, buy_market_context
+                FROM trading_history
+                WHERE sell_time IS NOT NULL
+                  AND buy_market_context IS NOT NULL
+                  AND buy_market_context != ''
+            """)
+            rows = c.fetchall()
+        except Exception:
+            # buy_market_context 컬럼 없음 → 통계 집계 불가
+            logger.info("[compressor] kospi_index_stats: buy_market_context 컬럼 없음 — 건너뜀")
+            return {"buckets_updated": 0, "trades_analyzed": 0}
+    finally:
+        conn.close()
+
+    if not rows:
+        logger.info("[compressor] kospi_index_stats: 분석 가능한 거래 없음")
+        return {"buckets_updated": 0, "trades_analyzed": 0}
+
+    # {kospi_range: {"wins": int, "total": int, "profits": list[float]}}
+    buckets: dict[str, dict] = {}
+    trades_analyzed = 0
+
+    for profit_rate, buy_ctx in rows:
+        kospi_level = _extract_kospi_level(buy_ctx)
+        if kospi_level is None:
+            continue
+
+        bucket_key  = _get_kospi_bucket(kospi_level)
+        bucket_low  = (kospi_level // _KOSPI_BUCKET_SIZE) * _KOSPI_BUCKET_SIZE
+        bucket_high = bucket_low + _KOSPI_BUCKET_SIZE
+        kospi_range = f"{bucket_low}~{bucket_high}"
+
+        if kospi_range not in buckets:
+            buckets[kospi_range] = {
+                "kospi_level": bucket_low + _KOSPI_BUCKET_SIZE // 2,
+                "wins": 0, "total": 0, "profits": []
+            }
+
+        buckets[kospi_range]["total"] += 1
+        if profit_rate is not None and profit_rate > 0:
+            buckets[kospi_range]["wins"] += 1
+        if profit_rate is not None:
+            buckets[kospi_range]["profits"].append(profit_rate)
+        trades_analyzed += 1
+
+    # kospi_index_stats 테이블 UPSERT
+    buckets_updated = 0
+    now_kst = datetime.now(KST).isoformat(timespec="seconds")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+
+    for kospi_range, data in buckets.items():
+        total   = data["total"]
+        wins    = data["wins"]
+        profits = data["profits"]
+        win_rate = round(wins / total * 100, 1) if total > 0 else 0.0
+        avg_profit = round(sum(profits) / len(profits), 2) if profits else 0.0
+
+        conn2 = db_schema.get_conn()
+        try:
+            c2 = conn2.cursor()
+            c2.execute("""
+                INSERT INTO kospi_index_stats
+                    (trade_date, kospi_level, kospi_range,
+                     win_count, total_count, win_rate, avg_profit_rate, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kospi_range) DO UPDATE SET
+                    trade_date      = excluded.trade_date,
+                    win_count       = excluded.win_count,
+                    total_count     = excluded.total_count,
+                    win_rate        = excluded.win_rate,
+                    avg_profit_rate = excluded.avg_profit_rate,
+                    last_updated    = excluded.last_updated
+            """, (
+                today_str,
+                data["kospi_level"],
+                kospi_range,
+                wins, total, win_rate, avg_profit,
+                now_kst,
+            ))
+            conn2.commit()
+            buckets_updated += 1
+        except Exception as e:
+            logger.warning(f"[compressor] kospi_index_stats UPSERT 실패 ({kospi_range}): {e}")
+        finally:
+            conn2.close()
+
+    logger.info(
+        f"[compressor] KOSPI 지수 레벨 통계 업데이트 완료 — "
+        f"{buckets_updated}개 구간 / {trades_analyzed}건 분석"
+    )
+    return {"buckets_updated": buckets_updated, "trades_analyzed": trades_analyzed}
+
+
+def get_index_context(current_kospi: float | None = None) -> str:
+    """
+    [v7.0 Priority3] 현재 KOSPI 레벨 기반 과거 승률 컨텍스트 반환.
+    ai_context.build_spike_context()에서 AI 프롬프트 주입용으로 호출.
+
+    current_kospi가 None이면 전체 레벨 Top3 (거래 수 많은 순) 반환.
+    current_kospi가 있으면 해당 레벨 구간 + 인접 구간 승률 반환.
+
+    Returns:
+        AI 프롬프트 주입용 문자열 (데이터 없으면 "")
+    """
+    conn = db_schema.get_conn()
+    try:
+        c = conn.cursor()
+        try:
+            if current_kospi is not None:
+                # 현재 레벨과 인접 ±2 구간 조회
+                bucket_low  = (int(current_kospi) // _KOSPI_BUCKET_SIZE) * _KOSPI_BUCKET_SIZE
+                nearby_lows = [
+                    bucket_low - _KOSPI_BUCKET_SIZE * 2,
+                    bucket_low - _KOSPI_BUCKET_SIZE,
+                    bucket_low,
+                    bucket_low + _KOSPI_BUCKET_SIZE,
+                    bucket_low + _KOSPI_BUCKET_SIZE * 2,
+                ]
+                placeholders = ",".join("?" * len(nearby_lows))
+                nearby_ranges = [
+                    f"{low}~{low + _KOSPI_BUCKET_SIZE}" for low in nearby_lows
+                ]
+                c.execute(f"""
+                    SELECT kospi_range, win_rate, avg_profit_rate, total_count
+                    FROM kospi_index_stats
+                    WHERE kospi_range IN ({placeholders})
+                      AND total_count >= 3
+                    ORDER BY kospi_level ASC
+                """, nearby_ranges)
+            else:
+                # 전체에서 거래 수 많은 Top3
+                c.execute("""
+                    SELECT kospi_range, win_rate, avg_profit_rate, total_count
+                    FROM kospi_index_stats
+                    WHERE total_count >= 3
+                    ORDER BY total_count DESC
+                    LIMIT 3
+                """)
+
+            rows = c.fetchall()
+        except Exception:
+            return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    lines = ["📊 KOSPI 레벨별 과거 승률:"]
+    for kospi_range, win_rate, avg_profit, total in rows:
+        lines.append(
+            f"  {kospi_range}: 승률 {win_rate:.0f}%  평균수익 {avg_profit:+.1f}%  (n={total})"
+        )
+    return "\n".join(lines)
+
+
+def _extract_kospi_level(buy_market_context: str) -> int | None:
+    """
+    buy_market_context 문자열에서 KOSPI 지수값 추출.
+    예: "강세장 KOSPI2547" → 2547
+        "KOSPI:2547.3" → 2547
+        "횡보 kospi=2100" → 2100
+
+    Returns:
+        KOSPI 정수값 / 추출 실패 시 None
+    """
+    if not buy_market_context:
+        return None
+    # 숫자 4자리 패턴 (KOSPI는 보통 1000~5000)
+    matches = re.findall(r"[Kk][Oo][Ss][Pp][Ii][:\s=]?\s*(\d{4,5}(?:\.\d+)?)", buy_market_context)
+    if matches:
+        try:
+            return int(float(matches[0]))
+        except ValueError:
+            pass
+    # fallback: 4~5자리 숫자 추출
+    numbers = re.findall(r"\b(\d{4,5})\b", buy_market_context)
+    for n in numbers:
+        val = int(n)
+        if 500 <= val <= 10000:  # KOSPI 유효 범위
+            return val
+    return None
+
+
+def _get_kospi_bucket(kospi_level: int) -> str:
+    """
+    KOSPI 레벨을 _KOSPI_BUCKET_SIZE 단위 구간 문자열로 변환.
+    예: 2547 → "2400~2600" (bucket_size=200)
+    """
+    bucket_low  = (kospi_level // _KOSPI_BUCKET_SIZE) * _KOSPI_BUCKET_SIZE
+    bucket_high = bucket_low + _KOSPI_BUCKET_SIZE
+    return f"{bucket_low}~{bucket_high}"
+
+
 def run_compression() -> dict:
     """
     3계층 기억 압축 배치 실행.
@@ -106,6 +334,11 @@ def run_compression() -> dict:
 
     # Step 3: Layer3 90일+ 항목 정리 (summary_text만 남기고 상세 초기화)
     result["cleaned"] = _clean_old_layer3(archive_cutoff)
+
+    # Step 4: [v7.0 Priority3] KOSPI 지수 레벨별 승률 통계 업데이트
+    index_result = update_index_stats()
+    result["index_buckets_updated"] = index_result.get("buckets_updated", 0)
+    result["index_trades_analyzed"] = index_result.get("trades_analyzed", 0)
 
     logger.info(
         f"[compressor] 기억 압축 완료 — "

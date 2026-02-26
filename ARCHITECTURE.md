@@ -67,6 +67,21 @@ korea_stock_bot/
 ├── config.py                ← 모든 설정값 상수
 ├── requirements.txt
 │
+├── tests/                   ← [v7.0 Priority1 신규] 단위 테스트 패키지
+│   ├── __init__.py
+│   ├── test_signal_analyzer.py  ← analyzers/signal_analyzer.py 단위 테스트
+│   │                               _dart_strength / _dart_to_theme / analyze() 검증
+│   ├── test_position_manager.py ← traders/position_manager.py 단위 테스트
+│   │                               get_effective_position_max / _calc_trailing_stop / R/R 필터
+│   ├── test_ai_context.py       ← tracking/ai_context.py 단위 테스트
+│   │                               build_spike_context / 빈 DB 안전 반환 검증
+│   ├── test_watchlist_state.py  ← utils/watchlist_state.py 단위 테스트
+│   │                               워치리스트 CRUD / 시장 환경 / 섹터 맵 / 경계값 검증
+│   └── test_db_schema.py        ← tracking/db_schema.py 단위 테스트
+│                                   테이블 생성 / kospi_index_stats 검증 / idempotent 마이그레이션
+│
+│   [실행 방법] cd korea_stock_bot && python -m unittest discover tests -v
+│
 ├── collectors/
 │   ├── dart_collector.py    ← DART 공시 수집
 │   ├── price_collector.py   ← pykrx 일별 확정 데이터 (마감 후 전용)
@@ -88,6 +103,9 @@ korea_stock_bot/
 │   └── telegram_interactive.py ← [v5.0 Phase 5 신규] /status /holdings /principles 명령어 처리
 │                               [v6.0 P2] /evaluate 추가: 종목코드+평균매수가 입력 → Gemma AI 맞춤 분석
 │                               ConversationHandler 2단계 대화 플로우 (_EVAL_TICKER → _EVAL_PRICE)
+│                               [v7.0 Priority2] /report 추가: 종목코드/이름 입력 → KIS+pykrx+AI 종합 리포트
+│                               _cmd_report(), _resolve_ticker(), _run_report_analysis() 추가
+│                               Prism /report 경량화 — 기존 KIS REST + pykrx 인프라 완전 재활용
 │
 ├── reports/
 │   ├── morning_report.py    ← 아침봇 08:30
@@ -108,9 +126,11 @@ korea_stock_bot/
     ├── watchlist_state.py   ← 아침봇↔장중봇↔마감봇 WebSocket 워치리스트 공유 (v3.1/v3.2)
     └── rate_limiter.py      ← [v3.2] KIS API Rate Limiter (초당 19회 제한)
 │
-└── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
+├── tracking/                ← [v3.3] Phase 3 DB + 성과 추적 패키지 (신규)
 │   ├── db_schema.py         ← SQLite DDL + init_db() + get_conn()
 │   │                           [v6.0] _migrate_v60(): compression_layer/summary_text 컬럼
+│   │                           [v7.0] kospi_index_stats 테이블 추가 (Priority3 지수 레벨 학습)
+│   │                           [v7.0] _migrate_v70(): 기존 DB idempotent 마이그레이션
 │   ├── alert_recorder.py    ← 장중봇 알림 발송 시 DB 기록 (realtime_alert에서만 호출)
 │   ├── performance_tracker.py ← 1/3/7일 수익률 추적 배치 + 주간 통계 조회
 │   ├── ai_context.py        ← [v3.5] AI 프롬프트 컨텍스트 조회 전담 (Phase 5 신규)
@@ -126,6 +146,9 @@ korea_stock_bot/
 │                               Prism CompressionManager 경량화 구현 (동기 Gemma)
 │                               Layer1(0~7일) → Layer2(AI요약) → Layer3(핵심한줄)
 │                               run_compression() — main.py 매주 일요일 03:30 호출
+│                               [v7.0 Priority3] update_index_stats(): KOSPI 레벨별 승률 집계
+│                               [v7.0 Priority3] get_index_context(): AI 프롬프트 주입용 레벨 컨텍스트
+│                               [v7.0 Priority3] _extract_kospi_level(), _get_kospi_bucket() 헬퍼 추가
 │
 └── traders/                 ← [v3.4] Phase 4 자동매매 패키지 (신규)
     └── position_manager.py  ← 포지션 진입·청산·조건 검사 + DB 기록 [v4.2 Phase 2: Trailing Stop]
@@ -208,6 +231,9 @@ notifiers/telegram_interactive.py → kis/order_client (get_balance — AUTO_TRA
 notifiers/telegram_interactive.py → tracking/trading_journal (get_journal_context — /evaluate)  ← v6.0 추가
 tracking/memory_compressor.py     ← main.py (run_compression — 일요일 03:30)  ← v6.0 추가
 tracking/memory_compressor.py     → tracking/db_schema (get_conn)  ← v6.0 추가
+tracking/memory_compressor.py     → kospi_index_stats (update_index_stats — UPSERT)  ← v7.0 추가
+tracking/memory_compressor.py     → ai_context.py (get_index_context — 읽기용 함수 제공)  ← v7.0 추가
+tracking/ai_context.py            → tracking/memory_compressor (_get_index_level_context)  ← v7.0 추가
 ```
 
 ---
@@ -717,6 +743,24 @@ gemini-2.5-flash   20회/일   ❌ 부족
     대화 타임아웃 EVALUATE_CONV_TIMEOUT_SEC(기본 120초) 반드시 적용
     KIS get_current_price 실패 시 현재가 없이 수익률 0% 표시 (비치명적)
 
+[v7.0 Priority 1~3 구현 규칙]
+72. tests/ 디렉토리는 단위 테스트 전용 — 실제 API 호출 금지 (Mock 불필요한 순수 로직만)
+    테스트는 외부 의존성 없이 독립 실행 가능해야 함 (임시 SQLite DB 허용)
+    새 모듈 추가 시 tests/ 에 대응 테스트 파일 생성 권장
+    실행: cd korea_stock_bot && python -m unittest discover tests -v
+73. /report 명령어는 _cmd_report() → _run_report_analysis() 패턴으로만 구현
+    AI 호출은 run_in_executor 경유 필수 (동기 Gemma SDK)
+    KIS REST 실패 시 pykrx로 폴백 (비치명적) — 두 소스 모두 실패해도 리포트 생성 (데이터 없음 표시)
+    /report는 telegram_interactive.py 에서만 구현 — telegram_bot.py에 추가 금지
+    _resolve_ticker()는 pykrx 종목명 조회만 사용 (장중 실시간 API 불필요)
+74. kospi_index_stats 테이블은 memory_compressor.update_index_stats()만 UPSERT
+    외부에서 직접 INSERT/UPDATE 금지 — update_index_stats() 경유 필수
+    거래 데이터 5건 미만 레벨은 get_index_context()에서 자동 필터 (total_count >= 3)
+    buy_market_context 컬럼 없는 구버전 DB → graceful fallback (빈 결과 반환)
+75. tracking/ai_context._get_index_level_context()는 DB 조회 + 문자열 반환만
+    AI API 호출 금지 (규칙 #29 준수) — memory_compressor.get_index_context()에 위임
+    데이터 없으면 "" 반환 — AI 프롬프트에서 컨텍스트 없으면 기존 방식으로 판단
+
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
 52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
     watchlist_state.get_sector()로 조회 — 아침봇 미실행 시 "" (빈 문자열) 허용
@@ -939,6 +983,32 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | 절대 금지 규칙 45~51 추가 (Phase 3 거래 일지 규칙) |
 | v5.0 | 2026-02-26 | **Phase 5 — 리포트 품질 & UX 강화** |
 | v6.0 | 2026-02-27 | **잠재 이슈 해결 & Prism 개선 흡수** |
+| v7.0 | 2026-02-27 | **Priority 1~3 — 테스트/리포트/지수학습 (2차 비교평가 개선)** |
+|      |            | [Priority1] tests/ 디렉토리 신규 — 단위 테스트 5개 파일 작성 |
+|      |            | - test_signal_analyzer.py: _dart_strength/theme/analyze() 18개 케이스 |
+|      |            | - test_position_manager.py: get_effective_position_max/_calc_trailing_stop/R/R필터 15개 |
+|      |            | - test_ai_context.py: build_spike_context 빈DB 안전반환 + 포트폴리오 컨텍스트 9개 |
+|      |            | - test_watchlist_state.py: 워치리스트/시장환경/섹터맵 CRUD 18개 |
+|      |            | - test_db_schema.py: 테이블생성/kospi_index_stats/마이그레이션 idempotent 9개 |
+|      |            | 모든 테스트 외부 API 없이 독립 실행 가능 — 임시 SQLite DB 활용 |
+|      |            | [Priority2] /report 명령어 신규 (Prism /report 경량화) |
+|      |            | - telegram_interactive.py: _cmd_report() / _resolve_ticker() / _run_report_analysis() |
+|      |            | - KIS REST 현재가 + pykrx 20일 OHLCV/수급 + Gemma AI 종합 판단 |
+|      |            | - pykrx 종목명→코드 변환 (_resolve_ticker: KOSPI/KOSDAQ 전체 탐색) |
+|      |            | - KIS 실패 시 pykrx 폴백, 양쪽 실패시도 "조회 불가" 표시 (비치명적) |
+|      |            | - run_in_executor 경유 AI 호출 (동기 Gemma SDK 이벤트 루프 차단 방지) |
+|      |            | [Priority3] KOSPI 지수 레벨 학습 신규 (Prism memory_compressor_agent 경량화) |
+|      |            | - tracking/db_schema.py: kospi_index_stats 테이블 추가 |
+|      |            |   (kospi_range, win_count, total_count, win_rate, avg_profit_rate) |
+|      |            |   _migrate_v70(): 기존 DB 자동 마이그레이션 (idempotent) |
+|      |            | - tracking/memory_compressor.py: update_index_stats() 신규 |
+|      |            |   trading_history.buy_market_context → KOSPI 레벨 파싱 → 200포인트 구간 집계 |
+|      |            |   run_compression() 내 Step4로 자동 실행 (매주 일요일 03:30) |
+|      |            | - tracking/memory_compressor.py: get_index_context() 신규 |
+|      |            |   인접 구간 승률 조회 → AI 프롬프트 주입용 문자열 반환 |
+|      |            | - tracking/ai_context.py: _get_index_level_context() 신규 |
+|      |            |   build_spike_context() 내에서 자동 호출 → AI가 KOSPI 레벨별 승률 인식 |
+|      |            | 절대 금지 규칙 72~75 추가 (v7.0 Priority 1~3 규칙) |
 |      |            | [이슈④] TRADING_MODE=REAL 전환 안전장치: _check_real_mode_safety() 신규 |
 |      |            | → REAL 감지 시 텔레그램 경고 + REAL_MODE_CONFIRM_DELAY_SEC(기본 5분) 대기 |
 |      |            | → 대기 완료 후 "REAL 모드 활성화" 알림 → 이후 자동매매 실행 |

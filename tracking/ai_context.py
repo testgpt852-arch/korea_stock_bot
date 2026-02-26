@@ -81,6 +81,12 @@ def build_spike_context(ticker: str, source: str) -> str:
     if portfolio_line:
         parts.append(portfolio_line)
 
+    # [v7.0 Priority3] KOSPI 지수 레벨별 과거 승률 컨텍스트
+    # 현재 시장 환경(watchlist_state)에서 KOSPI 레벨을 가져와 해당 레벨 승률 주입
+    index_line = _get_index_level_context()
+    if index_line:
+        parts.append(index_line)
+
     principles_line = _get_high_conf_principles(source)
     if principles_line:
         parts.append(principles_line)
@@ -308,3 +314,22 @@ def _get_portfolio_context() -> str:
         f"총 노출 {total_invested//10000}만원 / "
         f"미실현 P&L: {pnl_sign}{total_unrealized:,}원"
     )
+
+
+def _get_index_level_context() -> str:
+    """
+    [v7.0 Priority3] 현재 KOSPI 레벨 기반 과거 승률 컨텍스트 반환.
+    kospi_index_stats 테이블에서 해당 레벨 구간 + 인접 구간 승률 조회.
+
+    [절대 금지 규칙 — ARCHITECTURE #29]
+    DB 조회 + 문자열 반환만. AI API 호출 금지.
+    """
+    try:
+        # 현재 KOSPI 레벨은 watchlist_state에 저장된 시장 환경 정보에서 추론
+        # (아침봇이 price_data를 가지고 있으나 여기서 직접 접근 불가)
+        # → memory_compressor.get_index_context()에 위임
+        from tracking.memory_compressor import get_index_context
+        return get_index_context(current_kospi=None)
+    except Exception as e:
+        logger.debug(f"[ai_context] _get_index_level_context 실패 (비치명적): {e}")
+        return ""

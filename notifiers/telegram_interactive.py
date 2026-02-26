@@ -9,6 +9,10 @@ notifiers/telegram_interactive.py
 - /evaluate  — [v6.0 P2 신규] 보유 종목 AI 맞춤 분석 (Prism /evaluate 경량화)
                종목코드 입력 → 평균매수가 입력 → Gemma AI 분석 결과 반환
                ConversationHandler 2단계 대화 플로우 (EVAL_TICKER → EVAL_PRICE)
+- /report    — [v7.0 Priority2 신규] 종목 상세 분석 리포트 (Prism /report 경량화)
+               /report 005930 또는 /report 삼성전자 형태로 호출
+               KIS + pykrx + Gemma AI로 가격/거래량/수급/뉴스 종합 분석 리포트 생성
+               기존 인프라(KIS REST, pykrx, ai_analyzer 패턴) 완전 재활용
 
 [아키텍처]
 - python-telegram-bot Application + CommandHandler 기반 롱폴링
@@ -21,17 +25,20 @@ telegram_interactive → tracking/db_schema (get_conn)
 telegram_interactive → utils/watchlist_state (get_market_env)
 telegram_interactive → kis/order_client (get_balance — AUTO_TRADE=true 시만)
 telegram_interactive → tracking/trading_journal (get_journal_context — /evaluate)
+telegram_interactive → kis/rest_client (get_stock_price — /report)
 telegram_interactive ← main.py (start_interactive_handler 호출)
 
 [규칙]
 - CommandHandler는 이 파일에만 위치 — telegram_bot.py에 추가 금지
 - KIS API 호출은 AUTO_TRADE_ENABLED=true 시에만 시도, 실패 시 DB 폴백
 - /evaluate AI 호출은 run_in_executor 경유 (동기 Gemma SDK 사용)
+- /report AI 호출은 run_in_executor 경유 (동기 Gemma SDK 사용)
 - ConversationHandler 타임아웃: EVALUATE_CONV_TIMEOUT_SEC(기본 120초)
 
 [수정이력]
 - v5.0: Phase 5 신규
 - v6.0: /evaluate 명령어 추가 (P2, Prism 경량화)
+- v7.0: /report 명령어 추가 (Priority2, Prism /report 경량화)
 """
 
 import asyncio
@@ -480,6 +487,277 @@ def _run_evaluate_analysis(ticker: str, stock_name: str, avg_price: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
+# /report 명령어 — 종목 상세 분석 리포트 [v7.0 Priority2 신규]
+# ══════════════════════════════════════════════════════════════
+
+async def _cmd_report(update, context) -> None:
+    """
+    /report 005930  또는  /report 삼성전자
+    → KIS REST + pykrx + Gemma AI로 해당 종목 종합 분석 리포트 생성.
+
+    Prism /report 명령어 경량화 구현:
+    - Prism: MCP 에이전트 병렬 수집 + HTML/PDF 생성
+    - 우리봇: 기존 KIS REST + pykrx 인프라 재활용 + Gemma 텍스트 리포트
+
+    [분석 항목]
+    1. 현재가 / 등락률 / 거래량 (KIS REST)
+    2. 최근 20영업일 가격 추이 요약 (pykrx 마감봇용이지만 /report는 장 무관 조회)
+    3. 최근 수급 동향 (기관/외인 순매수 — pykrx)
+    4. AI 종합 판단 (Gemma): 현재 진입 여부 + 리스크 요약
+
+    [아키텍처 규칙]
+    - AI 호출은 run_in_executor 경유 (동기 Gemma SDK)
+    - KIS API 실패 시 pykrx 폴백 (비치명적)
+    - 리포트 생성 실패 시 "❌ 오류" 응답만 (봇 전체 영향 없음)
+    - 이 함수는 telegram_interactive.py에서만 구현 — telegram_bot.py 추가 금지
+    """
+    try:
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "📋 <b>종목 리포트 사용법</b>\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "/report <b>종목코드</b> 또는 /report <b>종목명</b>\n\n"
+                "예시:\n"
+                "  <code>/report 005930</code>\n"
+                "  <code>/report 삼성전자</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        query = " ".join(args).strip()
+        ticker = _resolve_ticker(query)
+
+        if not ticker:
+            await update.message.reply_text(
+                f"⚠️ <b>'{query}'</b>에 해당하는 종목코드를 찾지 못했습니다.\n"
+                "6자리 종목코드로 직접 입력해주세요.\n"
+                "예: <code>/report 005930</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        waiting_msg = await update.message.reply_text(
+            f"🔍 <b>{query}</b> 리포트 생성 중...\n잠시 기다려주세요.",
+            parse_mode="HTML"
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, _run_report_analysis, ticker, query
+        )
+
+        await waiting_msg.delete()
+        await update.message.reply_text(result, parse_mode="HTML")
+
+    except Exception as e:
+        logger.warning(f"[interactive] /report 오류: {e}")
+        await update.message.reply_text("❌ 리포트 생성 중 오류가 발생했습니다.")
+
+
+def _resolve_ticker(query: str) -> str:
+    """
+    사용자 입력(종목코드 or 종목명)을 6자리 종목코드로 변환.
+    - 숫자 6자리 → 그대로 반환
+    - 종목명 → KIS REST get_stock_price 또는 pykrx로 조회 시도
+    - 실패 시 "" 반환
+    """
+    q = query.strip().replace("-", "")
+    if q.isdigit() and len(q) <= 6:
+        return q.zfill(6)
+
+    # pykrx로 종목명 → 코드 변환 시도
+    try:
+        from pykrx import stock as pykrx_stock
+        from utils.date_utils import get_today, get_prev_trading_day
+        today = get_today()
+        prev  = get_prev_trading_day(today)
+        date_str = prev.strftime("%Y%m%d") if prev else today.strftime("%Y%m%d")
+
+        # KOSPI + KOSDAQ 전체 종목 조회
+        for market in ("KOSPI", "KOSDAQ"):
+            tickers = pykrx_stock.get_market_ticker_list(date_str, market=market)
+            for t in tickers:
+                name = pykrx_stock.get_market_ticker_name(t)
+                if name and (q in name or name in q):
+                    return t
+    except Exception as e:
+        logger.debug(f"[interactive] pykrx 종목명 조회 실패: {e}")
+
+    return ""
+
+
+def _run_report_analysis(ticker: str, query: str) -> str:
+    """
+    동기 함수 — run_in_executor 경유 호출.
+    종목 종합 분석 리포트를 텍스트로 생성해 반환.
+
+    [수집 우선순위]
+    1. KIS REST: 현재가, 등락률, 거래량 (장중/마감 무관)
+    2. pykrx: 최근 20영업일 OHLCV + 기관/외인 수급
+    3. Gemma AI: 위 데이터 종합 → 진입 판단 + 리스크 요약
+    """
+    stock_name = query
+
+    # ① KIS REST — 현재가 정보
+    kis_data: dict = {}
+    try:
+        from kis.rest_client import get_stock_price
+        info = get_stock_price(ticker)
+        if info:
+            kis_data = info
+            stock_name = info.get("종목명", query) or query
+    except Exception as e:
+        logger.debug(f"[report] KIS 현재가 조회 실패 ({ticker}): {e}")
+
+    # ② pykrx — 최근 20영업일 OHLCV + 수급
+    ohlcv_summary = ""
+    supply_summary = ""
+    try:
+        from pykrx import stock as pykrx_stock
+        from utils.date_utils import get_today, get_prev_trading_day
+        import datetime as _dt
+
+        today = get_today()
+        # 리포트는 장 무관 — 오늘자 기준 (장중이면 미확정 주의 표시)
+        end_date   = today.strftime("%Y%m%d")
+        start_date = (today - _dt.timedelta(days=35)).strftime("%Y%m%d")
+
+        df_ohlcv = pykrx_stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
+        if df_ohlcv is not None and len(df_ohlcv) >= 5:
+            last5 = df_ohlcv.tail(5)
+            recent_close  = int(df_ohlcv["종가"].iloc[-1])
+            prev_close    = int(df_ohlcv["종가"].iloc[-2]) if len(df_ohlcv) >= 2 else recent_close
+            high_20 = int(df_ohlcv["고가"].max())
+            low_20  = int(df_ohlcv["저가"].min())
+            avg_vol = int(df_ohlcv["거래량"].mean())
+            last_vol = int(df_ohlcv["거래량"].iloc[-1])
+            vol_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
+            chg_rate  = (recent_close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+
+            ohlcv_summary = (
+                f"현재가: {recent_close:,}원 ({chg_rate:+.1f}%)\n"
+                f"20일 고가: {high_20:,}원 / 저가: {low_20:,}원\n"
+                f"거래량: {last_vol:,}주 (20일 평균 대비 {vol_ratio:.1f}배)"
+            )
+
+        # 기관/외인 수급 (최근 5영업일)
+        df_inv = pykrx_stock.get_market_trading_value_by_date(
+            start_date, end_date, ticker
+        )
+        if df_inv is not None and len(df_inv) >= 3:
+            inst_5d = int(df_inv["기관합계"].tail(5).sum()) // 100_000_000
+            fore_5d = int(df_inv["외국인합계"].tail(5).sum()) // 100_000_000
+            inst_sign = "+" if inst_5d >= 0 else ""
+            fore_sign = "+" if fore_5d >= 0 else ""
+            supply_summary = (
+                f"기관 5일 순매수: {inst_sign}{inst_5d}억\n"
+                f"외인 5일 순매수: {fore_sign}{fore_5d}억"
+            )
+
+    except Exception as e:
+        logger.debug(f"[report] pykrx 조회 실패 ({ticker}): {e}")
+
+    # ③ 과거 거래 일지 (같은 종목 경험 있으면 포함)
+    journal_ctx = ""
+    try:
+        from tracking.trading_journal import get_journal_context
+        journal_ctx = get_journal_context(ticker)
+    except Exception:
+        pass
+
+    # ④ 시장 환경
+    market_env = ""
+    try:
+        from utils.watchlist_state import get_market_env
+        market_env = get_market_env() or ""
+    except Exception:
+        pass
+
+    # ⑤ Gemma AI 종합 판단
+    ai_analysis = ""
+    try:
+        from google import genai
+        from google.genai import types as _gtypes
+        if config.GOOGLE_AI_API_KEY:
+            client = genai.Client(api_key=config.GOOGLE_AI_API_KEY)
+
+            # 현재가 정보 조합
+            price_block = ohlcv_summary or (
+                f"현재가: {kis_data.get('현재가', 0):,}원  "
+                f"등락률: {kis_data.get('등락률', 0):+.1f}%  "
+                f"거래량: {kis_data.get('누적거래량', 0):,}주"
+                if kis_data else "가격 정보 없음"
+            )
+
+            prompt = f"""당신은 한국 단타 매매 전문가입니다.
+아래 종목을 분석하고 "지금 매수할 만한가?"에 대한 판단을 내려주세요.
+
+[종목 정보]
+종목명: {stock_name} ({ticker})
+시장 환경: {market_env or "미확인"}
+
+[가격 분석]
+{price_block}
+
+[수급 분석]
+{supply_summary or "수급 데이터 없음"}
+
+[과거 거래 이력]
+{journal_ctx or "이력 없음"}
+
+[분석 요청]
+1. 현재 기술적 상태 평가 (추세, 거래량 이상 여부)
+2. 수급 관점 평가 (기관/외인 동향)
+3. 매수 판단: 진입 가능 / 관망 / 비추천 + 이유 1줄
+4. 진입 시 목표가와 손절가 제안 (가격으로 명시)
+5. 핵심 리스크 1가지
+
+간결하고 실용적으로 5개 항목 형식으로 작성하세요."""
+
+            response = client.models.generate_content(
+                model="gemma-3-27b-it",
+                contents=prompt,
+                config=_gtypes.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=500,
+                ),
+            )
+            ai_analysis = (response.text or "").strip()
+    except Exception as e:
+        logger.debug(f"[report] AI 분석 실패 ({ticker}): {e}")
+        ai_analysis = "AI 분석 불가 (GOOGLE_AI_API_KEY 미설정 또는 API 오류)"
+
+    # ⑥ 리포트 조립
+    from datetime import datetime, timezone, timedelta
+    now_kst = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M KST")
+
+    report_lines = [
+        f"📋 <b>{stock_name}</b> ({ticker}) 종목 리포트",
+        f"━━━━━━━━━━━━━━━━",
+        f"⏰ {now_kst}  🌡️ 시장: {market_env or 'N/A'}",
+        f"",
+        f"📊 <b>가격 / 거래량</b>",
+        ohlcv_summary or "조회 불가",
+        f"",
+    ]
+
+    if supply_summary:
+        report_lines += [f"💰 <b>수급 동향</b>", supply_summary, ""]
+
+    if ai_analysis:
+        report_lines += [f"🧠 <b>AI 종합 판단</b>", ai_analysis, ""]
+
+    if journal_ctx:
+        report_lines += [f"📖 <b>과거 거래 이력</b>", journal_ctx[:300], ""]
+
+    report_lines.append("━━━━━━━━━━━━━━━━")
+    report_lines.append("⚠️ 투자 판단은 본인 책임. 이 리포트는 참고용입니다.")
+
+    return "\n".join(report_lines)
+
+
+# ══════════════════════════════════════════════════════════════
 # 핸들러 시작 (main.py에서 호출)
 # ══════════════════════════════════════════════════════════════
 
@@ -507,6 +785,7 @@ async def start_interactive_handler() -> None:
         app.add_handler(TGCommandHandler("status",     _cmd_status))
         app.add_handler(TGCommandHandler("holdings",   _cmd_holdings))
         app.add_handler(TGCommandHandler("principles", _cmd_principles))
+        app.add_handler(TGCommandHandler("report",     _cmd_report))   # [v7.0 Priority2 신규]
 
         # [v6.0 P2] /evaluate ConversationHandler 등록
         try:
@@ -528,7 +807,7 @@ async def start_interactive_handler() -> None:
         except Exception as e:
             logger.warning(f"[interactive] /evaluate 핸들러 등록 실패 (비치명적): {e}")
 
-        logger.info("[interactive] 텔레그램 명령어 핸들러 시작 (/status /holdings /principles /evaluate)")
+        logger.info("[interactive] 텔레그램 명령어 핸들러 시작 (/status /holdings /principles /report /evaluate)")
         await app.initialize()
         await app.start()
         await app.updater.start_polling(
