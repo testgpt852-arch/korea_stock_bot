@@ -27,6 +27,10 @@ notifiers/telegram_bot.py
         format_morning_report() — 구조 개선: 시장환경 → 주요공시 → AI추천 순 재배치
         format_morning_summary() — 300자 이내 핵심 요약 (아침봇 요약 발송용)
         format_weekly_report()  — 요약 최적화 (상세링크 구조)
+- v8.1: [쪽집게봇] format_oracle_section() 추가
+        oracle_analyzer.analyze() 반환값 → 텔레그램 포맷
+        아침봇·마감봇 최우선 선발송 (결론 먼저, 데이터는 후발송)
+        픽마다 진입가·목표가·손절가·R/R + 판단 근거 배지 표시
 """
 
 import asyncio
@@ -78,6 +82,107 @@ async def send_photo_async(photo: BytesIO, caption: str = "") -> None:
         )
     except Exception as e:
         logger.warning(f"[telegram] 이미지 전송 실패: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# 쪽집게봇 — 내일 전략 선발송 포맷 (v8.1 신규)
+# ══════════════════════════════════════════════════════════════
+
+def format_oracle_section(oracle_result: dict) -> str:
+    """
+    [v8.1] oracle_analyzer.analyze() 반환값 → 텔레그램 포맷.
+
+    아침봇·마감봇에서 모든 리포트보다 먼저 발송되는 "결론 섹션".
+    윌리엄 오닐 CAN SLIM: 모든 픽에 진입가·목표가·손절가·R/R 명시.
+
+    Args:
+        oracle_result: oracle_analyzer.analyze() 반환값
+
+    Returns:
+        HTML 포맷 텔레그램 메시지. 픽 없으면 빈 문자열("") 반환.
+    """
+    if not oracle_result or not oracle_result.get("has_data"):
+        return ""
+
+    picks       = oracle_result.get("picks",       [])
+    top_themes  = oracle_result.get("top_themes",  [])
+    market_env  = oracle_result.get("market_env",  "")
+    rr_threshold= oracle_result.get("rr_threshold", 1.5)
+    one_line    = oracle_result.get("one_line",    "")
+
+    if not picks:
+        return ""
+
+    lines = []
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🎯 <b>쪽집게 내일 전략</b>")
+
+    # 시장 환경 + R/R 기준
+    if market_env:
+        env_emoji = "🟢" if "강세" in market_env else "🔴" if "약세" in market_env else "🟡"
+        lines.append(f"{env_emoji} 시장: <b>{market_env}</b>  |  R/R 기준: {rr_threshold:.1f}x 이상")
+    else:
+        lines.append(f"⚪ 시장 환경 미지정  |  R/R 기준: {rr_threshold:.1f}x 이상")
+
+    # ── 상위 테마 ─────────────────────────────────────────────
+    if top_themes:
+        lines.append("\n📡 <b>내일 주도 테마 예상</b>")
+        for i, t in enumerate(top_themes[:3], 1):
+            score   = t.get("score", 0)
+            # 점수 시각화 (0~100 → 10칸 바)
+            filled  = round(score / 10)
+            bar     = "█" * filled + "░" * (10 - filled)
+            leader  = t.get("leader", "")
+            lc      = t.get("leader_change", 0.0)
+            lc_str  = f"{lc:+.1f}%" if isinstance(lc, float) else str(lc)
+            factors = " / ".join(t.get("factors", [])[:2])
+
+            lines.append(
+                f"  {i}위 <b>{t['theme']}</b>  {bar} {score}점"
+            )
+            if leader:
+                lines.append(f"       대장: {leader} {lc_str}  ({factors})")
+
+    # ── 종목 픽 ───────────────────────────────────────────────
+    lines.append(f"\n💊 <b>종목 픽 ({len(picks)}종목)</b>")
+    for p in picks:
+        rank        = p.get("rank", 0)
+        name        = p.get("name", "")
+        theme       = p.get("theme", "")
+        entry       = p.get("entry_price", 0)
+        target      = p.get("target_price", 0)
+        stop        = p.get("stop_price", 0)
+        target_pct  = p.get("target_pct", 0.0)
+        stop_pct    = p.get("stop_pct", -7.0)
+        rr          = p.get("rr_ratio", 0.0)
+        badges      = p.get("badges", [])
+        pos_type    = p.get("position_type", "")
+
+        # R/R 등급 이모지
+        rr_emoji = "🔥" if rr >= 2.5 else "✅" if rr >= 1.5 else "➖"
+        rr_stars = "★★" if rr >= 2.5 else "★" if rr >= 1.5 else ""
+
+        # 포지션 타입 이모지
+        pos_emoji = {"오늘★": "🔴", "내일": "🟠", "모니터": "🟡", "대장": "🔵"}.get(pos_type, "⚪")
+
+        badge_str = "  ".join(badges) if badges else ""
+
+        lines.append(
+            f"\n  {rank}. {pos_emoji} <b>{name}</b>  [{theme}]  {badge_str}"
+        )
+        lines.append(
+            f"     진입가: {entry:,}원 → 목표: {target:,}원 (<b>+{target_pct:.1f}%</b>) | "
+            f"손절: {stop:,}원 ({stop_pct:.1f}%)"
+        )
+        lines.append(
+            f"     R/R: <b>{rr:.1f}x</b> {rr_emoji}{rr_stars}"
+        )
+
+    # ── 한 줄 요약 ────────────────────────────────────────────
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📌 <b>한 줄 요약:</b> {one_line}")
+
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════
