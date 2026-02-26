@@ -415,10 +415,11 @@ FUND_INFLOW_TOP_N      = 7
 
 # volume_analyzer.poll_all_markets() → list[dict]
 {"종목코드": str, "종목명": str, "등락률": float,
- "직전대비": float,               # v2.8 신규: 1분간 추가 상승률 (핵심)
- "거래량배율": float,             # v2.8 변경: 1분간 Δvol / 전일거래량
+ "직전대비": float,               # v2.8 신규: 순간 추가 상승률 (10초간 Δ등락률)
+ "거래량배율": float,             # v3.8 변경: 누적RVOL (acml_vol / prdy_vol 배수)
+ "순간강도": float,               # v3.8 신규: 순간 Δvol / 전일거래량 (%)
  "조건충족": bool, "감지시각": str,
- "감지소스": str}                 # v2.9: "volume"(거래량)|"rate"(등락률) / v3.2: "gap_up"(T2 갭상승)
+ "감지소스": str}                 # "volume"|"rate"|"gap_up"|"websocket"
 
 # dart_collector.collect() → list[dict]
 {"종목명": str, "종목코드": str, "공시종류": str,
@@ -679,6 +680,21 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | [BUG-6] analyzers/closing_strength.py, volume_flat.py: 주말 전일 버그 수정 |
 |      |            | _get_prev_date() timedelta(days=1) → get_prev_trading_day() |
 |      |            | 월요일 입력 시 일요일(데이터 없음) 반환 → 금요일 반환으로 수정 |
+| v3.8 | 2026-02-26 | **초기 급등 포착 & 뒷북 방지 — 장중봇 핵심 로직 개선** |
+|      |            | [문제1] 21.8% 뒷북 알림: volume_ranking은 등락률 무제한이므로 급등 끝 종목도 통과됨 |
+|      |            | [문제2] RVOL 오계산: 거래량배율=순간Δvol이었으나 진짜 RVOL은 누적거래량/전일거래량 |
+|      |            | [문제3] 정렬 오류: MAX_ALERTS_PER_CYCLE 등락률정렬 → 이미 많이 오른 것이 우선 발송 |
+|      |            | config: MAX_CATCH_RATE=12.0 신규 — 등락률 상한 (초과 시 이미 급등 끝) |
+|      |            | config: MIN_CHANGE_RATE 2.0→3.0 상향 — 등락률 하한 강화 |
+|      |            | config: MIN_VOL_RATIO_ACML=30.0 신규 — 누적RVOL 최솟값 (%) |
+|      |            | volume_analyzer: 필터 체인 재구성 (하한→상한→거래대금→전일거래량→누적RVOL→델타) |
+|      |            | volume_analyzer: MAX_CATCH_RATE 상한 필터 (poll_all_markets + _detect_gap_up + analyze_ws_tick) |
+|      |            | volume_analyzer: MIN_VOL_RATIO_ACML 누적RVOL 필터 — 허상 급등(거래량 없는 상승) 차단 |
+|      |            | volume_analyzer: 거래량배율 의미 변경 — 순간Δvol% → 누적RVOL 배수(acml/prdy) |
+|      |            | volume_analyzer: 순간강도 필드 신규 추가 — 순간 Δvol/전일거래량 (%) |
+|      |            | volume_analyzer: MAX_ALERTS_PER_CYCLE 정렬 등락률→직전대비(순간가속도) |
+|      |            | volume_analyzer: 알림 발송 후 _confirm_count[ticker]=0 초기화 (재트리거 방지) |
+|      |            | ARCHITECTURE 계약 업데이트: 반환값에 순간강도 필드 추가 |
 
 ---
 
