@@ -19,6 +19,7 @@ notifiers/telegram_bot.py
 - v3.2: format_realtime_alert — "gap_up" 소스 배지 추가 (⚡ 갭상승)
         format_closing_report — T5 마감강도/T6 횡보급증/T3 시총자금유입 섹션 추가
 - v3.4: Phase 4 — 자동매매 알림 포맷 추가
+- v4.0: format_realtime_alert/ai — 호가 분석 결과 표시 (호가강도/매수매도비율/상위3집중도)
         format_trade_executed() — 모의/실전 매수 체결 알림
         format_trade_closed()   — 포지션 청산 알림 (익절/손절/강제청산)
 """
@@ -397,35 +398,48 @@ def format_closing_report(report: dict) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def format_realtime_alert(analysis: dict) -> str:
-    직전대비 = analysis.get("직전대비", 0.0)
+    직전대비  = analysis.get("직전대비", 0.0)
     거래량배율 = analysis.get("거래량배율", 0.0)   # v3.8: 누적RVOL 배수
-    순간강도  = analysis.get("순간강도", 0.0)       # v3.8: 순간 Δvol%
-    소스배지  = (
+    순간강도   = analysis.get("순간강도", 0.0)      # v3.8: 순간 Δvol%
+    소스배지   = (
         "⚡ 갭상승모멘텀" if analysis.get("감지소스") == "gap_up"
         else "📊 거래량포착" if analysis.get("감지소스") == "volume"
         else "🎯 워치리스트" if analysis.get("감지소스") == "websocket"
         else "📈 등락률포착"
     )
-    # v3.8: 거래량배율=누적RVOL, 순간강도=순간Δvol% 표시
     rvol_line = f"RVOL: 전일 대비 {거래량배율:.1f}배"
     if 순간강도 > 0:
         rvol_line += f"  |  순간강도: {순간강도:.0f}%"
+
+    # [v4.0] 호가 분석 라인
+    ob = analysis.get("호가분석")
+    if ob:
+        강도이모지 = "🔥" if ob["호가강도"] == "강세" else "⚠️" if ob["호가강도"] == "약세" else "➖"
+        ob_line = (
+            f"{강도이모지} 호가: {ob['호가강도']}  "
+            f"매수/매도잔량={ob['매수매도비율']:.1f}x  "
+            f"매도상위3집중={ob['상위3집중도']:.0%}\n"
+        )
+    else:
+        ob_line = ""
+
     return (
         f"🚨 <b>급등 감지</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
         f"등락률: +{analysis['등락률']:.1f}%  <b>(순간 +{직전대비:.1f}%)</b>\n"
         f"{rvol_line}\n"
+        f"{ob_line}"
         f"감지: {analysis['감지시각']}"
     )
 
 
 def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
-    판단  = ai_result.get("판단", "판단불가")
-    이모지 = {"진짜급등": "✅", "작전주의심": "⚠️", "판단불가": "❓"}.get(판단, "❓")
-    직전대비 = analysis.get("직전대비", 0.0)
-    거래량배율 = analysis.get("거래량배율", 0.0)   # v3.8: 누적RVOL 배수
-    순간강도  = analysis.get("순간강도", 0.0)       # v3.8: 순간 Δvol%
-    소스배지  = (
+    판단   = ai_result.get("판단", "판단불가")
+    이모지  = {"진짜급등": "✅", "작전주의심": "⚠️", "판단불가": "❓"}.get(판단, "❓")
+    직전대비  = analysis.get("직전대비", 0.0)
+    거래량배율 = analysis.get("거래량배율", 0.0)
+    순간강도   = analysis.get("순간강도", 0.0)
+    소스배지   = (
         "⚡ 갭상승모멘텀" if analysis.get("감지소스") == "gap_up"
         else "📊 거래량포착" if analysis.get("감지소스") == "volume"
         else "🎯 워치리스트" if analysis.get("감지소스") == "websocket"
@@ -434,11 +448,25 @@ def format_realtime_alert_ai(analysis: dict, ai_result: dict) -> str:
     rvol_line = f"RVOL: 전일 대비 {거래량배율:.1f}배"
     if 순간강도 > 0:
         rvol_line += f"  |  순간강도: {순간강도:.0f}%"
+
+    # [v4.0] 호가 분석 라인
+    ob = analysis.get("호가분석")
+    if ob:
+        강도이모지 = "🔥" if ob["호가강도"] == "강세" else "⚠️" if ob["호가강도"] == "약세" else "➖"
+        ob_line = (
+            f"{강도이모지} 호가: {ob['호가강도']}  "
+            f"매수/매도잔량={ob['매수매도비율']:.1f}x  "
+            f"매도상위3집중={ob['상위3집중도']:.0%}\n"
+        )
+    else:
+        ob_line = ""
+
     return (
         f"🚨 <b>급등 감지 + AI 분석</b>  {소스배지}\n"
         f"종목: <b>{analysis['종목명']}</b> ({analysis['종목코드']})\n"
         f"등락률: +{analysis['등락률']:.1f}%  <b>(순간 +{직전대비:.1f}%)</b>\n"
-        f"{rvol_line}\n\n"
+        f"{rvol_line}\n"
+        f"{ob_line}\n"
         f"{이모지} AI 판단: <b>{판단}</b>\n"
         f"이유: {ai_result.get('이유', 'N/A')}"
     )
