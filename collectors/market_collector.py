@@ -8,6 +8,9 @@ collectors/market_collector.py
 - v1.2: 다우 티커 fallback 추가(^DJI→DIA), summary 길이제한 제거
 - v2.1: 섹터 ETF 수집 추가 (XLK/XLE/XLB/XLI/XLV/XLF)
         → signal_analyzer에서 국내 연동 테마 신호로 변환됨
+- v10.0: 철강/비철 원자재 수집 추가
+        COMMODITY_TICKERS에 TIO=F(철광석), ALI=F(알루미늄) 추가
+        US_SECTOR_TICKERS 확장은 config.py 참조 (XME, SLX)
 """
 
 import yfinance as yf
@@ -24,14 +27,19 @@ US_TICKERS = {
     "dow":    ["^DJI", "DIA"],
 }
 COMMODITY_TICKERS = {
-    "copper": "HG=F",
-    "silver": "SI=F",
-    "gas":    "NG=F",
+    "copper":    "HG=F",
+    "silver":    "SI=F",
+    "gas":       "NG=F",
+    # v10.0 Phase 1 추가 — 철강/비철 선행지표
+    "steel":     "TIO=F",     # 철광석 선물 (DCE 연동, CME 표준)
+    "aluminum":  "ALI=F",     # LME 알루미늄 선물
 }
 COMMODITY_UNITS = {
-    "copper": "$/lb",
-    "silver": "$/oz",
-    "gas":    "$/MMBtu",
+    "copper":    "$/lb",
+    "silver":    "$/oz",
+    "gas":       "$/MMBtu",
+    "steel":     "$/MT",      # 메트릭톤
+    "aluminum":  "$/MT",
 }
 
 
