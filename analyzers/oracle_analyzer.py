@@ -20,6 +20,11 @@ oracle_analyzer → telegram_bot.format_oracle_section() 이 포맷
 - 실패 시 빈 result 반환 (비치명적) — 호출처에서 oracle=None 허용
 - closing_report에서만 T5/T6/T3 파라미터 전달 (morning_report는 None) — rule #16 준수
 
+[v10.0 Phase 1 추가]
+- _score_theme(): 철강/방산 섹터 감지 시 +20 부스팅 로직 추가
+  rule #94 준수: 신호6(지정학) 결과는 signal_analyzer → signals 경유로만 주입됨
+  oracle_analyzer 내부에서 geopolitics_data 직접 참조 금지
+
 [반환값 규격]
 {
     "picks": [           ← 최대 5종목
@@ -380,6 +385,27 @@ def _score_theme(
             score += 4; factors.append(f"신호강도 ★★★★")
         elif sig_strength >= 3:
             score += 2; factors.append(f"신호강도 ★★★")
+
+    # ── v10.0 Phase 1: 철강/방산 테마 부스팅 (+20) ────────────
+    # 설계 근거: 지정학·원자재 신호로 발화한 철강/방산 테마는
+    # 기존 수급 데이터(기관/외인)만으로 포착되지 않으므로
+    # 테마명 기반 예외 부스팅 적용 (design doc §4.1 참조)
+    BOOST_THEMES = {
+        "철강/비철금속", "철강", "방산", "산업재/방산",
+        "에너지솔루션", "자동차부품",
+    }
+    if theme_name in BOOST_THEMES:
+        # 신호6(지정학) 또는 신호2(철강ETF)에서 발화한 테마에만 부스팅
+        has_geo_signal = any(
+            "신호6" in sig.get("발화신호", "") or "신호2" in sig.get("발화신호", "")
+            for sig in signal_map.values()
+            if sig.get("테마명", "") == theme_name
+        )
+        # signal_map에 해당 테마 신호 자체가 존재하면 부스팅
+        if theme_name in signal_map or has_geo_signal:
+            score += 20
+            factors.append(f"🌍 지정학/철강ETF 신호 테마 부스팅 +20 [v10]")
+            logger.info(f"[oracle] {theme_name} 부스팅 +20 (현재 점수: {score})")
 
     return score, factors
 
