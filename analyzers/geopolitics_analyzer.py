@@ -153,7 +153,7 @@ def _enhance_with_ai(
     배치 처리: 최대 10건을 하나의 프롬프트로 처리 (AI 호출 횟수 최소화).
 
     [v10.1 모델 정책] geopolitics_analyzer 전용:
-      Primary  : gemini-2.0-flash  (Gemini 3 Flash — 높은 일일 쿼터)
+      Primary  : gemini-3-flash-preview  (Gemini 3 Flash — 높은 일일 쿼터)
       Fallback : gemini-2.5-flash  (Primary 실패 시 자동 전환)
       ※ gemini-1.5-flash / gemini-2.0-flash-exp 사용 금지 (Google 서비스 종료)
     """
