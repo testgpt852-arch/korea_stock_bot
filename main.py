@@ -19,6 +19,10 @@ main.py
          AUTO_TRADE_ENABLED=false 시 스케줄 등록 자체를 건너뜀
 - v6.0:  [이슈④] TRADING_MODE=REAL 전환 안전장치 — 시작 시 감지 + 텔레그램 확인 + 5분 딜레이
          [5번/P1] 기억 압축 배치 — 매주 일요일 03:30 스케줄 추가
+- v10.0: [Phase 2] 지정학 뉴스 수집 배치 추가
+         06:00 run_geopolitics_collect() — 아침봇(08:30) 전 지정학 이벤트 수집
+         장중 geopolitics 결과는 공유 변수(_geopolitics_cache)에 캐시
+         GEOPOLITICS_ENABLED=false 시 스케줄 등록 건너뜀
 """
 
 import asyncio
@@ -32,6 +36,10 @@ KST = timezone(timedelta(hours=9))   # UTC+9, 외부 패키지 불필요
 
 # 장중봇 중복 실행 방지 플래그
 _realtime_started = False
+
+# v10.0 Phase 2: 지정학 이벤트 캐시 (아침봇·마감봇이 읽는 공유 변수)
+# rule #90 준수: 수집은 geopolitics_collector, 분석은 geopolitics_analyzer
+_geopolitics_cache: list[dict] = []
 
 
 async def run_morning_bot():
@@ -299,6 +307,19 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
     # 아침봇
+    # v10.0 Phase 2: 지정학 수집 (아침봇 전 선행 실행)
+    if config.GEOPOLITICS_ENABLED:
+        scheduler.add_job(run_geopolitics_collect, "cron", hour=6, minute=0, id="geopolitics_morning")
+        scheduler.add_job(
+            run_geopolitics_collect, "cron",
+            minute=f"*/{config.GEOPOLITICS_POLL_MIN}",
+            hour="9-15",
+            id="geopolitics_intraday",
+        )
+        logger.info(
+            f"[main] 지정학 수집 스케줄 등록 — 06:00 + 장중 {config.GEOPOLITICS_POLL_MIN}분 간격"
+        )
+
     scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot_1")
     scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=30, id="morning_bot_2")
 
