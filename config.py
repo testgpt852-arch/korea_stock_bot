@@ -34,6 +34,19 @@ Railway: 서버 Variables에 입력
         MEMORY_COMPRESS_LAYER1_DAYS — 기억 압축 Layer1 보존 기간 (5번 기억 압축)
         MEMORY_COMPRESS_LAYER2_DAYS — 기억 압축 Layer2 요약 보존 기간
         EVALUATE_CONV_TIMEOUT_SEC  — /evaluate 대화 타임아웃 (P2)
+- v10.0: [대규모 개편 — 테마 쪽집게 예측 엔진 전면 강화]
+        Phase 1: 철강/비철 원자재 ETF 확장, 지정학 맵 기반 상수 추가
+        STEEL_ETF_ALERT_THRESHOLD  — 미국 철강 ETF XME 급등 임계값
+        GEOPOLITICS_ENABLED        — 지정학 뉴스 수집 활성화 여부 (Phase 2~)
+        GEOPOLITICS_POLL_MIN       — 장중 지정학 폴링 간격(분)
+        GEOPOLITICS_CONFIDENCE_MIN — 지정학 이벤트 신뢰도 최소값
+        SECTOR_ETF_ENABLED         — 섹터 ETF 자금흐름 수집 활성화 (Phase 3~)
+        SHORT_INTEREST_ENABLED     — 공매도 잔고 수집 활성화 (Phase 3~)
+        THEME_HISTORY_ENABLED      — 이벤트→섹터 이력 DB 누적 활성화 (Phase 3~)
+        FULL_REPORT_FORMAT         — 완전 분석 리포트 포맷 (Phase 4~)
+        US_SECTOR_TICKERS: XME(미국철강), SLX(철강) 추가
+        COMMODITY_TICKERS(market_collector): TIO=F(철광석), ALI=F(알루미늄) 추가
+        COMMODITY_KR_INDUSTRY: steel, aluminum 업종 키워드 추가
 """
 
 import os
@@ -56,6 +69,9 @@ GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
 # 네이버 검색 API
 NAVER_CLIENT_ID     = os.environ.get("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
+
+# v10.0: 지정학 뉴스 수집 (Phase 2 — geopolitics_collector.py)
+GOOGLE_NEWS_API_KEY = os.environ.get("GOOGLE_NEWS_API_KEY", "")
 
 
 # ── 시작 시 키 누락 여부 체크 ─────────────────────────────────
@@ -251,6 +267,9 @@ US_SECTOR_TICKERS = {
     "XLI":  "산업재/방산",
     "XLV":  "바이오/헬스케어",
     "XLF":  "금융",
+    # v10.0 Phase 1 추가 — 철강 선행 지표
+    "XME":  "철강/비철금속",   # Metals & Mining ETF (철광석·철강·광업)
+    "SLX":  "철강",            # VanEck Steel ETF
 }
 
 US_SECTOR_KR_INDUSTRY = {
@@ -260,12 +279,18 @@ US_SECTOR_KR_INDUSTRY = {
     "산업재/방산":    ["항공", "방산", "기계"],
     "바이오/헬스케어":["제약", "바이오", "의료"],
     "금융":           ["은행", "증권", "보험"],
+    # v10.0 Phase 1 추가
+    "철강/비철금속":  ["철강", "금속", "비철"],
+    "철강":           ["철강", "금속"],
 }
 
 COMMODITY_KR_INDUSTRY = {
-    "copper": ["전기/전선", "전선", "전기장비"],
-    "silver": ["귀금속", "비철금속", "태양광"],
-    "gas":    ["가스", "에너지"],
+    "copper":    ["전기/전선", "전선", "전기장비"],
+    "silver":    ["귀금속", "비철금속", "태양광"],
+    "gas":       ["가스", "에너지"],
+    # v10.0 Phase 1 추가
+    "steel":     ["철강", "금속"],          # TIO=F 철광석 선물
+    "aluminum":  ["비철금속", "알루미늄", "항공"],  # ALI=F 알루미늄
 }
 
 SECTOR_TOP_N         = 5
@@ -299,3 +324,27 @@ MEMORY_COMPRESS_ENABLED = os.environ.get("MEMORY_COMPRESS_ENABLED", "true").lowe
 
 # [P2] /evaluate 명령어 대화 타임아웃 (초)
 EVALUATE_CONV_TIMEOUT_SEC = int(os.environ.get("EVALUATE_CONV_TIMEOUT_SEC", "120"))
+
+# ══════════════════════════════════════════════════════════════
+# v10.0 Phase 1 — 철강/비철 ETF 확장 + 지정학 이벤트 기반 설정
+# ══════════════════════════════════════════════════════════════
+
+# 미국 철강 ETF 급등 임계값 — 이 이상이면 신호2 '철강 테마' 발화
+STEEL_ETF_ALERT_THRESHOLD = float(os.environ.get("STEEL_ETF_ALERT_THRESHOLD", "3.0"))  # %
+
+# 지정학 수집 활성화 (Phase 2부터 사용, Phase 1에서는 False 유지)
+GEOPOLITICS_ENABLED       = os.environ.get("GEOPOLITICS_ENABLED", "false").lower() == "true"
+GEOPOLITICS_POLL_MIN      = int(os.environ.get("GEOPOLITICS_POLL_MIN", "30"))       # 장중 폴링 간격(분)
+GEOPOLITICS_CONFIDENCE_MIN = float(os.environ.get("GEOPOLITICS_CONFIDENCE_MIN", "0.6"))
+
+# 섹터 ETF 자금흐름 수집 활성화 (Phase 3)
+SECTOR_ETF_ENABLED        = os.environ.get("SECTOR_ETF_ENABLED", "true").lower() == "true"
+
+# 공매도 잔고 수집 (Phase 3 — KIS REST 추가 권한 필요)
+SHORT_INTEREST_ENABLED    = os.environ.get("SHORT_INTEREST_ENABLED", "false").lower() == "true"
+
+# 이벤트→섹터 이력 DB 누적 (Phase 3)
+THEME_HISTORY_ENABLED     = os.environ.get("THEME_HISTORY_ENABLED", "true").lower() == "true"
+
+# 완전 분석 리포트 포맷 (Phase 4)
+FULL_REPORT_FORMAT        = os.environ.get("FULL_REPORT_FORMAT", "false").lower() == "true"
