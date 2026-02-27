@@ -20,6 +20,9 @@ analyzers/signal_analyzer.py
 - v10.0 Phase 2: 신호6 — 지정학·정책 이벤트 신호 통합
         geopolitics_data(geopolitics_collector.collect() 반환값) 주입 시 신호6 생성
         _analyze_geopolitics() 추가
+- v10.0 Phase 3: 신호7 — 섹터 자금흐름 + 공매도 잔고 신호 통합
+        sector_flow_data(sector_flow_analyzer.analyze() 반환값) 주입 시 신호7 생성
+        rule #94 계열 준수: sector_flow_analyzer → signal_analyzer → oracle_analyzer 경유 필수
 """
 
 import config
@@ -27,20 +30,24 @@ from utils.logger import logger
 
 
 def analyze(
-    dart_data:        list[dict],
-    market_data:      dict,
-    news_data:        dict,
-    price_data:       dict = None,
-    geopolitics_data: list[dict] = None,   # v10.0 Phase 2: 지정학 이벤트 (None이면 신호6 생략)
+    dart_data:          list[dict],
+    market_data:        dict,
+    news_data:          dict,
+    price_data:         dict = None,
+    geopolitics_data:   list[dict] = None,   # v10.0 Phase 2: 지정학 이벤트 (None이면 신호6 생략)
+    sector_flow_data:   dict       = None,   # v10.0 Phase 3: 섹터 자금흐름 (None이면 신호7 생략)
 ) -> dict:
     """
-    신호 1~6 통합 분석
+    신호 1~7 통합 분석
     반환: dict {signals, market_summary, commodities, volatility,
-                report_picks, policy_summary}
+                report_picks, policy_summary, sector_scores}
 
     [v10.0 추가]
     - geopolitics_data: geopolitics_collector.collect() 반환값.
-      None(기본)이면 신호6 생략 (Phase 1 하위 호환).
+      None(기본)이면 신호6 생략 (Phase 1·2 하위 호환).
+    - sector_flow_data: sector_flow_analyzer.analyze() 반환값.
+      None(기본)이면 신호7 생략 (Phase 1·2 하위 호환).
+      sector_scores 포함 시 oracle_analyzer에 전달 가능.
     """
     logger.info("[signal] 신호 1~5 분석 시작")
 
@@ -113,8 +120,21 @@ def analyze(
         signals.extend(geo_signals)
         logger.info(f"[signal] 신호6 (지정학): {len(geo_signals)}개 이벤트 발화")
 
+    # ── 신호 7: 섹터 자금흐름 + 공매도 잔고 (v10.0 Phase 3) ───
+    # rule #94 계열: sector_flow_analyzer → signal_analyzer → oracle_analyzer 경유 필수
+    # oracle_analyzer에 직접 전달 금지 — signals 리스트에 추가
+    sector_scores: dict = {}
+    if sector_flow_data:
+        sf_signals = sector_flow_data.get("signals", [])
+        signals.extend(sf_signals)
+        sector_scores = sector_flow_data.get("sector_scores", {})
+        logger.info(
+            f"[signal] 신호7 (섹터수급): {len(sf_signals)}개 신호 추가 "
+            f"(섹터점수 {len(sector_scores)}개)"
+        )
+
     signals.sort(key=lambda x: x["강도"], reverse=True)
-    logger.info(f"[signal] 총 {len(signals)}개 신호 감지")
+    logger.info(f"[signal] 총 {len(signals)}개 신호 감지 (신호1~7)")
 
     volatility = _judge_volatility(market_summary, price_data)
 
@@ -125,6 +145,7 @@ def analyze(
         "volatility":     volatility,
         "report_picks":   reports[:5],
         "policy_summary": policy[:3],
+        "sector_scores":  sector_scores,   # v10.0 Phase 3: oracle_analyzer에 전달
     }
 
 

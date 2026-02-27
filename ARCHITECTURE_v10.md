@@ -2,7 +2,17 @@
 
 > **📋 감사 이력**: 2026-02-27, Claude Sonnet 4.6 전수 감사 완료 (v9.1-AUDIT-CLEAN 기준)
 > 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
-> **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2 개편 내용을 반영한 최신 아키텍처입니다.**
+> **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3 개편 내용을 반영한 최신 아키텍처입니다.**
+>
+> **📋 v10.4 Phase 3 구현**: 2026-02-27, Claude Sonnet 4.6
+> 섹터 수급 분석 + 공매도 잔고 신호 체계 전면 구현:
+> ① collectors/sector_etf_collector.py 신규 — KODEX 섹터 ETF 11종 거래량 Z-스코어 수집 (pykrx, 마감봇 전용, rule #92)
+> ② collectors/short_interest_collector.py 신규 — 공매도 잔고 급감 종목 수집 (pykrx, SHORT_INTEREST_ENABLED=false 기본)
+> ③ analyzers/sector_flow_analyzer.py 신규 — ETF Z-스코어 + 공매도 클러스터 → 신호7 방향성 점수화 (rule #92)
+> ④ tracking/theme_history.py 신규 — 이벤트→급등 섹터 이력 DB 누적 (rule #95, 마감봇 완료 후 자동 기록)
+> ⑤ analyzers/signal_analyzer.py 확장 — sector_flow_data 파라미터 추가, 신호7 통합, sector_scores 반환
+> ⑥ analyzers/oracle_analyzer.py 확장 — sector_scores 파라미터 추가, _score_theme() 신호7 +10~+20 반영
+> ⑦ reports/closing_report.py 확장 — Phase 3 수집→분석→신호7→oracle→theme_history 파이프라인 완성
 >
 > **📋 v10.3 Gemini 모델 서비스종료 대응**: 2026-02-27, Claude Sonnet 4.6
 > Google Gemini 서비스 종료 확인에 따른 전면 교체:
@@ -135,15 +145,25 @@ korea_stock_bot/
 │   ├── price_collector.py   ← pykrx 일별 확정 데이터 (마감 후 전용)
 │   ├── market_collector.py  ← 미국증시(yfinance), 원자재 [v10.0] 철광석(TIO=F)·알루미늄(ALI=F) 추가
 │   ├── news_collector.py    ← 리포트·뉴스 (네이버 검색 API)
-│   └── geopolitics_collector.py  ← [v10.0 Phase 2 신규] RSS 파싱 + 지정학 뉴스 URL 수집
-│                                     Reuters·Bloomberg·기재부·방사청·Google News RSS (API 키 없이 무료)
-│                                     비치명적: 소스 실패 시 빈 리스트 반환 (아침봇 blocking 금지)
-│                                     AI 분석·텔레그램 발송·DB 기록 절대 금지 (rule #90)
+│   ├── geopolitics_collector.py  ← [v10.0 Phase 2 신규] RSS 파싱 + 지정학 뉴스 URL 수집
+│   │                                 Reuters·Bloomberg·기재부·방사청·Google News RSS (API 키 없이 무료)
+│   │                                 비치명적: 소스 실패 시 빈 리스트 반환 (아침봇 blocking 금지)
+│   │                                 AI 분석·텔레그램 발송·DB 기록 절대 금지 (rule #90)
+│   ├── sector_etf_collector.py   ← [v10.0 Phase 3 신규] KODEX 섹터 ETF 11종 거래량·자금유입 수집
+│   │                                 pykrx 기반 마감봇(18:30) 전용 — 장중 호출 절대 금지 (rule #92)
+│   │                                 거래량 Z-스코어 계산용 당일+전일 OHLCV 수집
+│   │                                 비치명적: ETF 실패 시 빈 리스트 반환
+│   └── short_interest_collector.py ← [v10.0 Phase 3 신규] 공매도 잔고 급감 종목 수집
+│                                     pykrx get_market_short_selling_volume_by_ticker() 기반
+│                                     SHORT_INTEREST_ENABLED=false(기본): 비활성화 (KIS 권한 필요 시 true)
+│                                     잔고 급감 -30% 이상 → 쇼트커버링_예고 신호 분류
 │
 ├── analyzers/
 │   ├── volume_analyzer.py        ← 장중 급등 감지 (KIS REST 실시간) + T2 갭상승
 │   ├── theme_analyzer.py         ← 테마 그룹핑, 순환매 소외도
-│   ├── signal_analyzer.py        ← 신호 1~5
+│   ├── signal_analyzer.py        ← [v10.4] 신호 1~7 통합
+│   │                                 [v10.0 Phase 3] sector_flow_data 파라미터 추가
+│   │                                 신호7 signals 통합 + sector_scores 반환 (oracle_analyzer 경유용)
 │   ├── ai_analyzer.py            ← Gemma-3-27b-it 2차 분석 [v4.2 Phase 1: 프롬프트 전면 강화]
 │   │                                 analyze_spike(): 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS
 │   │                                 (rule #38: 오닐 인격 블록 삭제 금지)
@@ -154,6 +174,12 @@ korea_stock_bot/
 │   │                                 테마/수급/공시/T5·T6·T3 종합 (외부 API·DB·발송 호출 없음)
 │   │                                 closing_report(T5/T6/T3 포함) + morning_report(수급·공시만) 양쪽 호출
 │   │                                 [v10.0 Phase 1] _score_theme(): 철강/방산 테마 +20 부스팅
+│   │                                 [v10.0 Phase 3] sector_scores 파라미터 추가, 신호7 +10~+20 반영
+│   ├── sector_flow_analyzer.py   ← [v10.0 Phase 3 신규] 섹터 ETF 자금흐름 + 공매도 잔고 → 방향성 점수화
+│   │                                 입력: sector_etf_collector + short_interest_collector 반환값
+│   │                                 ETF 거래량 Z-스코어 ≥ 2.0 → 이상 감지, 공매도 클러스터 분석
+│   │                                 출력: 신호7 signals + sector_scores dict (oracle_analyzer에 전달)
+│   │                                 pykrx·KIS API 직접 호출 절대 금지 (rule #92)
 │   └── geopolitics_analyzer.py   ← [v10.3] 지정학 이벤트 → 섹터 매핑 + gemini-3-flash-preview 분석 (fallback: gemini-2.5-flash)
 │                                     geopolitics_map 사전 패턴 매칭 우선 (사전 6 : AI 4 가중 평균)
 │                                     gemini-3-flash-preview 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
@@ -208,6 +234,12 @@ korea_stock_bot/
 │   │                           record_journal() / get_weekly_patterns() / get_journal_context()
 │   │                           [v6.0 이슈②] get_journal_context() 토큰 제한 (JOURNAL_MAX_ITEMS/CHARS)
 │   │                           compression_layer별 포맷 분기 (Layer1 상세 / Layer2 요약 / Layer3 핵심)
+│   ├── theme_history.py     ← [v10.0 Phase 3 신규] 이벤트→급등 섹터 이력 DB 누적
+│   │                           DB 테이블: theme_event_history (날짜/이벤트유형/섹터/대장주/등락률)
+│   │                           closing_report.py 마감봇 완료 후 자동 기록 (rule #95)
+│   │                           저장·조회만 담당 — 분석·AI 호출·발송 절대 금지 (rule #95)
+│   │                           query_sector_patterns() / query_event_patterns() 조회 API 제공
+│   │                           향후 geopolitics_analyzer 가중치 조정 참고 데이터로 활용
 │   └── memory_compressor.py ← [v6.0 5번/P1 신규] 3계층 기억 압축 배치
 │                               Prism CompressionManager 경량화 구현 (동기 Gemma)
 │                               Layer1(0~7일) → Layer2(AI요약) → Layer3(핵심한줄)
@@ -329,6 +361,19 @@ analyzers/signal_analyzer.py        ← reports/morning_report (geopolitics_data
 notifiers/telegram_bot.py           ← format_morning_report(geopolitics_data 추가)
                                        🌍 글로벌 트리거 섹션: 신뢰도 상위 3건, 미국증시 섹션 앞에 삽입
                                        원자재 섹션: 철광석(TIO=F)·알루미늄(ALI=F) 추가                ← v10.0
+
+[v10.0 Phase 3: 섹터 수급 분석 + 공매도 잔고 신호]
+collectors/sector_etf_collector.py    ← closing_report.py 마감봇(18:30)에서만 호출 (rule #92)           ← v10.0
+collectors/short_interest_collector.py ← closing_report.py 마감봇(18:30)에서만 호출 (rule #92)          ← v10.0
+analyzers/sector_flow_analyzer.py    ← etf_data + short_data 입력 → ETF Z-스코어 + 공매도 클러스터      ← v10.0
+                                       신호7 signals 생성 (강도3~5) + sector_scores dict 반환
+analyzers/signal_analyzer.py         ← sector_flow_data 파라미터 추가: 신호7 signals → 통합 signals     ← v10.0
+                                       sector_scores → 반환값 "sector_scores" 키로 노출
+analyzers/oracle_analyzer.py         ← sector_scores 파라미터 추가: _score_theme() 신호7 +10~+20 반영   ← v10.0
+                                       sf_score ≥ 30: +20 / sf_score ≥ 15: +10
+tracking/theme_history.py            ← closing_report.py 마감봇 완료 직후 record_closing() 호출          ← v10.0
+                                       theme_event_history 테이블에 이벤트→섹터→대장주 이력 누적
+                                       query_sector_patterns() / query_event_patterns() 조회 API 제공
 ```
 
 ---
@@ -350,14 +395,17 @@ graph TD
         MC["market_collector\nyfinance·원자재\n[v10.0] 철광석·알루미늄 추가"]
         NC["news_collector"]
         GC["geopolitics_collector\n[v10.0 Phase2] RSS 파싱"]
+        EC["sector_etf_collector\n[v10.0 Phase3] KODEX ETF 수집\n마감봇 전용"]
+        SIC["short_interest_collector\n[v10.0 Phase3] 공매도 잔고\n마감봇 전용"]
     end
 
     subgraph "🧠 analyzers/"
         VA["volume_analyzer\nKIS REST 실시간"]
         TA["theme_analyzer"]
-        SA["signal_analyzer\n[v10.0] 신호2확장·신호6"]
+        SA["signal_analyzer\n[v10.0] 신호2확장·신호6·신호7"]
         AI["ai_analyzer\nGemma-3-27b-it"]
         GA["geopolitics_analyzer\n[v10.3] gemini-3-flash-preview\nfallback: gemini-2.5-flash"]
+        SFA["sector_flow_analyzer\n[v10.0 Phase3] 신호7\nETF Z-스코어+공매도클러스터"]
     end
 
     subgraph "📊 reports/"
@@ -1828,8 +1876,20 @@ from pykrx import stock                            # pykrx 호출 금지
 
 ---
 
-**rule #92** — `sector_flow_analyzer.py` (Phase 3 예정)의 pykrx 호출은 **아침봇(08:30) 전용**.
+**rule #92** — `sector_etf_collector.py` + `sector_flow_analyzer.py`의 pykrx 호출은 **마감봇(18:30) 전용**.
 장중 실시간 섹터 수급 필요 시 KIS REST 섹터 지표 사용 **(pykrx 장중 호출 금지 — rule #10 준수)**.
+`sector_flow_analyzer.py`는 입력 파라미터(etf_data, short_data)만 분석 — pykrx·KIS API 직접 호출 금지.
+
+```python
+# ✅ 허용 — 마감봇(18:30)에서만
+etf_data   = sector_etf_collector.collect(target)    # pykrx 호출: 마감봇 전용
+short_data = short_interest_collector.collect(target) # pykrx 호출: 마감봇 전용
+sf_result  = sector_flow_analyzer.analyze(etf_data, short_data, ...)  # 분석만
+
+# ❌ 금지
+# 장중봇(realtime_alert.py)에서 sector_etf_collector.collect() 호출 금지
+# sector_flow_analyzer 내부에서 pykrx 직접 호출 금지
+```
 
 ---
 
@@ -1847,23 +1907,43 @@ genai.GenerativeModel(...).generate_content(...)  # AI 호출 금지
 
 ---
 
-**rule #94** — 신호6(지정학) 결과는 **반드시 `signal_analyzer.analyze()`의 `geopolitics_data` 파라미터**로 전달.
+**rule #94** — 신호6(지정학) 및 신호7(섹터수급) 결과는 **반드시 `signal_analyzer.analyze()`를 경유**하여 전달.
 `oracle_analyzer`에 직접 전달 **절대 금지** — signal_analyzer 경유 필수.
 
 ```python
 # ✅ 허용 경로
-geo_result = geopolitics_analyzer.analyze(raw_news)
-signal_result = signal_analyzer.analyze(..., geopolitics_data=geo_result)
-oracle_result = oracle_analyzer.analyze(..., signals=signal_result["signals"])
+geo_result  = geopolitics_analyzer.analyze(raw_news)
+sf_result   = sector_flow_analyzer.analyze(etf_data, short_data, ...)
+signal_result = signal_analyzer.analyze(
+    ...,
+    geopolitics_data=geo_result,   # 신호6
+    sector_flow_data=sf_result,    # 신호7
+)
+oracle_result = oracle_analyzer.analyze(
+    ...,
+    signals=signal_result["signals"],          # 신호6·7 포함
+    sector_scores=signal_result["sector_scores"],  # 신호7 섹터 점수
+)
 
 # ❌ 금지 경로
 oracle_result = oracle_analyzer.analyze(..., geopolitics_data=geo_result)  # 직접 전달 금지
+oracle_result = oracle_analyzer.analyze(..., sector_flow_data=sf_result)   # 직접 전달 금지
 ```
 
 ---
 
-**rule #95** — `tracking/theme_history.py` (Phase 3 예정)는 이벤트→급등 섹터 이력 DB 저장·조회만 담당.
-분석·발송·AI 호출 **절대 금지**. `main.py` 마감봇 완료 후 자동 기록.
+**rule #95** — `tracking/theme_history.py`는 이벤트→급등 섹터 이력 DB 저장·조회만 담당.
+분석·발송·AI 호출 **절대 금지**. `closing_report.py` 마감봇 완료 후 자동 기록.
+
+```python
+# ✅ 허용
+theme_history.record_closing(date_str, top_gainers, signals, oracle_result)  # 저장만
+rows = theme_history.query_sector_patterns("철강")                           # 조회만
+# ❌ 금지
+theme_history.analyze_patterns()  # 분석 로직 금지
+theme_history.send_telegram()      # 발송 금지
+genai.generate_content(...)        # AI 호출 금지
+```
 
 ---
 

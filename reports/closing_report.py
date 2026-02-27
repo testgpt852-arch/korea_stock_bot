@@ -6,6 +6,8 @@ reports/closing_report.py
 closing_report → price_collector, theme_analyzer, ai_analyzer, telegram_bot
 closing_report → closing_strength, volume_flat, fund_inflow_analyzer  ← v3.2 T5/T6/T3
 closing_report → oracle_analyzer                                       ← v8.1 쪽집게봇
+closing_report → sector_etf_collector, short_interest_collector,      ← v10.0 Phase 3
+                 sector_flow_analyzer, theme_history
 수정 시 이 파일만 수정 (나머지 건드리지 않음)
 
 [실행 흐름]
@@ -17,12 +19,17 @@ closing_report → oracle_analyzer                                       ← v8.
    fund_inflow_analyzer → T3 시총 대비 자금유입 종목 (v3.2)
    _update_watchlist_from_closing() → 내일 WebSocket 워치리스트 보강 (v3.2)
 ④-b oracle_analyzer → 테마·수급·공시·T5/T6/T3 종합 → 내일 픽 + 진입조건  ← v8.1 신규
+④-c sector_etf_collector + short_interest_collector → sector_flow_analyzer  ← v10.0 Phase 3
+    → 신호7 (섹터수급) → oracle_analyzer 점수 반영 + theme_history 기록
 ⑤ telegram_bot     → 쪽집게 섹션 선발송 → 마감 리포트 후발송              ← v8.1 변경
 
 [수정이력]
 - v8.1: oracle_analyzer 통합
         쪽집게 섹션(format_oracle_section) 선발송 추가
         T5/T6/T3 결과를 oracle_analyzer에 전달 (rule #16 준수 — 마감봇에서만)
+- v10.0 Phase 3: sector_etf_collector + short_interest_collector 통합
+        sector_flow_analyzer 신호7 → signal_result 주입
+        theme_history.record_closing() 마감봇 완료 후 자동 기록 (rule #95)
 """
 
 from datetime import datetime
@@ -35,6 +42,7 @@ import analyzers.closing_strength      as closing_strength    # v3.2: T5 마감 
 import analyzers.volume_flat           as volume_flat         # v3.2: T6 횡보 거래량
 import analyzers.fund_inflow_analyzer  as fund_inflow_analyzer  # v3.2: T3 시총 자금유입
 import analyzers.oracle_analyzer       as oracle_analyzer     # v8.1: 쪽집게봇
+import analyzers.sector_flow_analyzer  as sector_flow_analyzer  # v10.0 Phase 3: 신호7
 import utils.watchlist_state           as watchlist_state     # v3.2: 마감봇→장중봇 워치리스트
 import notifiers.telegram_bot     as telegram_bot
 
@@ -105,8 +113,36 @@ async def run() -> None:
         # 내일 WebSocket 워치리스트에 T5/T6 종목 추가
         _update_watchlist_from_closing(cs_result, vf_result, price_result)
 
+        # ── 4-c. 섹터 ETF + 공매도 잔고 분석 (v10.0 Phase 3) ───
+        # rule #92: sector_etf_collector는 마감봇(18:30) 전용 — 장중 호출 금지
+        # rule #95: theme_history는 저장 전용 — 분석 없음
+        logger.info("[closing] 섹터 ETF 자금흐름 + 공매도 잔고 분석 중 (신호7)...")
+        sector_flow_result = {}
+        try:
+            import collectors.sector_etf_collector    as sector_etf_collector
+            import collectors.short_interest_collector as short_interest_collector
+
+            etf_data   = sector_etf_collector.collect(target)
+            short_data = short_interest_collector.collect(target)
+
+            sector_flow_result = sector_flow_analyzer.analyze(
+                etf_data=etf_data,
+                short_data=short_data,
+                price_by_sector=price_result.get("by_sector", {}),
+            )
+            sf_signals = sector_flow_result.get("signals", [])
+            # 신호7 → ai_signals에 추가 (rule #94 계열: signal_analyzer 경유)
+            ai_signals = ai_signals + sf_signals
+            logger.info(
+                f"[closing] 신호7 추가: {len(sf_signals)}개 "
+                f"(상위섹터: {sector_flow_result.get('top_sectors', [])})"
+            )
+        except Exception as _e:
+            logger.warning(f"[closing] 섹터ETF/공매도 분석 실패 (비치명적): {_e}")
+            sector_flow_result = {}
+
         # ── 4-b. 쪽집게 분석 (v8.1 신규) ─────────────────────
-        # T5/T6/T3 결과까지 종합 → 내일 주도 테마 + 종목 픽 + 진입조건
+        # T5/T6/T3 + 신호7 결과까지 종합 → 내일 주도 테마 + 종목 픽 + 진입조건
         # rule #16 준수: closing_report에서만 T5/T6/T3 전달 가능
         logger.info("[closing] 쪽집게 분석 중 (내일 픽 + 진입조건)...")
         market_env_val = watchlist_state.get_market_env() or ""
@@ -121,6 +157,7 @@ async def run() -> None:
                 closing_strength=cs_result,  # T5 — 마감봇 전용
                 volume_flat=vf_result,       # T6 — 마감봇 전용
                 fund_inflow=fi_result,       # T3 — 마감봇 전용
+                sector_scores=sector_flow_result.get("sector_scores"),  # Phase 3 신호7
             )
         except Exception as _e:
             logger.warning(f"[closing] 쪽집게 분석 실패 (비치명적): {_e}")
@@ -146,6 +183,20 @@ async def run() -> None:
             # v8.1: 쪽집게 분석 결과
             "oracle":           oracle_result,
         }
+
+        # ── 5-a. theme_history 기록 (v10.0 Phase 3) ────────────
+        # rule #95: 마감봇 완료 후 이벤트→급등 섹터 이력 저장 (분석 없음)
+        try:
+            from tracking import theme_history
+            theme_history.record_closing(
+                date_str=target_str,
+                top_gainers=price_result.get("top_gainers", []),
+                signals=ai_signals,
+                oracle_result=oracle_result,
+                geo_events=None,   # 마감봇에서 geopolitics_data 없으면 None
+            )
+        except Exception as _e:
+            logger.warning(f"[closing] theme_history 기록 실패 (비치명적): {_e}")
 
         # ── 6. 텔레그램 발송 (v8.1: 쪽집게 섹션 선발송) ──────────
         logger.info("[closing] 텔레그램 발송 중...")

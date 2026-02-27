@@ -25,6 +25,11 @@ oracle_analyzer → telegram_bot.format_oracle_section() 이 포맷
   rule #94 준수: 신호6(지정학) 결과는 signal_analyzer → signals 경유로만 주입됨
   oracle_analyzer 내부에서 geopolitics_data 직접 참조 금지
 
+[v10.0 Phase 3 추가]
+- analyze() 파라미터에 sector_scores(dict) 추가
+  signal_result["sector_scores"] 경유로만 주입 (rule #94 계열 준수)
+  _score_theme()에서 sector_flow_analyzer 섹터 점수를 컨플루언스에 반영 (+10~+20)
+
 [반환값 규격]
 {
     "picks": [           ← 최대 5종목
@@ -98,6 +103,7 @@ def analyze(
     closing_strength: list | None = None,   # 마감봇에서만 전달 (T5) — rule #16
     volume_flat: list | None = None,         # 마감봇에서만 전달 (T6) — rule #16
     fund_inflow: list | None = None,         # 마감봇에서만 전달 (T3) — rule #16
+    sector_scores: dict | None = None,       # v10.0 Phase 3: 섹터 수급 점수 — signal_result 경유
 ) -> dict:
     """
     컨플루언스 스코어링으로 내일 주도 테마와 종목 픽을 결정한다.
@@ -130,6 +136,7 @@ def analyze(
         vf_set      = _build_code_set(volume_flat     or [])    # T6
         fi_set      = _build_code_set(fund_inflow     or [])    # T3
         signal_map  = _build_signal_map(signals)
+        sector_scores_map = sector_scores or {}                  # Phase 3: 섹터 수급 점수
         rr_threshold = _RR_THRESHOLD.get(market_env, 1.5)
 
         # ── 1. 테마별 컨플루언스 점수 계산 ─────────────────────
@@ -137,7 +144,7 @@ def analyze(
         for theme in theme_map:
             score, factors = _score_theme(
                 theme, price_by_name, inst_map, dart_map,
-                cs_set, vf_set, fi_set, signal_map,
+                cs_set, vf_set, fi_set, signal_map, sector_scores_map,
             )
             if score > 0:
                 scored_themes.append({
@@ -281,9 +288,10 @@ def _score_theme(
     vf_set: set,
     fi_set: set,
     signal_map: dict,
+    sector_scores: dict = None,   # v10.0 Phase 3: 섹터 수급 점수 (sector_flow_analyzer)
 ) -> tuple[int, list[str]]:
     """
-    테마 하나의 컨플루언스 점수(0~105)와 근거 목록을 반환.
+    테마 하나의 컨플루언스 점수(0~115)와 근거 목록을 반환.
 
     [점수 배분 — 스마트머니 우선]
     기관/외인 수급  최대 30점  (스마트머니 확인)
@@ -292,6 +300,8 @@ def _score_theme(
     공시 AI 점수    최대 15점  (펀더멘털 촉매)
     T3/T6 보조      최대 10점  (자금유입 확인)
     신호 강도 보너스 최대 5점   (모멘텀 강도)
+    [v10.0 Phase 1] 철강/방산 테마 부스팅 최대 20점
+    [v10.0 Phase 3] 섹터 수급 보너스 최대 10점 (sector_flow_analyzer Z-스코어 기반)
     """
     score = 0
     factors = []
@@ -406,6 +416,20 @@ def _score_theme(
             score += 20
             factors.append(f"🌍 지정학/철강ETF 신호 테마 부스팅 +20 [v10]")
             logger.info(f"[oracle] {theme_name} 부스팅 +20 (현재 점수: {score})")
+
+    # ── v10.0 Phase 3: 섹터 수급 보너스 (+10 또는 +20) ─────────
+    # sector_flow_analyzer Z-스코어 기반 ETF 거래량 이상 섹터에 추가 점수
+    # rule #94 계열: sector_scores는 signal_result["sector_scores"] 경유로만 주입
+    if sector_scores:
+        sf_score = sector_scores.get(theme_name, 0)
+        if sf_score >= 30:
+            score += 20
+            factors.append(f"📊 섹터ETF+공매도 수급 신호 +20 [신호7·Z≥2]")
+            logger.info(f"[oracle] {theme_name} 섹터수급 보너스 +20 (sf_score={sf_score})")
+        elif sf_score >= 15:
+            score += 10
+            factors.append(f"📊 섹터ETF 거래량 이상 +10 [신호7]")
+            logger.info(f"[oracle] {theme_name} 섹터수급 보너스 +10 (sf_score={sf_score})")
 
     return score, factors
 
