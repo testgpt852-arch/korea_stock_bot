@@ -2,7 +2,31 @@
 
 > **📋 감사 이력**: 2026-02-27, Claude Sonnet 4.6 전수 감사 완료 (v9.1-AUDIT-CLEAN 기준)
 > 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
-> **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3 개편 내용을 반영한 최신 아키텍처입니다.**
+> **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3·4 개편 내용을 반영한 최신 아키텍처입니다.**
+>
+> **📋 v10.6 Phase 4-2 구현**: 2026-02-28, Claude Sonnet 4.6
+> 완전 분석 리포트 포맷 + 테마 정확도 학습 DB 구현:
+> ① tracking/accuracy_tracker.py 신규 — 예측 테마 vs 실제 급등 테마 비교 누적
+>    record_prediction() (아침/마감봇 oracle 예측 기록)
+>    record_actual() (마감봇 실제 급등 기록 + 정확도 계산)
+>    get_signal_weights() (oracle_analyzer 가중치 로드)
+>    get_accuracy_stats() (텔레그램 리포트용 통계)
+> ② tracking/db_schema.py 확장 — theme_accuracy + signal_weights 테이블 추가
+>    _migrate_v106() 마이그레이션 추가 (기존 DB 하위 호환)
+> ③ notifiers/telegram_bot.py 확장 — FULL_REPORT_FORMAT=true 전용 포맷 추가
+>    format_morning_report_full() — 4단계 구조 아침봇 리포트
+>    format_closing_report_full() — 4단계 구조 마감봇 리포트 (accuracy_stats 포함)
+>    format_accuracy_stats() — 신호 가중치 현황 독립 포맷
+>    기존 format_morning_report() / format_closing_report() 하위 호환 유지
+> ④ reports/morning_report.py 확장 — FULL_REPORT_FORMAT 분기, accuracy_tracker.record_prediction()
+> ⑤ reports/closing_report.py 확장 — FULL_REPORT_FORMAT 분기, accuracy_tracker.record_actual()
+>    5-b 단계 추가: 실제 급등 기록 → 정확도 계산 → accuracy_stats 보고서에 포함
+> ⑥ analyzers/oracle_analyzer.py 확장 — signal_weights 로드·적용
+>    _load_signal_weights() 추가 (accuracy_tracker 의존, 비치명적 폴백)
+>    _score_theme() 파라미터 signal_weights 추가
+>    신호 강도 보너스에 학습 가중치 반영 (지수이동평균 방식, 범위 0.4~1.5)
+> ⑦ config.py — FULL_REPORT_FORMAT 기존 상수 활용 (신규 상수 불필요)
+> ⑧ 절대 금지 규칙 #100 추가 (accuracy_tracker 역할 경계)
 >
 > **📋 v10.5 Phase 4-1 구현**: 2026-02-28, Claude Sonnet 4.6
 > 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 체계 구현:
@@ -274,6 +298,13 @@ korea_stock_bot/
 │   │                           저장·조회만 담당 — 분석·AI 호출·발송 절대 금지 (rule #95)
 │   │                           query_sector_patterns() / query_event_patterns() 조회 API 제공
 │   │                           향후 geopolitics_analyzer 가중치 조정 참고 데이터로 활용
+│   ├── accuracy_tracker.py  ← [v10.0 Phase 4-2 신규] 테마 예측 정확도 학습 + 신호 가중치 자동 조정
+│   │                           DB 테이블: theme_accuracy (예측 vs 실제), signal_weights (신호별 가중치)
+│   │                           record_prediction() — 아침/마감봇 oracle 예측 기록
+│   │                           record_actual()     — 마감봇 실제 급등 기록 + 정확도 계산
+│   │                           get_signal_weights() → oracle_analyzer에서 로드 (비치명적)
+│   │                           get_accuracy_stats() → telegram_bot.format_accuracy_stats()
+│   │                           저장·계산만 담당 — AI 호출·발송·KIS API 절대 금지 (rule #100)
 │   └── memory_compressor.py ← [v6.0 5번/P1 신규] 3계층 기억 압축 배치
 │                               Prism CompressionManager 경량화 구현 (동기 Gemma)
 │                               Layer1(0~7일) → Layer2(AI요약) → Layer3(핵심한줄)
@@ -422,6 +453,13 @@ analyzers/oracle_analyzer.py         ← sector_scores 파라미터 추가: _sco
 tracking/theme_history.py            ← closing_report.py 마감봇 완료 직후 record_closing() 호출          ← v10.0
                                        theme_event_history 테이블에 이벤트→섹터→대장주 이력 누적
                                        query_sector_patterns() / query_event_patterns() 조회 API 제공
+tracking/accuracy_tracker.py         ← morning_report.py: record_prediction() (oracle 예측 기록)          ← v10.6
+tracking/accuracy_tracker.py         ← closing_report.py: record_actual() (실제 급등 기록 + 정확도 계산)  ← v10.6
+tracking/accuracy_tracker.py         → oracle_analyzer.py: get_signal_weights() (비치명적, 실패 시 빈 dict) ← v10.6
+                                       theme_accuracy 테이블: 날짜별 예측 vs 실제 비교 이력
+                                       signal_weights 테이블: 신호1~8 가중치 자동 조정
+notifiers/telegram_bot.py            ← format_morning/closing_report_full(): FULL_REPORT_FORMAT=true 전용  ← v10.6
+                                       format_accuracy_stats(): 신호 가중치 현황 독립 포맷
 ```
 
 ---
@@ -1272,6 +1310,14 @@ gemini-1.5-pro      ❌ 서비스 종료 — 절대 사용 금지 (Google 지원
 
 | 버전 | 날짜 | 변경 내용 |
 |------|------|---------|
+| v10.6 | 2026-02-28 | **Phase 4-2 — 완전 분석 리포트 포맷 + 테마 정확도 학습 DB 구현** |
+|       |            | tracking/accuracy_tracker.py 신규: 예측 vs 실제 비교 + signal_weights 자동 조정 |
+|       |            | tracking/db_schema.py 확장: theme_accuracy + signal_weights 테이블, _migrate_v106() |
+|       |            | notifiers/telegram_bot.py 확장: format_morning/closing_report_full(), format_accuracy_stats() |
+|       |            | reports/morning_report.py: FULL_REPORT_FORMAT 분기, accuracy_tracker.record_prediction() |
+|       |            | reports/closing_report.py: FULL_REPORT_FORMAT 분기, accuracy_tracker.record_actual() |
+|       |            | analyzers/oracle_analyzer.py: signal_weights 로드·반영, _score_theme() 가중치 파라미터 추가 |
+|       |            | 절대 금지 규칙 #100 추가 (accuracy_tracker 역할 경계) |
 | v10.5 | 2026-02-28 | **Phase 4-1 — 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 구현** |
 |       |            | collectors/event_calendar_collector.py 신규: DART 공시 API 기업 이벤트 수집 |
 |       |            | analyzers/event_impact_analyzer.py 신규: 기업 이벤트 → 수급 모멘텀 예측 (신호8) |
@@ -2064,6 +2110,25 @@ DataLab API 실패 시 비치명적 처리 — 예외 발생 대신 logger.warni
 
 ---
 
+**rule #100** — `tracking/accuracy_tracker.py`는 예측 기록·실제 기록·가중치 계산만 담당.
+AI 분석·텔레그램 발송·KIS API 호출·수집 로직 **절대 금지**.
+비치명적 처리: 모든 저장 실패 시 logger.warning + 무시 (아침봇/마감봇 blocking 금지).
+`oracle_analyzer.py`에서 `get_signal_weights()` 로드 시 예외 발생 → 빈 dict 반환 (기본값 1.0 사용).
+
+```python
+# ✅ 허용
+accuracy_tracker.record_prediction(date_str, oracle_result, signal_sources)  # 예측 기록
+accuracy_tracker.record_actual(date_str, actual_top_gainers)                  # 실제 기록
+accuracy_tracker.get_signal_weights()                                          # 가중치 로드
+accuracy_tracker.get_accuracy_stats()                                          # 통계 조회
+# ❌ 금지
+genai.GenerativeModel(...).generate_content(...)  # AI 호출 금지
+await telegram_bot.send_async(...)                # 발송 금지
+from kis.rest_client import get_current_price     # KIS 호출 금지
+```
+
+---
+
 ### v10.0 신규 환경변수 요약
 
 | 변수명 | 기본값 | 단계 | 설명 |
@@ -2076,4 +2141,4 @@ DataLab API 실패 시 비치명적 처리 — 예외 발생 대신 logger.warni
 | `SECTOR_ETF_ENABLED` | `true` | Phase 3 | 섹터 ETF 자금흐름 수집 |
 | `SHORT_INTEREST_ENABLED` | `false` | Phase 3 | 공매도 잔고 수집 |
 | `THEME_HISTORY_ENABLED` | `true` | Phase 3 | 이벤트→섹터 이력 누적 |
-| `FULL_REPORT_FORMAT` | `false` | Phase 4 | 완전 분석 리포트 포맷 |
+| `FULL_REPORT_FORMAT` | `false` | Phase 4 | 완전 분석 리포트 포맷 — true 시 4단계 구조 (글로벌→테마강도→쪽집게→리스크) |

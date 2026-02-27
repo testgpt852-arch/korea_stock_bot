@@ -280,6 +280,44 @@ def init_db() -> None:
             ON trading_journal(pattern_tags)
         """)
 
+        # ── 8-b. 테마 예측 정확도 [v10.6 Phase 4-2 신규] ─────────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS theme_accuracy (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                date             TEXT    NOT NULL UNIQUE,
+                predicted_themes TEXT    DEFAULT '[]',
+                predicted_picks  TEXT    DEFAULT '[]',
+                actual_themes    TEXT,
+                actual_picks     TEXT,
+                match_count      INTEGER DEFAULT 0,
+                total_predicted  INTEGER DEFAULT 0,
+                accuracy_rate    REAL,
+                signal_sources   TEXT    DEFAULT '[]',
+                created_at       TEXT    NOT NULL,
+                updated_at       TEXT
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_accuracy_date
+            ON theme_accuracy(date)
+        """)
+
+        # ── 8-c. 신호 가중치 자동 조정 [v10.6 Phase 4-2 신규] ──────────
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS signal_weights (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_type  TEXT    NOT NULL UNIQUE,
+                weight       REAL    DEFAULT 1.0,
+                sample_count INTEGER DEFAULT 0,
+                win_rate     REAL    DEFAULT 0.0,
+                last_updated TEXT
+            )
+        """)
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_weights_type
+            ON signal_weights(signal_type)
+        """)
+
         conn.commit()
         logger.info(f"[db] DB 초기화 완료 — {db_path}")
 
@@ -299,6 +337,8 @@ def init_db() -> None:
     _migrate_v60(db_path)
     # [v7.0] kospi_index_stats 테이블 마이그레이션 (idempotent)
     _migrate_v70(db_path)
+    # [v10.6 Phase 4-2] theme_accuracy + signal_weights 테이블 마이그레이션 (idempotent)
+    _migrate_v106(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -503,6 +543,57 @@ def _migrate_v70(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v7.0 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v106(db_path: str) -> None:
+    """
+    [v10.6 Phase 4-2] theme_accuracy + signal_weights 테이블 생성.
+    accuracy_tracker.py 가 사용. init_db() 에서 이미 CREATE IF NOT EXISTS 처리하지만
+    기존 DB에 없는 경우를 위한 idempotent 마이그레이션.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS theme_accuracy (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                date             TEXT    NOT NULL UNIQUE,
+                predicted_themes TEXT    DEFAULT '[]',
+                predicted_picks  TEXT    DEFAULT '[]',
+                actual_themes    TEXT,
+                actual_picks     TEXT,
+                match_count      INTEGER DEFAULT 0,
+                total_predicted  INTEGER DEFAULT 0,
+                accuracy_rate    REAL,
+                signal_sources   TEXT    DEFAULT '[]',
+                created_at       TEXT    NOT NULL,
+                updated_at       TEXT
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_accuracy_date
+            ON theme_accuracy(date)
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS signal_weights (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_type  TEXT    NOT NULL UNIQUE,
+                weight       REAL    DEFAULT 1.0,
+                sample_count INTEGER DEFAULT 0,
+                win_rate     REAL    DEFAULT 0.0,
+                last_updated TEXT
+            )
+        """)
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_weights_type
+            ON signal_weights(signal_type)
+        """)
+        conn.commit()
+        logger.info("[db] v10.6 마이그레이션 완료 — theme_accuracy + signal_weights 테이블 확인")
+    except Exception as e:
+        logger.warning(f"[db] v10.6 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

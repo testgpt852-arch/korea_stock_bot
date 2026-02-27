@@ -212,9 +212,27 @@ async def run(geopolitics_data: list = None) -> None:
         await telegram_bot.send_async(summary_msg)
 
         # 상세 리포트 후발송
+        # [v10.6 Phase 4-2] FULL_REPORT_FORMAT 분기 — true이면 4단계 완전 포맷
         # [v10.0 Phase 2 버그픽스] geopolitics_data 전달 → 🌍 글로벌 트리거 섹션 표시
-        message = telegram_bot.format_morning_report(report, geopolitics_data=geopolitics_data)
+        import config as _cfg_fmt
+        if _cfg_fmt.FULL_REPORT_FORMAT:
+            message = telegram_bot.format_morning_report_full(
+                report, geopolitics_data=geopolitics_data
+            )
+        else:
+            message = telegram_bot.format_morning_report(report, geopolitics_data=geopolitics_data)
         await telegram_bot.send_async(message)
+
+        # [v10.6 Phase 4-2] 예측 테마 기록 (accuracy_tracker) — rule #100 준수
+        try:
+            from tracking import accuracy_tracker
+            accuracy_tracker.record_prediction(
+                date_str=today_str,
+                oracle_result=oracle_result,
+                signal_sources=signal_result.get("signals", []),
+            )
+        except Exception as _acc_e:
+            logger.warning(f"[morning] 예측 기록 실패 (비치명적): {_acc_e}")
 
         # ── ⑧ WebSocket 워치리스트 저장 (v3.1) ──────────────
         ws_watchlist = _build_ws_watchlist(price_data, signal_result)

@@ -198,6 +198,28 @@ async def run() -> None:
         except Exception as _e:
             logger.warning(f"[closing] theme_history 기록 실패 (비치명적): {_e}")
 
+        # ── 5-b. 실제 급등 기록 + 예측 정확도 업데이트 (v10.6 Phase 4-2) ──
+        # rule #100: accuracy_tracker는 저장·계산만 담당 — 발송 금지
+        accuracy_stats = {}
+        try:
+            from tracking import accuracy_tracker
+            accuracy_tracker.record_actual(
+                date_str=target_str,
+                actual_top_gainers=price_result.get("top_gainers", []),
+                actual_upper_limit=price_result.get("upper_limit", []),
+            )
+            accuracy_stats = accuracy_tracker.get_accuracy_stats(last_n=14)
+            logger.info(
+                f"[closing] 정확도 업데이트 완료 — "
+                f"{target_str}: {accuracy_stats.get('avg_accuracy', 0):.1%} "
+                f"({accuracy_stats.get('sample_count', 0)}일 누적)"
+            )
+        except Exception as _acc_e:
+            logger.warning(f"[closing] 정확도 업데이트 실패 (비치명적): {_acc_e}")
+
+        # accuracy_stats를 report에 추가 (format_closing_report_full에서 활용)
+        report["accuracy_stats"] = accuracy_stats
+
         # ── 6. 텔레그램 발송 (v8.1: 쪽집게 섹션 선발송) ──────────
         logger.info("[closing] 텔레그램 발송 중...")
 
@@ -207,8 +229,12 @@ async def run() -> None:
             if oracle_msg:
                 await telegram_bot.send_async(oracle_msg)
 
-        # 전체 마감 리포트 후발송
-        message = telegram_bot.format_closing_report(report)
+        # 전체 마감 리포트 후발송 — [v10.6 Phase 4-2] FULL_REPORT_FORMAT 분기
+        import config as _cfg_fmt
+        if _cfg_fmt.FULL_REPORT_FORMAT:
+            message = telegram_bot.format_closing_report_full(report)
+        else:
+            message = telegram_bot.format_closing_report(report)
         await telegram_bot.send_async(message)
 
         logger.info("[closing] 마감봇 완료 ✅")

@@ -34,6 +34,12 @@ notifiers/telegram_bot.py
         oracle_analyzer.analyze() 반환값 → 텔레그램 포맷
         아침봇·마감봇 최우선 선발송 (결론 먼저, 데이터는 후발송)
         픽마다 진입가·목표가·손절가·R/R + 판단 근거 배지 표시
+- v10.6: [Phase 4-2] 완전 분석 리포트 포맷 추가
+         format_morning_report_full() — FULL_REPORT_FORMAT=true 전용
+         format_closing_report_full() — FULL_REPORT_FORMAT=true 전용
+         4단계 구조: ① 글로벌 트리거 → ② 테마 강도 → ③ 쪽집게 → ④ 리스크
+         format_accuracy_stats() — 예측 정확도 + 신호 가중치 현황 포맷
+         기존 format_morning_report() / format_closing_report() 하위 호환 유지
 """
 
 import asyncio
@@ -924,3 +930,473 @@ def format_weekly_report(stats: dict, weekly_patterns: list | None = None) -> st
         lines.append("(봇 운영 1주일 후부터 승률 집계 시작)")
 
     return "\n".join(lines)
+
+# ══════════════════════════════════════════════════════════════
+# [v10.6 Phase 4-2] 완전 분석 리포트 포맷 (FULL_REPORT_FORMAT=true)
+# 4단계 구조: ① 글로벌 트리거 → ② 테마 강도 → ③ 쪽집게 → ④ 리스크
+# ══════════════════════════════════════════════════════════════
+
+def format_morning_report_full(
+    report: dict,
+    geopolitics_data: list = None,
+) -> str:
+    """
+    [v10.6 Phase 4-2] FULL_REPORT_FORMAT=true 전용 아침봇 리포트.
+
+    4단계 구조:
+    ① 글로벌 트리거 — 지정학 이벤트 + 미국증시 + 원자재 (왜 오늘 이 테마인가?)
+    ② 테마 강도 — 신호 강도 + 섹터 수급 + DataLab 트렌드 (무엇이 달아오르고 있는가?)
+    ③ 쪽집게 — oracle 픽 + 진입조건 (어디에 들어가야 하는가?)
+    ④ 리스크 — 시장 변동성 + 공시 AI 경고 + 예측 정확도 (얼마나 위험한가?)
+
+    FULL_REPORT_FORMAT=false(기본)이면 기존 format_morning_report() 사용.
+    """
+    today_str     = report.get("today_str", "")
+    prev_str      = report.get("prev_str", "")
+    signals       = report.get("signals", [])
+    us            = report.get("market_summary", {})
+    commodities   = report.get("commodities", {})
+    theme_map     = report.get("theme_map", [])
+    volatility    = report.get("volatility", "판단불가")
+    ai_dart       = report.get("ai_dart_results", [])
+    prev_kospi    = report.get("prev_kospi", {})
+    prev_kosdaq   = report.get("prev_kosdaq", {})
+    prev_inst     = report.get("prev_institutional", [])
+    oracle        = report.get("oracle", {}) or {}
+
+    lines = []
+    lines.append("📡 <b>아침 완전 분석 리포트</b>")
+    lines.append(f"📅 {today_str}  |  기준: {prev_str} 마감")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    # ══ ① 글로벌 트리거 ══════════════════════════════════════
+    lines.append("\n🌍 <b>① 글로벌 트리거 — 왜 오늘 이 테마인가?</b>")
+
+    # 지정학 이벤트
+    if geopolitics_data:
+        for event in geopolitics_data[:3]:
+            impact = event.get("impact_direction", "+")
+            confidence = event.get("confidence", 0.0)
+            sectors = event.get("affected_sectors", [])
+            summary = event.get("event_summary_kr", "")
+            emoji = "📈" if impact == "+" else "📉" if impact == "-" else "🔀"
+            sector_str = " · ".join(sectors[:2])
+            lines.append(
+                f"  {emoji} <b>{sector_str}</b> — {summary[:50]} "
+                f"[신뢰도:{confidence:.0%}]"
+            )
+    else:
+        lines.append("  지정학 이벤트 없음 (GEOPOLITICS_ENABLED=true 시 표시)")
+
+    # 미국증시 요약
+    nasdaq = us.get("nasdaq", "N/A")
+    sp500  = us.get("sp500",  "N/A")
+    lines.append(f"\n  나스닥: {nasdaq}  |  S&P500: {sp500}")
+    summary = us.get("summary", "")
+    if summary:
+        lines.append(f"  📌 {summary}")
+
+    # 미국 섹터 → 국내 연동
+    sectors = us.get("sectors", {})
+    sector_lines = []
+    for sname, sdata in sectors.items():
+        change = sdata.get("change", "N/A")
+        if change == "N/A":
+            continue
+        try:
+            pct = float(change.replace("%", "").replace("+", ""))
+        except ValueError:
+            continue
+        if abs(pct) < config.US_SECTOR_SIGNAL_MIN:
+            continue
+        arrow = "↑" if pct > 0 else "↓"
+        sector_lines.append(f"  {arrow} {sname}: {change}")
+    if sector_lines:
+        lines.append("  <b>섹터 연동 예상:</b>")
+        lines.extend(sector_lines[:3])
+
+    # 핵심 원자재
+    lines.append("")
+    for name, key in [("구리", "copper"), ("철광석", "steel"), ("천연가스", "gas")]:
+        c = commodities.get(key, {})
+        price = c.get("price", "N/A")
+        change = c.get("change", "N/A")
+        unit = c.get("unit", "")
+        if price != "N/A":
+            lines.append(f"  {name}: {price} {unit}  {change}")
+
+    # ══ ② 테마 강도 ═══════════════════════════════════════════
+    lines.append("\n🔴 <b>② 테마 강도 — 무엇이 달아오르고 있는가?</b>")
+
+    top_signals = [s for s in signals if s.get("강도", 0) >= 3][:6]
+    if top_signals:
+        for s in top_signals:
+            star = "★" * min(s["강도"], 5)
+            badges = []
+            발화 = s.get("발화신호", "")
+            for sig_label in ["신호7", "신호8", "신호6", "신호5", "신호3", "신호1"]:
+                if sig_label in 발화:
+                    badges.append(sig_label)
+            badge_str = " ".join(f"[{b}]" for b in badges[:2])
+            lines.append(
+                f"\n  {star} <b>{s['테마명']}</b> {badge_str}"
+            )
+            lines.append(f"    └ {s['발화신호']}")
+            ai_memo = s.get("ai_메모", "")
+            if ai_memo:
+                lines.append(f"    ✦ {ai_memo}")
+    else:
+        lines.append("  감지된 주요 신호 없음")
+
+    # 순환매 지도 (소외도 상위 테마)
+    valid_themes = [t for t in theme_map if t.get("종목들")]
+    if valid_themes:
+        lines.append("\n  <b>순환매 에너지 (소외도 상위)</b>")
+        for theme in valid_themes[:3]:
+            대장율 = theme.get("대장등락률", "N/A")
+            대장율_str = f"{대장율:+.1f}%" if isinstance(대장율, float) else str(대장율)
+            avg_소외 = _calc_avg_소외(theme)
+            lines.append(
+                f"  [{theme['테마명']}]  대장: {theme['대장주']} {대장율_str}"
+                f"  소외도 평균: {avg_소외:.1f}"
+            )
+
+    # 기관/외인 수급
+    if prev_inst:
+        inst_top = sorted(prev_inst, key=lambda x: x.get("기관순매수", 0), reverse=True)[:3]
+        inst_items = [
+            f"{s['종목명']}({s['기관순매수'] // 100_000_000:+,}억)"
+            for s in inst_top if s.get("기관순매수", 0) > 0
+        ]
+        if inst_items:
+            lines.append(f"\n  🏦 기관 순매수: {', '.join(inst_items)}")
+
+    # ══ ③ 쪽집게 ══════════════════════════════════════════════
+    lines.append("\n🎯 <b>③ 쪽집게 — 어디에 들어가야 하는가?</b>")
+
+    picks = oracle.get("picks", [])
+    rr_thr = oracle.get("rr_threshold", 1.5)
+    market_env_str = oracle.get("market_env", "")
+    one_line = oracle.get("one_line", "")
+
+    if picks:
+        lines.append(
+            f"  시장환경: <b>{market_env_str or '미분류'}</b>  |  최소 R/R: {rr_thr}"
+        )
+        for pick in picks[:5]:
+            rank = pick.get("rank", "?")
+            name = pick.get("name", "?")
+            theme = pick.get("theme", "")
+            entry = pick.get("entry_price", 0)
+            target = pick.get("target_price", 0)
+            stop = pick.get("stop_price", 0)
+            target_pct = pick.get("target_pct", 0)
+            rr = pick.get("rr_ratio", 0)
+            score = pick.get("score", 0)
+            badges = pick.get("badges", [])
+            pos_type = pick.get("position_type", "")
+
+            badge_str = " ".join(f"[{b}]" for b in badges[:3])
+            lines.append(
+                f"\n  <b>#{rank} {name}</b> [{pos_type}]  점수:{score}"
+            )
+            lines.append(f"    테마: {theme}")
+            lines.append(
+                f"    진입: {entry:,}  목표: {target:,}(+{target_pct:.0f}%)  "
+                f"손절: {stop:,}(-7%)  R/R:{rr:.1f}"
+            )
+            if badge_str:
+                lines.append(f"    {badge_str}")
+        if one_line:
+            lines.append(f"\n  💡 {one_line}")
+    else:
+        lines.append("  쪽집게 픽 없음 (데이터 부족 또는 고위험 장세)")
+
+    # ══ ④ 리스크 ══════════════════════════════════════════════
+    lines.append("\n⚠️ <b>④ 리스크 — 얼마나 위험한가?</b>")
+    lines.append(f"  장세: <b>{volatility}</b>")
+
+    # 전날 지수
+    if prev_kospi:
+        sign = "+" if prev_kospi.get("change_rate", 0) >= 0 else ""
+        lines.append(
+            f"  코스피: {prev_kospi.get('close', 'N/A'):,.2f} "
+            f"({sign}{prev_kospi.get('change_rate', 0):.2f}%)"
+        )
+    if prev_kosdaq:
+        sign = "+" if prev_kosdaq.get("change_rate", 0) >= 0 else ""
+        lines.append(
+            f"  코스닥: {prev_kosdaq.get('close', 'N/A'):,.2f} "
+            f"({sign}{prev_kosdaq.get('change_rate', 0):.2f}%)"
+        )
+
+    # AI 공시 경고 (점수 낮은 종목)
+    danger_dart = [r for r in ai_dart if r.get("점수", 10) <= 4]
+    if danger_dart:
+        lines.append(f"  🚨 주의 공시 종목: {', '.join(r['종목명'] for r in danger_dart[:3])}")
+
+    # 변동성 경고
+    if "고변동" in str(volatility):
+        lines.append("  🔴 고변동 장세 — 포지션 크기 50% 축소 권장")
+    elif "저변동" in str(volatility):
+        lines.append("  ⚪ 저변동 장세 — 순환매 에너지 부족. 개별 공시주 집중 권장")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ 투자 판단은 본인 책임. 참고용 정보입니다.")
+    return "\n".join(lines)
+
+
+def format_closing_report_full(report: dict) -> str:
+    """
+    [v10.6 Phase 4-2] FULL_REPORT_FORMAT=true 전용 마감봇 리포트.
+
+    4단계 구조:
+    ① 글로벌 트리거 — 오늘 장을 움직인 원인 분석
+    ② 테마 강도 — 오늘 실제 급등 테마 + T5/T6/T3 트리거
+    ③ 쪽집게 — 내일 픽 + 진입조건 (oracle 결과)
+    ④ 리스크 — 공매도 잔고 + 리스크 경고 + 예측 정확도
+    """
+    today_str       = report.get("today_str", "")
+    target_str      = report.get("target_str", today_str)
+    kospi           = report.get("kospi",         {})
+    kosdaq          = report.get("kosdaq",        {})
+    upper_limit     = report.get("upper_limit",   [])
+    top_gainers     = report.get("top_gainers",   [])
+    top_losers      = report.get("top_losers",    [])
+    institutional   = report.get("institutional", [])
+    short_selling   = report.get("short_selling", [])
+    theme_map       = report.get("theme_map",     [])
+    volatility      = report.get("volatility",    "판단불가")
+    cs_result       = report.get("closing_strength", [])
+    vf_result       = report.get("volume_flat",   [])
+    fi_result       = report.get("fund_inflow",   [])
+    oracle          = report.get("oracle", {}) or {}
+    accuracy_stats  = report.get("accuracy_stats", {}) or {}
+
+    lines = []
+    lines.append("📊 <b>마감 완전 분석 리포트</b>")
+    lines.append(f"📅 {today_str}  |  기준: {target_str} 마감")
+    lines.append(f"📊 장세: <b>{volatility}</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    # 지수 요약
+    if kospi:
+        sign = "+" if kospi["change_rate"] >= 0 else ""
+        lines.append(
+            f"\n  코스피: {kospi['close']:,.2f} ({sign}{kospi['change_rate']:.2f}%)"
+        )
+    if kosdaq:
+        sign = "+" if kosdaq["change_rate"] >= 0 else ""
+        lines.append(
+            f"  코스닥: {kosdaq['close']:,.2f} ({sign}{kosdaq['change_rate']:.2f}%)"
+        )
+
+    # ══ ① 글로벌 트리거 ══════════════════════════════════════
+    lines.append("\n🌍 <b>① 오늘 장을 움직인 원인</b>")
+    if upper_limit:
+        lines.append(f"  🔒 상한가 {len(upper_limit)}종목: " +
+                     ", ".join(s["종목명"] for s in upper_limit[:5]))
+    if top_gainers:
+        lines.append(f"  🚀 급등 상위: " +
+                     ", ".join(
+                         f"{s['종목명']}({s['등락률']:+.1f}%)"
+                         for s in top_gainers[:5]
+                     ))
+    if top_losers:
+        lines.append(f"  📉 급락 상위: " +
+                     ", ".join(
+                         f"{s['종목명']}({s['등락률']:+.1f}%)"
+                         for s in top_losers[:3]
+                     ))
+
+    # ══ ② 테마 강도 ═══════════════════════════════════════════
+    lines.append("\n🔴 <b>② 오늘 실제 급등 테마 + 트리거</b>")
+
+    valid_themes = [t for t in theme_map if t.get("종목들")]
+    if valid_themes:
+        for theme in valid_themes[:5]:
+            대장율 = theme.get("대장등락률", "N/A")
+            대장율_str = f"{대장율:+.1f}%" if isinstance(대장율, float) else str(대장율)
+            avg_소외 = _calc_avg_소외(theme)
+            lines.append(
+                f"\n  [{theme['테마명']}]  대장: {theme['대장주']} {대장율_str}"
+                f"  소외도:{avg_소외:.1f}"
+            )
+            for stock in theme.get("종목들", [])[:3]:
+                등락 = stock["등락률"]
+                소외 = stock["소외도"]
+                등락_str = f"{등락:+.1f}%" if isinstance(등락, float) else str(등락)
+                소외_str = f"{소외:.1f}" if isinstance(소외, float) else str(소외)
+                lines.append(
+                    f"    {stock['포지션']:6s}  {stock['종목명']}"
+                    f"  등락:{등락_str}  소외:{소외_str}"
+                )
+
+    # T5/T6/T3 트리거
+    if cs_result:
+        lines.append(f"\n  💪 T5 마감강도: " +
+                     ", ".join(
+                         f"{s['종목명']}(강도:{s['마감강도']:.2f})"
+                         for s in cs_result[:4]
+                     ))
+    if vf_result:
+        lines.append(f"  🔮 T6 횡보급증: " +
+                     ", ".join(s["종목명"] for s in vf_result[:4]))
+    if fi_result:
+        lines.append(f"  💰 T3 자금유입: " +
+                     ", ".join(
+                         f"{s['종목명']}({s['자금유입비율']:.1f}%)"
+                         for s in fi_result[:4]
+                     ))
+
+    # 기관/외인 수급
+    inst_top = sorted(institutional, key=lambda x: x.get("기관순매수", 0), reverse=True)[:4]
+    frgn_top = sorted(institutional, key=lambda x: x.get("외국인순매수", 0), reverse=True)[:4]
+    if inst_top:
+        inst_items = [
+            f"{s['종목명']}({s['기관순매수'] // 100_000_000:+,}억)"
+            for s in inst_top if s.get("기관순매수", 0) > 0
+        ]
+        if inst_items:
+            lines.append(f"\n  🏦 기관: {', '.join(inst_items)}")
+    if frgn_top:
+        frgn_items = [
+            f"{s['종목명']}({s['외국인순매수'] // 100_000_000:+,}억)"
+            for s in frgn_top if s.get("외국인순매수", 0) > 0
+        ]
+        if frgn_items:
+            lines.append(f"  🌐 외인: {', '.join(frgn_items)}")
+
+    # ══ ③ 쪽집게 ══════════════════════════════════════════════
+    lines.append("\n🎯 <b>③ 내일 쪽집게 픽</b>")
+
+    picks = oracle.get("picks", [])
+    rr_thr = oracle.get("rr_threshold", 1.5)
+    market_env_str = oracle.get("market_env", "")
+    one_line = oracle.get("one_line", "")
+
+    if picks:
+        lines.append(
+            f"  시장환경: <b>{market_env_str or '미분류'}</b>  |  최소 R/R: {rr_thr}"
+        )
+        for pick in picks[:5]:
+            rank = pick.get("rank", "?")
+            name = pick.get("name", "?")
+            theme = pick.get("theme", "")
+            entry = pick.get("entry_price", 0)
+            target = pick.get("target_price", 0)
+            stop = pick.get("stop_price", 0)
+            target_pct = pick.get("target_pct", 0)
+            rr = pick.get("rr_ratio", 0)
+            score = pick.get("score", 0)
+            badges = pick.get("badges", [])
+            pos_type = pick.get("position_type", "")
+
+            badge_str = " ".join(f"[{b}]" for b in badges[:3])
+            lines.append(f"\n  <b>#{rank} {name}</b> [{pos_type}]  점수:{score}")
+            lines.append(f"    테마: {theme}")
+            lines.append(
+                f"    진입: {entry:,}  목표: {target:,}(+{target_pct:.0f}%)  "
+                f"손절: {stop:,}(-7%)  R/R:{rr:.1f}"
+            )
+            if badge_str:
+                lines.append(f"    {badge_str}")
+        if one_line:
+            lines.append(f"\n  💡 {one_line}")
+    else:
+        lines.append("  내일 픽 없음 (데이터 부족)")
+
+    # ══ ④ 리스크 ══════════════════════════════════════════════
+    lines.append("\n⚠️ <b>④ 리스크 현황</b>")
+
+    # 공매도 잔고
+    if short_selling:
+        lines.append("  📌 공매도 잔고 상위:")
+        for s in short_selling[:4]:
+            lines.append(f"    • {s['종목명']}  잔고율:{s['공매도잔고율']:.1f}%")
+
+    # 변동성 경고
+    if "고변동" in str(volatility):
+        lines.append("  🔴 고변동 장세 — 손절 철칙(-7%) 엄수 필수")
+    elif "저변동" in str(volatility):
+        lines.append("  ⚪ 저변동 — 오닐 공식 확인종목(거래량+50%) 우선")
+    else:
+        lines.append("  🟡 중변동 — 표준 R/R 1.5 이상 종목만 진입")
+
+    # 예측 정확도 (accuracy_tracker 데이터)
+    if accuracy_stats and accuracy_stats.get("sample_count", 0) >= 3:
+        avg_acc = accuracy_stats.get("avg_accuracy", 0.0)
+        sample  = accuracy_stats.get("sample_count", 0)
+        best_sig = accuracy_stats.get("best_signal", "")
+        lines.append(
+            f"\n  🧠 <b>예측 정확도 ({sample}일 누적)</b>: {avg_acc:.1%}"
+        )
+        if best_sig:
+            lines.append(f"    최고 신호: {best_sig}")
+        # 신호 가중치 상위/하위
+        weights = accuracy_stats.get("signal_weights", {})
+        changed = {k: v for k, v in weights.items() if abs(v - 1.0) > 0.08}
+        if changed:
+            w_lines = [
+                f"{k}:{v:.2f}" for k, v in
+                sorted(changed.items(), key=lambda x: -x[1])
+            ]
+            lines.append(f"    가중치 보정: {', '.join(w_lines)}")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ 투자 판단은 본인 책임. 참고용 정보입니다.")
+    return "\n".join(lines)
+
+
+def format_accuracy_stats(accuracy_stats: dict) -> str:
+    """
+    [v10.6 Phase 4-2] 예측 정확도 + 신호 가중치 현황 포맷.
+    주간 리포트 등에서 선택적 삽입 가능.
+    """
+    if not accuracy_stats or accuracy_stats.get("sample_count", 0) == 0:
+        return ""
+
+    lines = []
+    avg_acc  = accuracy_stats.get("avg_accuracy", 0.0)
+    sample   = accuracy_stats.get("sample_count", 0)
+    best_sig = accuracy_stats.get("best_signal", "")
+    weights  = accuracy_stats.get("signal_weights", {})
+
+    lines.append("🧠 <b>신호 학습 현황 (테마 예측 정확도)</b>")
+    lines.append(f"  최근 {sample}일 평균 픽 적중률: <b>{avg_acc:.1%}</b>")
+    if best_sig:
+        lines.append(f"  최우수 신호: <b>{best_sig}</b> (가중치:{weights.get(best_sig, 1.0):.2f})")
+
+    if weights:
+        high_weights = [(k, v) for k, v in weights.items() if v >= 1.2]
+        low_weights  = [(k, v) for k, v in weights.items() if v <= 0.7]
+        if high_weights:
+            lines.append(
+                "  📈 강화 신호: " +
+                ", ".join(f"{k}({v:.2f})" for k, v in
+                          sorted(high_weights, key=lambda x: -x[1]))
+            )
+        if low_weights:
+            lines.append(
+                "  📉 약화 신호: " +
+                ", ".join(f"{k}({v:.2f})" for k, v in
+                          sorted(low_weights, key=lambda x: x[1]))
+            )
+
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════
+# 내부 헬퍼 (full report 전용)
+# ══════════════════════════════════════════════════════════════
+
+def _calc_avg_소외(theme: dict) -> float:
+    """테마 내 종목들의 소외도 평균 계산."""
+    stocks = theme.get("종목들", [])
+    if not stocks:
+        return 0.0
+    vals = [
+        s.get("소외도", 0.0) for s in stocks
+        if isinstance(s.get("소외도"), (int, float))
+    ]
+    return sum(vals) / len(vals) if vals else 0.0

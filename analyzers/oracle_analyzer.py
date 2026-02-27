@@ -88,6 +88,19 @@ _RR_THRESHOLD = {
     "":           1.5,
 }
 
+# 신호 가중치 캐시 (accuracy_tracker에서 로드 — 실패 시 기본값 1.0 사용)
+# analyze() 호출 시 갱신되므로 전역에서 재사용 가능
+_signal_weights_cache: dict[str, float] = {}
+
+
+def _load_signal_weights() -> dict[str, float]:
+    """accuracy_tracker에서 신호 가중치 로드 (비치명적 — 실패 시 빈 dict)."""
+    try:
+        from tracking.accuracy_tracker import get_signal_weights
+        return get_signal_weights()
+    except Exception:
+        return {}
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Public API
@@ -141,6 +154,18 @@ def analyze(
         event_scores_map  = event_scores  or {}                  # Phase 4-1: 기업 이벤트 점수
         rr_threshold = _RR_THRESHOLD.get(market_env, 1.5)
 
+        # [v10.6 Phase 4-2] 신호 가중치 로드 (accuracy_tracker 누적 기반)
+        global _signal_weights_cache
+        _signal_weights_cache = _load_signal_weights()
+        if _signal_weights_cache:
+            logger.info(
+                f"[oracle] 신호 가중치 적용 — "
+                + ", ".join(
+                    f"{k}:{v:.2f}" for k, v in _signal_weights_cache.items()
+                    if abs(v - 1.0) > 0.05  # 1.0에서 유의미하게 벗어난 것만 표시
+                ) or "모두 기본값(1.0)"
+            )
+
         # ── 1. 테마별 컨플루언스 점수 계산 ─────────────────────
         scored_themes = []
         for theme in theme_map:
@@ -148,6 +173,7 @@ def analyze(
                 theme, price_by_name, inst_map, dart_map,
                 cs_set, vf_set, fi_set, signal_map, sector_scores_map,
                 event_scores_map,
+                signal_weights=_signal_weights_cache,  # v10.6 Phase 4-2
             )
             if score > 0:
                 scored_themes.append({
@@ -293,6 +319,7 @@ def _score_theme(
     signal_map: dict,
     sector_scores: dict = None,   # v10.0 Phase 3: 섹터 수급 점수 (sector_flow_analyzer)
     event_scores:  dict = None,   # v10.0 Phase 4-1: 기업 이벤트 점수 (event_impact_analyzer)
+    signal_weights: dict = None,  # v10.6 Phase 4-2: accuracy_tracker 신호 가중치
 ) -> tuple[int, list[str]]:
     """
     테마 하나의 컨플루언스 점수(0~115)와 근거 목록을 반환.
@@ -389,16 +416,32 @@ def _score_theme(
     if vf_count >= 1:
         score += 3;  factors.append(f"T6 횡보급증 {vf_count}종목")
 
-    # ── 신호 강도 보너스 (최대 5점) ────────────────────────────
+    # ── 신호 강도 보너스 (최대 5점 × 신호 가중치) — v10.6: accuracy_tracker 가중치 반영
     sig = signal_map.get(theme_name)
     if sig:
         sig_strength = sig.get("강도", 0)
+        # 기여 신호 유형에서 가중치 최댓값 선택 (가장 정확도 높은 신호 우선)
+        _weights = signal_weights or {}
+        발화신호 = sig.get("발화신호", "")
+        sig_weight = max(
+            (_weights.get(st, 1.0) for st in [
+                "신호1", "신호2", "신호3", "신호4",
+                "신호5", "신호6", "신호7", "신호8",
+            ] if st in 발화신호),
+            default=1.0,
+        )
+        base_bonus = 0
         if sig_strength >= 5:
-            score += 5; factors.append(f"신호강도 ★★★★★")
+            base_bonus = 5; factors.append(f"신호강도 ★★★★★")
         elif sig_strength >= 4:
-            score += 4; factors.append(f"신호강도 ★★★★")
+            base_bonus = 4; factors.append(f"신호강도 ★★★★")
         elif sig_strength >= 3:
-            score += 2; factors.append(f"신호강도 ★★★")
+            base_bonus = 2; factors.append(f"신호강도 ★★★")
+        if base_bonus > 0:
+            weighted_bonus = round(base_bonus * sig_weight)
+            score += weighted_bonus
+            if abs(sig_weight - 1.0) > 0.05:
+                factors.append(f"🎯 신호 가중치 ×{sig_weight:.2f} [학습보정]")
 
     # ── v10.0 Phase 1: 철강/방산 테마 부스팅 (+20) ────────────
     # 설계 근거: 지정학·원자재 신호로 발화한 철강/방산 테마는
