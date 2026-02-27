@@ -88,10 +88,13 @@ def validate_env():
 
 
 # ── 장중봇 급등 감지 임계값 (v2.8: 델타 기준으로 전환) ──────────
-PRICE_DELTA_MIN    = 1.0     # 폴링 간격 내 누적 등락률 가속도 최소값 (%) — v8.2: 가격델타→등락률가속도 변경
-                             # 예: 4.2%→5.3% 이면 가속도=+1.1% → 조건 충족
-                             # (구 방식: 10초간 절대 가격 변화 / 신 방식: 등락률 모멘텀 가속)
+PRICE_DELTA_MIN    = 0.5     # 폴링 간격 내 누적 등락률 가속도 최소값 (%) — v9.0: 1.0→0.5 완화
+                             # 예: 4.2%→4.7% 이면 가속도=+0.5% → 조건 충족
+                             # (구 1.0%: 10초 안에 1%p 가속은 강한 조건이라 실제 알림 거의 0건)
 VOLUME_DELTA_MIN   = 5       # 폴링 간격 내 순간 거래량 증가 (전일 거래량 대비 %) — v8.2: 10→5 완화
+FIRST_ENTRY_MIN_RATE = 4.0   # [v9.0 신규] 신규진입 종목(prev 없음) 단독 감지 임계값 (%)
+                             # 직전 스냅샷에 없던 종목이 순위에 처음 등장할 때 적용
+                             # delta_rate=0 버그 우회 — MIN_CHANGE_RATE보다 약간 높게 설정해 노이즈 방지
 CONFIRM_CANDLES    = 1       # 연속 충족 폴링 횟수 — v8.2: 2→1 (가속도 기준은 1회 충족으로 충분)
 MARKET_CAP_MIN     = 30_000_000_000   # 시총 하한: 300억 (극소형 제외)
 # [v4.1 버그수정] MARKET_CAP_MAX: FID_BLNG_CLS_CODE가 volume-rank API에서 실제 미동작
@@ -155,7 +158,10 @@ KIS_RATE_LIMIT_REAL    = 19   # 초당 최대 호출 횟수 (실전)
 KIS_RATE_LIMIT_VIRTUAL = 2    # 초당 최대 호출 횟수 (모의)
 
 # ── Phase 2 트리거 임계값 (v3.2 신규) ─────────────────────────
-GAP_UP_MIN         = 2.5    # 갭업 최소 비율 (%) (v3.7: 1.0→2.5 강화)
+GAP_UP_MIN         = 1.5    # 갭업 최소 비율 (%) — v9.0: 2.5→1.5
+                             # 기존 2.5% → 임계값 GAP_UP_MIN×2=5.0%: 3~5% 신규 급등 사각지대 발생
+                             # 수정 1.5% → 임계값=3.0% = MIN_CHANGE_RATE: 3%+ 첫 등장 종목 전부 커버
+                             # 노이즈 방지: _detect_gap_up에 MIN_VOL_RATIO_ACML 필터 추가 (v9.0)
 CLOSING_STRENGTH_MIN  = 0.75
 CLOSING_STRENGTH_TOP_N = 7
 VOLUME_FLAT_CHANGE_MAX = 5.0
