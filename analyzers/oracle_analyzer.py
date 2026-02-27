@@ -104,6 +104,7 @@ def analyze(
     volume_flat: list | None = None,         # 마감봇에서만 전달 (T6) — rule #16
     fund_inflow: list | None = None,         # 마감봇에서만 전달 (T3) — rule #16
     sector_scores: dict | None = None,       # v10.0 Phase 3: 섹터 수급 점수 — signal_result 경유
+    event_scores:  dict | None = None,        # v10.0 Phase 4-1: 기업 이벤트 점수 — signal_result 경유
 ) -> dict:
     """
     컨플루언스 스코어링으로 내일 주도 테마와 종목 픽을 결정한다.
@@ -137,6 +138,7 @@ def analyze(
         fi_set      = _build_code_set(fund_inflow     or [])    # T3
         signal_map  = _build_signal_map(signals)
         sector_scores_map = sector_scores or {}                  # Phase 3: 섹터 수급 점수
+        event_scores_map  = event_scores  or {}                  # Phase 4-1: 기업 이벤트 점수
         rr_threshold = _RR_THRESHOLD.get(market_env, 1.5)
 
         # ── 1. 테마별 컨플루언스 점수 계산 ─────────────────────
@@ -145,6 +147,7 @@ def analyze(
             score, factors = _score_theme(
                 theme, price_by_name, inst_map, dart_map,
                 cs_set, vf_set, fi_set, signal_map, sector_scores_map,
+                event_scores_map,
             )
             if score > 0:
                 scored_themes.append({
@@ -289,6 +292,7 @@ def _score_theme(
     fi_set: set,
     signal_map: dict,
     sector_scores: dict = None,   # v10.0 Phase 3: 섹터 수급 점수 (sector_flow_analyzer)
+    event_scores:  dict = None,   # v10.0 Phase 4-1: 기업 이벤트 점수 (event_impact_analyzer)
 ) -> tuple[int, list[str]]:
     """
     테마 하나의 컨플루언스 점수(0~115)와 근거 목록을 반환.
@@ -430,6 +434,29 @@ def _score_theme(
             score += 10
             factors.append(f"📊 섹터ETF 거래량 이상 +10 [신호7]")
             logger.info(f"[oracle] {theme_name} 섹터수급 보너스 +10 (sf_score={sf_score})")
+
+    # ── v10.0 Phase 4-1: 기업 이벤트 보너스 (+5~+15) ──────────
+    # event_impact_analyzer 기업 이벤트 캘린더 기반 수급 예측
+    # rule #94 계열: event_scores는 signal_result["event_scores"] 경유로만 주입
+    if event_scores:
+        # 테마 내 종목들의 이벤트 점수 최댓값 조회
+        theme_stocks = [s.get("name", "") for s in theme.get("stocks", [])]
+        max_ev_score = 0
+        for stock_name in theme_stocks:
+            # by_code 없이 종목명→ticker 직접 매핑이 어려우므로 theme_name 기준 폴백
+            ev_strength = event_scores.get(stock_name, 0)
+            max_ev_score = max(max_ev_score, ev_strength)
+        if max_ev_score >= 5:
+            score += 15
+            factors.append(f"📅 기업이벤트 D-1 수급 예측 +15 [신호8·강도{max_ev_score}]")
+            logger.info(f"[oracle] {theme_name} 기업이벤트 보너스 +15 (ev_strength={max_ev_score})")
+        elif max_ev_score >= 4:
+            score += 10
+            factors.append(f"📅 기업이벤트 D-2 수급 예측 +10 [신호8·강도{max_ev_score}]")
+            logger.info(f"[oracle] {theme_name} 기업이벤트 보너스 +10 (ev_strength={max_ev_score})")
+        elif max_ev_score >= 3:
+            score += 5
+            factors.append(f"📅 기업이벤트 일정 +5 [신호8·강도{max_ev_score}]")
 
     return score, factors
 

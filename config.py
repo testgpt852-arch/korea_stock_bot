@@ -44,6 +44,10 @@ Railway: 서버 Variables에 입력
         SHORT_INTEREST_ENABLED     — 공매도 잔고 수집 활성화 (Phase 3~)
         THEME_HISTORY_ENABLED      — 이벤트→섹터 이력 DB 누적 활성화 (Phase 3~)
         FULL_REPORT_FORMAT         — 완전 분석 리포트 포맷 (Phase 4~)
+        EVENT_CALENDAR_ENABLED     — 기업 이벤트 캘린더 수집 활성화 (Phase 4-1~)
+        DATALAB_ENABLED            — 네이버 DataLab 트렌드 수집 활성화 (Phase 4-1~)
+        DATALAB_SPIKE_THRESHOLD    — DataLab 검색량 급등 임계값 (최근3일/7일평균 비율)
+        EVENT_SIGNAL_MIN_STRENGTH  — 신호8 최소 강도 (미달 이벤트 신호 필터링)
         US_SECTOR_TICKERS: XME(미국철강), SLX(철강) 추가
         COMMODITY_TICKERS(market_collector): TIO=F(철광석), ALI=F(알루미늄) 추가
         COMMODITY_KR_INDUSTRY: steel, aluminum 업종 키워드 추가
@@ -348,3 +352,20 @@ THEME_HISTORY_ENABLED     = os.environ.get("THEME_HISTORY_ENABLED", "true").lowe
 
 # 완전 분석 리포트 포맷 (Phase 4)
 FULL_REPORT_FORMAT        = os.environ.get("FULL_REPORT_FORMAT", "false").lower() == "true"
+
+# ── v10.0 Phase 4-1: 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 ──────────────
+# 기업 이벤트 캘린더 수집 활성화 (DART API 기반 IR/실적/주총 일정)
+EVENT_CALENDAR_ENABLED    = os.environ.get("EVENT_CALENDAR_ENABLED",  "false").lower() == "true"
+
+# 네이버 DataLab 검색어 트렌드 수집 활성화
+DATALAB_ENABLED           = os.environ.get("DATALAB_ENABLED",         "false").lower() == "true"
+
+# 네이버 DataLab 전용 앱키 (없으면 NAVER_CLIENT_ID 폴백 — DataLab 권한 필요)
+NAVER_DATALAB_CLIENT_ID     = os.environ.get("NAVER_DATALAB_CLIENT_ID")
+NAVER_DATALAB_CLIENT_SECRET = os.environ.get("NAVER_DATALAB_CLIENT_SECRET")
+
+# DataLab 급등 감지 임계값 (최근 3일 평균 / 7일 평균 비율)
+DATALAB_SPIKE_THRESHOLD   = float(os.environ.get("DATALAB_SPIKE_THRESHOLD", "1.5"))
+
+# 신호8 최소 강도 (이 값 이상인 기업 이벤트만 oracle에 전달)
+EVENT_SIGNAL_MIN_STRENGTH = int(os.environ.get("EVENT_SIGNAL_MIN_STRENGTH", "3"))

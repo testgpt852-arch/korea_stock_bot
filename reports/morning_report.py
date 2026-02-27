@@ -45,6 +45,8 @@ import analyzers.signal_analyzer   as signal_analyzer
 import analyzers.theme_analyzer    as theme_analyzer
 import analyzers.ai_analyzer       as ai_analyzer
 import analyzers.oracle_analyzer   as oracle_analyzer   # v8.1 추가
+import collectors.event_calendar_collector as event_calendar_collector  # v10.0 Phase 4-1
+import analyzers.event_impact_analyzer    as event_impact_analyzer      # v10.0 Phase 4-1
 import notifiers.telegram_bot      as telegram_bot
 import utils.watchlist_state        as watchlist_state   # v3.1 추가
 
@@ -55,6 +57,11 @@ async def run(geopolitics_data: list = None) -> None:
     [v10.0 Phase 2 버그픽스] geopolitics_data 파라미터 추가
     - main.py의 _geopolitics_cache → 이 함수 → signal_analyzer.analyze() → telegram_bot
     - None(기본) 또는 빈 리스트이면 신호6 생략 (하위 호환)
+
+    [v10.0 Phase 4-1] 기업 이벤트 캘린더 + DataLab 트렌드 연동
+    - event_calendar_collector.collect() → event_impact_analyzer.analyze() → signal_analyzer(신호8)
+    - EVENT_CALENDAR_ENABLED=false(기본) — true 설정 시 활성화
+    - DATALAB_ENABLED=false(기본) — true 설정 시 DataLab 트렌드 수집
     """
     today = get_today()
     prev  = get_prev_trading_day(today)
@@ -87,11 +94,30 @@ async def run(geopolitics_data: list = None) -> None:
                 logger.warning(f"[morning] 가격 수집 실패 ({e}) — 순환매 지도 생략")
                 price_data = None
 
+        # ── ②-b 기업 이벤트 캘린더 수집 (v10.0 Phase 4-1) ──────
+        event_impact_signals = []
+        try:
+            import config as _cfg4
+            if _cfg4.EVENT_CALENDAR_ENABLED:
+                logger.info("[morning] 기업 이벤트 캘린더 수집 중...")
+                event_calendar = event_calendar_collector.collect(today)
+                if event_calendar:
+                    event_impact_signals = event_impact_analyzer.analyze(event_calendar)
+                    logger.info(f"[morning] 이벤트 신호8 {len(event_impact_signals)}건 생성")
+        except Exception as e:
+            logger.warning(f"[morning] 기업 이벤트 수집 실패 ({e}) — 신호8 생략")
+
         # ── ③ 신호 분석 (v2.1: price_data 전달) ───────────────
         logger.info("[morning] 신호 분석 중...")
+
+        # DataLab 트렌드 추출 (news_collector에서 수집된 데이터 활용)
+        datalab_trends = news_data.get("datalab_trends", [])
+
         signal_result = signal_analyzer.analyze(
             dart_data, market_data, news_data, price_data,
             geopolitics_data=geopolitics_data,          # [v10.0 Phase 2] 신호6 주입
+            event_impact_data=event_impact_signals if event_impact_signals else None,  # [v10.0 Phase 4-1] 신호8
+            datalab_data=datalab_trends if datalab_trends else None,                   # [v10.0 Phase 4-1] DataLab
         )
 
         # ── ④ AI 공시 분석 ────────────────────────────────────
@@ -144,6 +170,8 @@ async def run(geopolitics_data: list = None) -> None:
                 closing_strength=None,   # T5 없음 — rule #16
                 volume_flat=None,        # T6 없음 — rule #16
                 fund_inflow=None,        # T3 없음 — rule #16
+                sector_scores=signal_result.get("sector_scores"),          # Phase 3
+                event_scores=signal_result.get("event_scores"),            # Phase 4-1 신규
             )
         except Exception as _e:
             logger.warning(f"[morning] 쪽집게 분석 실패 (비치명적): {_e}")

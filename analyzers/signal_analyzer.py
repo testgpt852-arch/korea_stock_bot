@@ -23,6 +23,9 @@ analyzers/signal_analyzer.py
 - v10.0 Phase 3: 신호7 — 섹터 자금흐름 + 공매도 잔고 신호 통합
         sector_flow_data(sector_flow_analyzer.analyze() 반환값) 주입 시 신호7 생성
         rule #94 계열 준수: sector_flow_analyzer → signal_analyzer → oracle_analyzer 경유 필수
+- v10.0 Phase 4-1: 신호8 — 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 통합
+        event_impact_data(event_impact_analyzer.analyze() 반환값) 주입 시 신호8 생성
+        datalab_data(news_collector.collect()["datalab_trends"] 반환값) 주입 시 DataLab 신호 추가
 """
 
 import config
@@ -36,11 +39,13 @@ def analyze(
     price_data:         dict = None,
     geopolitics_data:   list[dict] = None,   # v10.0 Phase 2: 지정학 이벤트 (None이면 신호6 생략)
     sector_flow_data:   dict       = None,   # v10.0 Phase 3: 섹터 자금흐름 (None이면 신호7 생략)
+    event_impact_data:  list[dict] = None,   # v10.0 Phase 4-1: 기업 이벤트 신호 (None이면 신호8 생략)
+    datalab_data:       list[dict] = None,   # v10.0 Phase 4-1: DataLab 트렌드 (None이면 생략)
 ) -> dict:
     """
-    신호 1~7 통합 분석
+    신호 1~8 통합 분석
     반환: dict {signals, market_summary, commodities, volatility,
-                report_picks, policy_summary, sector_scores}
+                report_picks, policy_summary, sector_scores, event_scores}
 
     [v10.0 추가]
     - geopolitics_data: geopolitics_collector.collect() 반환값.
@@ -48,6 +53,11 @@ def analyze(
     - sector_flow_data: sector_flow_analyzer.analyze() 반환값.
       None(기본)이면 신호7 생략 (Phase 1·2 하위 호환).
       sector_scores 포함 시 oracle_analyzer에 전달 가능.
+    - event_impact_data: event_impact_analyzer.analyze() 반환값.
+      None(기본)이면 신호8 생략 (Phase 4-1 이전 하위 호환).
+      event_scores 포함 시 oracle_analyzer에 전달 가능.
+    - datalab_data: news_collector.collect()["datalab_trends"] 반환값.
+      None(기본)이면 DataLab 신호 생략.
     """
     logger.info("[signal] 신호 1~5 분석 시작")
 
@@ -133,8 +143,29 @@ def analyze(
             f"(섹터점수 {len(sector_scores)}개)"
         )
 
+    # ── 신호 8: 기업 이벤트 캘린더 (v10.0 Phase 4-1) ──────────
+    # rule #94 계열: event_impact_analyzer → signal_analyzer → oracle_analyzer 경유 필수
+    event_scores: dict = {}   # {ticker: strength} oracle_analyzer 전달용
+    if event_impact_data:
+        ev_signals = _analyze_event_impact(event_impact_data, price_data)
+        signals.extend(ev_signals)
+        # event_scores 구성: 이벤트 발생 종목 강도 매핑
+        for ev in event_impact_data:
+            ticker = ev.get(ticker, )
+            if ticker:
+                event_scores[ticker] = max(
+                    event_scores.get(ticker, 0), ev.get(strength, 3)
+                )
+        logger.info(f"[signal] 신호8 (기업이벤트): {len(ev_signals)}개 신호 추가")
+
+    # ── DataLab 트렌드 신호 (v10.0 Phase 4-1) ──────────────────
+    if datalab_data:
+        dl_signals = _analyze_datalab_trends(datalab_data, price_data)
+        signals.extend(dl_signals)
+        logger.info(f"[signal] DataLab 트렌드: {len(dl_signals)}개 신호 추가")
+
     signals.sort(key=lambda x: x["강도"], reverse=True)
-    logger.info(f"[signal] 총 {len(signals)}개 신호 감지 (신호1~7)")
+    logger.info(f"[signal] 총 {len(signals)}개 신호 감지 (신호1~8)")
 
     volatility = _judge_volatility(market_summary, price_data)
 
@@ -146,6 +177,7 @@ def analyze(
         "report_picks":   reports[:5],
         "policy_summary": policy[:3],
         "sector_scores":  sector_scores,   # v10.0 Phase 3: oracle_analyzer에 전달
+        "event_scores":   event_scores,    # v10.0 Phase 4-1: oracle_analyzer에 전달
     }
 
 
@@ -519,3 +551,77 @@ def _judge_volatility(us: dict, price_data: dict = None) -> str:
         return "고변동예상" if abs(val) >= 1.0 else "저변동예상"
     except Exception:
         return "판단불가"
+
+# ══════════════════════════════════════════════════════════════
+# 신호 8: 기업 이벤트 캘린더 (v10.0 Phase 4-1)
+# ══════════════════════════════════════════════════════════════
+
+def _analyze_event_impact(event_signals: list[dict], price_data: dict = None) -> list[dict]:
+    """
+    event_impact_analyzer 결과 → 신호8 signals 변환
+    event_scores: ticker → strength (oracle_analyzer 전달용)
+    """
+    by_sector = price_data.get("by_sector", {}) if price_data else {}
+    results   = []
+
+    for ev in event_signals:
+        if ev.get("strength", 0) < config.EVENT_SIGNAL_MIN_STRENGTH:
+            continue
+
+        ticker    = ev.get("ticker", "")
+        corp_name = ev.get("corp_name", "")
+        evt_type  = ev.get("event_type", "이벤트")
+        days      = ev.get("days_until", -1)
+        strength  = ev.get("strength", 3)
+        direction = ev.get("impact_direction", "+")
+        reason    = ev.get("reason", "")
+
+        # 관련종목: 동적 조회
+        related = _get_sector_top_stocks(corp_name, by_sector)
+        if ticker and ticker not in related:
+            related.insert(0, corp_name)
+
+        results.append({
+            "테마명":   f"{corp_name} {evt_type}",
+            "발화신호": f"신호8: {evt_type} D-{days} [{corp_name}|{ev.get('event_date', '')}|{reason[:30]}]",
+            "강도":     strength,
+            "신뢰도":   f"event:{direction}",
+            "발화단계": "1일차",
+            "상태":     "신규" if direction == "+" else "경고",
+            "관련종목": related[:3],
+        })
+
+    return results
+
+
+def _analyze_datalab_trends(datalab: list[dict], price_data: dict = None) -> list[dict]:
+    """
+    네이버 DataLab 급등 키워드 → 신호2 보완 신호 변환
+    ratio >= DATALAB_SPIKE_THRESHOLD 인 키워드만 포함
+    """
+    by_sector = price_data.get("by_sector", {}) if price_data else {}
+    results   = []
+
+    for dl in datalab:
+        ratio   = dl.get("ratio", 0.0)
+        theme   = dl.get("theme", "")
+        keyword = dl.get("keyword", theme)
+
+        if ratio < config.DATALAB_SPIKE_THRESHOLD:
+            continue
+
+        # 강도: ratio에 따라 분기
+        strength = 4 if ratio >= 2.0 else 3
+        related  = _get_sector_top_stocks(theme, by_sector)
+
+        results.append({
+            "테마명":   theme,
+            "발화신호": f"DataLab: '{keyword}' 검색 {ratio:.1f}배 급등 — 개인 관심 선행 신호",
+            "강도":     strength,
+            "신뢰도":   f"datalab:{ratio:.1f}x",
+            "발화단계": "1일차",
+            "상태":     "신규",
+            "관련종목": related[:3],
+        })
+
+    return results

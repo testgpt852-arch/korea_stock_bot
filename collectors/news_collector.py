@@ -1,11 +1,16 @@
 """
 collectors/news_collector.py
-증권사 리포트 + 정책·시황 뉴스 수집 전담
+증권사 리포트 + 정책·시황 뉴스 + 네이버 DataLab 트렌드 수집 전담
 
 [수정이력]
 - v1.0: 네이버 HTML 크롤링 (차단 문제)
 - v1.1: 네이버 공식 검색 API 교체
 - v1.2: 종목명 파싱 패턴 대폭 개선 ("종목미상" 문제 해결)
+- v10.0 Phase 4-1: 네이버 DataLab 검색어 트렌드 API 추가
+  _collect_datalab_trends() — 주요 투자 키워드 검색량 급등 감지
+  DATALAB_ENABLED=false(기본) — 활성화 시 datalab_trends 반환값에 포함
+  NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET 환경변수 필요
+  (NAVER_CLIENT_ID와 동일 앱키 사용 가능 — DataLab API 권한 필요)
 """
 
 import re
@@ -43,6 +48,9 @@ def collect(target_date: datetime = None) -> dict:
         ],
         "policy_news": [
             {"제목": str, "내용": str, "출처": str}
+        ],
+        "datalab_trends": [
+            {"keyword": str, "ratio": float, "theme": str}
         ]
     }
     """
@@ -55,13 +63,15 @@ def collect(target_date: datetime = None) -> dict:
     if not config.NAVER_CLIENT_ID or not config.NAVER_CLIENT_SECRET:
         logger.warning("[news] 네이버 API 키 없음 — 수집 건너뜀")
         logger.warning("[news] NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 환경변수 추가 필요")
-        return {"reports": [], "policy_news": []}
+        return {"reports": [], "policy_news": [], "datalab_trends": []}
 
-    reports     = _collect_reports(date_kr)
-    policy_news = _collect_policy_news(date_kr)
+    reports        = _collect_reports(date_kr)
+    policy_news    = _collect_policy_news(date_kr)
+    datalab_trends = _collect_datalab_trends() if config.DATALAB_ENABLED else []
 
-    logger.info(f"[news] 리포트 {len(reports)}건, 정책뉴스 {len(policy_news)}건")
-    return {"reports": reports, "policy_news": policy_news}
+    logger.info(f"[news] 리포트 {len(reports)}건, 정책뉴스 {len(policy_news)}건, "
+                f"DataLab 트렌드 {len(datalab_trends)}건")
+    return {"reports": reports, "policy_news": policy_news, "datalab_trends": datalab_trends}
 
 
 def _naver_news_search(query: str, display: int = 10) -> list[dict]:
@@ -189,3 +199,97 @@ def _extract_stock_name(title: str, full_text: str) -> str:
         return m.group(1)
 
     return "종목미상"
+
+
+# ─────────────────────────────────────────────────────────────
+# v10.0 Phase 4-1: 네이버 DataLab 검색어 트렌드 수집
+# ─────────────────────────────────────────────────────────────
+
+# DataLab 조회할 키워드 그룹 (테마명 → 검색 키워드 목록)
+_DATALAB_KEYWORD_GROUPS = [
+    {"theme": "반도체",     "keywords": ["반도체", "HBM", "AI칩"]},
+    {"theme": "방산",       "keywords": ["방산주", "한화에어로", "LIG넥스원"]},
+    {"theme": "철강",       "keywords": ["현대제철", "철강주", "포스코"]},
+    {"theme": "바이오",     "keywords": ["바이오주", "신약", "임상시험"]},
+    {"theme": "2차전지",    "keywords": ["2차전지", "배터리주", "에코프로"]},
+    {"theme": "AI",        "keywords": ["AI주", "인공지능주", "엔비디아"]},
+    {"theme": "조선",       "keywords": ["조선주", "HD현대", "한국조선해양"]},
+    {"theme": "에너지",     "keywords": ["에너지주", "태양광", "풍력"]},
+]
+
+_DATALAB_URL = "https://openapi.naver.com/v1/datalab/search"
+
+
+def _collect_datalab_trends() -> list[dict]:
+    """
+    네이버 DataLab 검색어 트렌드 수집
+    반환: list[dict] — keyword / ratio / theme
+    실패 시 빈 리스트 반환 (비치명적)
+
+    [rule #90 계열] 수집만 담당 — 분석·발송 금지
+    [DataLab API] 네이버 검색어 트렌드 API (별도 DataLab 권한 필요)
+    NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET 사용
+    (없으면 NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 폴백)
+    """
+    client_id     = getattr(config, "NAVER_DATALAB_CLIENT_ID",     None) or config.NAVER_CLIENT_ID
+    client_secret = getattr(config, "NAVER_DATALAB_CLIENT_SECRET", None) or config.NAVER_CLIENT_SECRET
+
+    if not client_id or not client_secret:
+        logger.warning("[news/datalab] DataLab API 키 없음 — 트렌드 수집 건너뜀")
+        return []
+
+    from datetime import date, timedelta
+    import json
+
+    today    = date.today()
+    end_date = today.strftime("%Y-%m-%d")
+    bgn_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    results: list[dict] = []
+
+    for group in _DATALAB_KEYWORD_GROUPS:
+        try:
+            payload = {
+                "startDate": bgn_date,
+                "endDate":   end_date,
+                "timeUnit":  "date",
+                "keywordGroups": [
+                    {
+                        "groupName": group["theme"],
+                        "keywords":  group["keywords"],
+                    }
+                ],
+            }
+            hdrs = {
+                "X-Naver-Client-Id":     client_id,
+                "X-Naver-Client-Secret": client_secret,
+                "Content-Type":          "application/json",
+            }
+            resp = requests.post(_DATALAB_URL, headers=hdrs, data=json.dumps(payload), timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+
+            results_list = data.get("results", [])
+            for r in results_list:
+                data_pts = r.get("data", [])
+                if not data_pts:
+                    continue
+                # 최근 3일 평균 vs 7일 평균으로 급등 여부 계산
+                ratios = [pt.get("ratio", 0) for pt in data_pts]
+                recent_avg = sum(ratios[-3:]) / 3 if len(ratios) >= 3 else 0
+                total_avg  = sum(ratios) / len(ratios) if ratios else 0
+                if total_avg > 0:
+                    spike_ratio = recent_avg / total_avg
+                    if spike_ratio >= config.DATALAB_SPIKE_THRESHOLD:
+                        results.append({
+                            "keyword":     r.get("title", group["theme"]),
+                            "ratio":       round(spike_ratio, 2),
+                            "theme":       group["theme"],
+                        })
+
+        except Exception as e:
+            logger.warning(f"[news/datalab] {group['theme']} 트렌드 수집 실패: {e}")
+
+    # 급등 비율 내림차순 정렬
+    results.sort(key=lambda x: x["ratio"], reverse=True)
+    return results[:10]

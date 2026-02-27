@@ -39,7 +39,8 @@ _realtime_started = False
 
 # v10.0 Phase 2: 지정학 이벤트 캐시 (아침봇·마감봇이 읽는 공유 변수)
 # rule #90 준수: 수집은 geopolitics_collector, 분석은 geopolitics_analyzer
-_geopolitics_cache: list[dict] = []
+_geopolitics_cache:     list[dict] = []
+_event_calendar_cache:  list[dict] = []   # [v10.0 Phase 4-1] 기업 이벤트 캘린더 캐시
 
 
 async def run_morning_bot():
@@ -299,6 +300,40 @@ async def run_memory_compression():
         logger.error(f"[main] 기억 압축 실패 (비치명적): {e}")
 
 
+async def run_event_calendar_collect():
+    """
+    [v10.0 Phase 4-1] 06:30 실행 — 아침봇(08:30) 전 기업 이벤트 캘린더 수집.
+    EVENT_CALENDAR_ENABLED=true 시에만 실행 (기본 false).
+    rule #90 계열 준수: 수집 → event_impact_analyzer 분석 → _event_cache 저장.
+    소스 실패 시 비치명적 — 아침봇 blocking 금지.
+    """
+    if not config.EVENT_CALENDAR_ENABLED:
+        return
+    global _event_calendar_cache
+    try:
+        from collectors import event_calendar_collector
+        from analyzers  import event_impact_analyzer
+
+        logger.info("[main] 기업 이벤트 캘린더 수집 시작")
+        raw_events = await asyncio.get_event_loop().run_in_executor(
+            None, event_calendar_collector.collect
+        )
+        logger.info(f"[main] 기업 이벤트 수집 완료 — {len(raw_events)}건")
+
+        if not raw_events:
+            logger.info("[main] 수집된 기업 이벤트 없음 — 캐시 유지")
+            return
+
+        analyzed = await asyncio.get_event_loop().run_in_executor(
+            None, event_impact_analyzer.analyze, raw_events
+        )
+        _event_calendar_cache = analyzed
+        logger.info(f"[main] 기업 이벤트 분석 캐시 갱신 완료 — {len(analyzed)}건")
+
+    except Exception as e:
+        logger.error(f"[main] 기업 이벤트 수집/분석 실패 (비치명적): {e}")
+
+
 async def run_geopolitics_collect():
     """
     [v10.0 Phase 2] 06:00 + 장중 GEOPOLITICS_POLL_MIN 간격 실행.
@@ -355,6 +390,11 @@ async def main():
         logger.info(
             f"[main] 지정학 수집 스케줄 등록 — 06:00 + 장중 {config.GEOPOLITICS_POLL_MIN}분 간격"
         )
+
+    # v10.0 Phase 4-1: 기업 이벤트 캘린더 수집 (아침봇 전 06:30)
+    if config.EVENT_CALENDAR_ENABLED:
+        scheduler.add_job(run_event_calendar_collect, "cron", hour=6, minute=30, id="event_calendar_morning")
+        logger.info("[main] 기업 이벤트 캘린더 수집 스케줄 등록 — 06:30")
 
     scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot_1")
     scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=30, id="morning_bot_2")

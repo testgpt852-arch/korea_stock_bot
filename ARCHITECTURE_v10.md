@@ -4,6 +4,23 @@
 > 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
 > **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3 개편 내용을 반영한 최신 아키텍처입니다.**
 >
+> **📋 v10.5 Phase 4-1 구현**: 2026-02-28, Claude Sonnet 4.6
+> 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 체계 구현:
+> ① collectors/event_calendar_collector.py 신규 — DART 공시 API로 IR/실적/주주총회/배당 일정 수집 (EVENT_CALENDAR_ENABLED=false 기본)
+> ② analyzers/event_impact_analyzer.py 신규 — 기업 이벤트 → 수급 모멘텀 예측 (D-1~D-5 범위, 신호8 강도 3~5)
+> ③ collectors/news_collector.py 확장 — 네이버 DataLab 검색어 트렌드 API 추가 (_collect_datalab_trends, DATALAB_ENABLED=false 기본)
+>    반환값에 "datalab_trends" 키 추가 (빈 리스트 하위 호환)
+> ④ analyzers/signal_analyzer.py 확장 — event_impact_data/datalab_data 파라미터 추가
+>    신호8 통합(_analyze_event_impact), DataLab 트렌드 신호(_analyze_datalab_trends)
+>    반환값에 "event_scores" 키 추가 → oracle_analyzer 경유 전달
+> ⑤ analyzers/oracle_analyzer.py 확장 — event_scores 파라미터 추가
+>    _score_theme()에 기업이벤트 보너스 +5~+15 반영 (D-1: +15, D-2: +10, D-3+: +5)
+> ⑥ reports/morning_report.py 확장 — 기업 이벤트 캘린더 수집·분석 파이프라인 연동
+>    event_impact_signals → signal_analyzer(신호8) → oracle_analyzer(event_scores)
+> ⑦ main.py 확장 — _event_calendar_cache 전역 변수, run_event_calendar_collect() 추가
+>    EVENT_CALENDAR_ENABLED=true 시 06:30 수집 스케줄 등록
+> ⑧ config.py 확장 — Phase 4-1 상수 6종 추가 (EVENT_CALENDAR_ENABLED, DATALAB_ENABLED 등)
+>
 > **📋 v10.4 Phase 3 구현**: 2026-02-27, Claude Sonnet 4.6
 > 섹터 수급 분석 + 공매도 잔고 신호 체계 전면 구현:
 > ① collectors/sector_etf_collector.py 신규 — KODEX 섹터 ETF 11종 거래량 Z-스코어 수집 (pykrx, 마감봇 전용, rule #92)
@@ -153,7 +170,15 @@ korea_stock_bot/
 │   │                                 pykrx 기반 마감봇(18:30) 전용 — 장중 호출 절대 금지 (rule #92)
 │   │                                 거래량 Z-스코어 계산용 당일+전일 OHLCV 수집
 │   │                                 비치명적: ETF 실패 시 빈 리스트 반환
-│   └── short_interest_collector.py ← [v10.0 Phase 3 신규] 공매도 잔고 급감 종목 수집
+│   ├── short_interest_collector.py ← [v10.0 Phase 3 신규] 공매도 잔고 급감 종목 수집
+│   │                                     pykrx get_market_short_selling_volume_by_ticker() 기반
+│   │                                     SHORT_INTEREST_ENABLED=false(기본): 비활성화
+│   │                                     잔고 급감 -30% 이상 → 쇼트커버링_예고 신호 분류
+│   └── event_calendar_collector.py   ← [v10.0 Phase 4-1 신규] 기업 이벤트 캘린더 수집
+│                                         DART 공시 API (pblntf_ty=F/D/A) — IR/실적/주총/배당 일정
+│                                         EVENT_CALENDAR_ENABLED=false(기본): 비활성화
+│                                         비치명적: 실패 시 빈 리스트 반환 (아침봇 blocking 금지)
+│                                         AI 분석·발송·DB 기록 절대 금지 (rule #90 계열)
 │                                     pykrx get_market_short_selling_volume_by_ticker() 기반
 │                                     SHORT_INTEREST_ENABLED=false(기본): 비활성화 (KIS 권한 필요 시 true)
 │                                     잔고 급감 -30% 이상 → 쇼트커버링_예고 신호 분류
@@ -180,7 +205,16 @@ korea_stock_bot/
 │   │                                 ETF 거래량 Z-스코어 ≥ 2.0 → 이상 감지, 공매도 클러스터 분석
 │   │                                 출력: 신호7 signals + sector_scores dict (oracle_analyzer에 전달)
 │   │                                 pykrx·KIS API 직접 호출 절대 금지 (rule #92)
-│   └── geopolitics_analyzer.py   ← [v10.3] 지정학 이벤트 → 섹터 매핑 + gemini-3-flash-preview 분석 (fallback: gemini-2.5-flash)
+│   ├── geopolitics_analyzer.py   ← [v10.3] 지정학 이벤트 → 섹터 매핑 + gemini-3-flash-preview 분석
+│   │                                     geopolitics_map 사전 패턴 매칭 우선 (사전 6 : AI 4 가중 평균)
+│   │                                     gemini-3-flash-preview 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
+│   │                                     신뢰도 필터링 (GEOPOLITICS_CONFIDENCE_MIN 기본 0.6)
+│   │                                     KIS API·pykrx 호출 절대 금지 (rule #91)
+│   └── event_impact_analyzer.py   ← [v10.0 Phase 4-1 신규] 기업 이벤트 → 수급 모멘텀 예측
+│                                       입력: event_calendar_collector 반환값
+│                                       D-1~D-2 실적/IR: 강도5 / D-3 이내: 강도4 / D-5: 강도3
+│                                       출력: 신호8 signals (impact_direction/strength/reason)
+│                                       KIS API·pykrx·AI 호출 절대 금지 (rule #91 계열) (fallback: gemini-2.5-flash)
 │                                     geopolitics_map 사전 패턴 매칭 우선 (사전 6 : AI 4 가중 평균)
 │                                     gemini-3-flash-preview 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
 │                                     신뢰도 필터링 (GEOPOLITICS_CONFIDENCE_MIN 기본 0.6)
@@ -362,6 +396,20 @@ notifiers/telegram_bot.py           ← format_morning_report(geopolitics_data �
                                        🌍 글로벌 트리거 섹션: 신뢰도 상위 3건, 미국증시 섹션 앞에 삽입
                                        원자재 섹션: 철광석(TIO=F)·알루미늄(ALI=F) 추가                ← v10.0
 
+[v10.0 Phase 4-1: 기업 이벤트 캘린더 + DataLab 트렌드]
+collectors/event_calendar_collector.py  ← main.py (run_event_calendar_collect: 06:30, EVENT_CALENDAR_ENABLED=true 시만)  ← v10.0
+collectors/event_calendar_collector.py  → raw_events 목록 → analyzers/event_impact_analyzer                               ← v10.0
+analyzers/event_impact_analyzer.py     → 신호8 signals + strength → signal_analyzer(event_impact_data)                   ← v10.0
+collectors/news_collector.py           → datalab_trends 키 추가 (DATALAB_ENABLED=true 시) → signal_analyzer              ← v10.0
+analyzers/signal_analyzer.py          ← event_impact_data + datalab_data 파라미터 추가                                    ← v10.0
+                                          _analyze_event_impact(): 신호8 → signals 리스트 추가                            ← v10.0
+                                          _analyze_datalab_trends(): DataLab 급등 → 신호2 보완                            ← v10.0
+                                          event_scores → 반환값 "event_scores" 키로 노출                                ← v10.0
+analyzers/oracle_analyzer.py          ← event_scores 파라미터 추가                                                        ← v10.0
+                                          _score_theme()에 기업이벤트 보너스 +5~+15 반영                                   ← v10.0
+reports/morning_report.py             ← event_calendar_collector → event_impact_analyzer → signal_analyzer 파이프라인 연동 ← v10.0
+main.py                               → _event_calendar_cache (전역 캐시, 아침봇 공유)                                     ← v10.0
+
 [v10.0 Phase 3: 섹터 수급 분석 + 공매도 잔고 신호]
 collectors/sector_etf_collector.py    ← closing_report.py 마감봇(18:30)에서만 호출 (rule #92)           ← v10.0
 collectors/short_interest_collector.py ← closing_report.py 마감봇(18:30)에서만 호출 (rule #92)          ← v10.0
@@ -469,6 +517,30 @@ graph TD
        ③ _geopolitics_cache 전역 변수에 캐시 저장 (아침봇·마감봇 공유)
        장중 GEOPOLITICS_POLL_MIN(30분) 간격 폴링: 긴급 이벤트 실시간 갱신
 
+06:30  ─── 기업 이벤트 캘린더 수집 [v10.0 Phase 4-1 신규] ──────────
+       EVENT_CALENDAR_ENABLED=true 시에만 실행 (기본 false)
+       run_event_calendar_collect() 호출:
+       ① event_calendar_collector.collect() → raw_events (DART API)
+          pblntf_ty=F(공정공시·IR) / D(주주총회) / A(정기공시·실적발표) 3종 조회
+          조회 기간: 오늘 ~ 14일 후 (lookahead)
+          소스 실패해도 비치명적 (빈 리스트 반환, 아침봇 08:30 blocking 절대 금지)
+       ② event_impact_analyzer.analyze(raw_events) → 신호8 예측 신호
+          D-1~D-2 이내 실적/IR → 강도5~4 / D-3 이내 주총 → 강도3~4 / D-1 배당 → 강도5
+          EVENT_SIGNAL_MIN_STRENGTH(3) 미달 이벤트 필터링
+       ③ _event_calendar_cache 전역 변수에 캐시 저장 (아침봇 공유)
+
+07:00  KIS 토큰 갱신
+       GEOPOLITICS_ENABLED=true 시에만 실행 (기본 false)
+       run_geopolitics_collect() 호출:
+       ① geopolitics_collector.collect() → raw_news (feedparser, 스레드풀)
+          Reuters RSS / Bloomberg RSS / 기재부 RSS / 방사청 RSS / Google News RSS
+          소스 실패해도 비치명적 (빈 리스트 반환, 아침봇 08:30 blocking 절대 금지)
+       ② geopolitics_analyzer.analyze(raw_news) → 이벤트 분석 결과
+          geopolitics_map 사전 매칭 우선 → gemini-3-flash-preview 배치 분석 → fallback: gemini-2.5-flash → 사전 결과 fallback
+          신뢰도 GEOPOLITICS_CONFIDENCE_MIN(0.6) 미달 이벤트 필터링
+       ③ _geopolitics_cache 전역 변수에 캐시 저장 (아침봇·마감봇 공유)
+       장중 GEOPOLITICS_POLL_MIN(30분) 간격 폴링: 긴급 이벤트 실시간 갱신
+
 07:00  KIS 토큰 갱신
 
 08:30  ─── 아침봇 ────────────────────────────────────────────
@@ -485,6 +557,11 @@ graph TD
             신뢰도 0.85+: 강도5 / 0.70+: 강도4 / 기타: 강도3
             impact_direction: "+" 상승 / "-" 하락 / "mixed" 혼재
           신호6 발화 후 signals 강도 내림차순 정렬
+          _analyze_event_impact(): 기업 이벤트 신호8 (EVENT_CALENDAR_ENABLED=true 시)
+            D-1 실적/IR → 강도5 / D-2 → 강도4 / D-3+ → 강도3
+            event_scores → oracle_analyzer에 전달 (기업이벤트 테마 +5~+15)
+          _analyze_datalab_trends(): DataLab 급등 키워드 (DATALAB_ENABLED=true 시)
+            ratio ≥ DATALAB_SPIKE_THRESHOLD(1.5x) 키워드만 신호2 보완으로 발화
        ⑦ ai_analyzer.analyze_dart() — 공시 호재/악재 점수화
        ⑦-b ai_analyzer.analyze_closing(price_data) — 신호4 AI 교체 (v2.4 신규)
            "상한가 순환매"/"KOSPI 급등 순환매" → 실제 테마명(바이오신약 등)
@@ -1195,6 +1272,16 @@ gemini-1.5-pro      ❌ 서비스 종료 — 절대 사용 금지 (Google 지원
 
 | 버전 | 날짜 | 변경 내용 |
 |------|------|---------|
+| v10.5 | 2026-02-28 | **Phase 4-1 — 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 구현** |
+|       |            | collectors/event_calendar_collector.py 신규: DART 공시 API 기업 이벤트 수집 |
+|       |            | analyzers/event_impact_analyzer.py 신규: 기업 이벤트 → 수급 모멘텀 예측 (신호8) |
+|       |            | collectors/news_collector.py: 네이버 DataLab 트렌드 API 추가 (datalab_trends) |
+|       |            | analyzers/signal_analyzer.py: event_impact_data/datalab_data 파라미터 추가, 신호8 통합 |
+|       |            | analyzers/oracle_analyzer.py: event_scores 파라미터 추가, 기업이벤트 보너스 +5~+15 |
+|       |            | reports/morning_report.py: 기업 이벤트 파이프라인 연동 + oracle event_scores 전달 |
+|       |            | main.py: _event_calendar_cache 전역변수, run_event_calendar_collect() 06:30 스케줄 |
+|       |            | config.py: Phase 4-1 상수 6종 추가 (EVENT_CALENDAR_ENABLED, DATALAB_ENABLED 등) |
+|       |            | 절대 금지 규칙 #96~#99 추가 (Phase 4-1 기업이벤트·DataLab 규칙) |
 | v10.3 | 2026-02-27 | **Gemini 모델 서비스종료 대응 — gemini-3-flash-preview 전면 교체** |
 |       |            | analyzers/geopolitics_analyzer.py: `_MODELS` → `["gemini-3-flash-preview", "gemini-2.5-flash"]` |
 |       |            | geopolitics_analyzer.py 모델 주석 전면 교정 (Primary: gemini-3-flash-preview) |
@@ -1683,6 +1770,14 @@ EVALUATE_CONV_TIMEOUT_SEC=120     # /evaluate 대화 타임아웃 (초)
 # v10.0 Phase 1: 철강/비철 ETF (선택 — 미설정 시 기본값 적용)
 STEEL_ETF_ALERT_THRESHOLD=3.0   # XME/SLX 급등 임계값 (%) — 기본 3.0%
 
+# v10.0 Phase 4-1: 기업 이벤트 캘린더 + DataLab 트렌드 (선택 — 미설정 시 비활성)
+EVENT_CALENDAR_ENABLED=false        # true로 변경 시 기업 이벤트 캘린더 수집 활성화
+DATALAB_ENABLED=false               # true로 변경 시 DataLab 검색어 트렌드 수집 활성화
+# NAVER_DATALAB_CLIENT_ID=          # 네이버 DataLab 전용 앱키 (없으면 NAVER_CLIENT_ID 폴백)
+# NAVER_DATALAB_CLIENT_SECRET=      # 네이버 DataLab 전용 앱시크릿
+DATALAB_SPIKE_THRESHOLD=1.5         # DataLab 급등 임계값 (최근3일평균/7일평균 비율, 기본 1.5)
+EVENT_SIGNAL_MIN_STRENGTH=3         # 신호8 최소 강도 (기본 3, 미달 이벤트 필터링)
+
 # v10.0 Phase 2: 지정학 수집·분석 (선택 — 미설정 시 기능 비활성)
 GEOPOLITICS_ENABLED=false           # true로 변경 시 지정학 수집 활성화
 GEOPOLITICS_POLL_MIN=30             # 장중 폴링 간격 (분, 기본 30)
@@ -1944,6 +2039,28 @@ theme_history.analyze_patterns()  # 분석 로직 금지
 theme_history.send_telegram()      # 발송 금지
 genai.generate_content(...)        # AI 호출 금지
 ```
+
+---
+
+**rule #96** — `collectors/event_calendar_collector.py`는 DART 공시 API 파싱 + 이벤트 목록 반환만 담당.
+AI 분석·텔레그램 발송·DB 기록 **절대 금지**.
+비치명적 처리: 소스 실패 시 빈 리스트 반환 (아침봇 blocking 금지).
+
+---
+
+**rule #97** — `analyzers/event_impact_analyzer.py`는 기업 이벤트 → 수급 모멘텀 예측만 담당.
+KIS API·pykrx·AI 호출 **절대 금지**. 입력 파라미터만으로 동작하는 순수 계산 모듈.
+
+---
+
+**rule #98** — 신호8(기업이벤트) 및 DataLab 트렌드 결과는 **반드시 `signal_analyzer.analyze()`를 경유**하여 전달.
+`oracle_analyzer`에 직접 전달 **절대 금지** — signal_analyzer 경유 필수 (rule #94 계열 준수).
+
+---
+
+**rule #99** — `collectors/news_collector.py`의 `_collect_datalab_trends()`는 네이버 DataLab API 호출만.
+분석·발송·DB 기록 **절대 금지**. DATALAB_ENABLED=false 시 즉시 빈 리스트 반환.
+DataLab API 실패 시 비치명적 처리 — 예외 발생 대신 logger.warning + 빈 리스트 반환.
 
 ---
 
