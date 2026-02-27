@@ -13,6 +13,13 @@ analyzers/signal_analyzer.py
         업종명 키워드 매칭으로 실제 등락률 상위 종목을 동적으로 조회
         US_SECTOR_KR_MAP(종목 고정) → US_SECTOR_KR_INDUSTRY(업종 키워드) 사용
         COMMODITY_KR_INDUSTRY 신규 사용
+- v10.0 Phase 1: 신호2 확장 — 미국 철강 ETF(XME/SLX) 급등 감지 로직 추가
+        _analyze_steel_etf(): XME/SLX가 STEEL_ETF_ALERT_THRESHOLD 이상 급등 시
+        '철강/비철금속' 테마 신호2 추가 발화
+        analyze() 파라미터에 geopolitics_data(기본 None) 추가 — Phase 2 신호6 대비
+- v10.0 Phase 2: 신호6 — 지정학·정책 이벤트 신호 통합
+        geopolitics_data(geopolitics_collector.collect() 반환값) 주입 시 신호6 생성
+        _analyze_geopolitics() 추가
 """
 
 import config
@@ -20,15 +27,20 @@ from utils.logger import logger
 
 
 def analyze(
-    dart_data:   list[dict],
-    market_data: dict,
-    news_data:   dict,
-    price_data:  dict = None,
+    dart_data:        list[dict],
+    market_data:      dict,
+    news_data:        dict,
+    price_data:       dict = None,
+    geopolitics_data: list[dict] = None,   # v10.0 Phase 2: 지정학 이벤트 (None이면 신호6 생략)
 ) -> dict:
     """
-    신호 1~5 통합 분석
+    신호 1~6 통합 분석
     반환: dict {signals, market_summary, commodities, volatility,
                 report_picks, policy_summary}
+
+    [v10.0 추가]
+    - geopolitics_data: geopolitics_collector.collect() 반환값.
+      None(기본)이면 신호6 생략 (Phase 1 하위 호환).
     """
     logger.info("[signal] 신호 1~5 분석 시작")
 
@@ -56,6 +68,11 @@ def analyze(
     by_sector = price_data.get("by_sector", {}) if price_data else {}
     us_signals = _analyze_us_market(market_summary, commodities, by_sector)
     signals.extend(us_signals)
+
+    # v10.0 Phase 1: 신호2 확장 — 미국 철강 ETF 급등 전용 감지
+    sectors = market_summary.get("sectors", {})
+    steel_signals = _analyze_steel_etf(sectors, by_sector)
+    signals.extend(steel_signals)
 
     # ── 신호 3: 증권사 리포트 ────────────────────────────────
     reports = news_data.get("reports", [])
@@ -89,6 +106,12 @@ def analyze(
             "상태":     "모니터",
             "관련종목": [],
         })
+
+    # ── 신호 6: 지정학·정책 이벤트 (v10.0 Phase 2) ────────────
+    if geopolitics_data:
+        geo_signals = _analyze_geopolitics(geopolitics_data, by_sector)
+        signals.extend(geo_signals)
+        logger.info(f"[signal] 신호6 (지정학): {len(geo_signals)}개 이벤트 발화")
 
     signals.sort(key=lambda x: x["강도"], reverse=True)
     logger.info(f"[signal] 총 {len(signals)}개 신호 감지")
@@ -181,6 +204,110 @@ def _analyze_us_market(us: dict, commodities: dict, by_sector: dict) -> list[dic
             "상태":     "모니터",
             "관련종목": 관련종목,
         })
+
+    return signals
+
+
+# ══════════════════════════════════════════════════════════════
+# v10.0 Phase 1 — 철강 ETF 급등 감지 (신호2 확장)
+# ══════════════════════════════════════════════════════════════
+
+def _analyze_steel_etf(sectors: dict, by_sector: dict) -> list[dict]:
+    """
+    미국 철강 ETF(XME, SLX) 급등 → '철강/비철금속' 신호2 추가 발화.
+
+    config.STEEL_ETF_ALERT_THRESHOLD(기본 3.0%) 이상 급등 시 독립 신호 생성.
+    US_SECTOR_TICKERS에서 이미 XME/SLX를 처리하지만, 임계값이 낮아
+    단순 1% 움직임도 신호가 될 수 있음. 이 함수는 철강 전용 고임계값 필터.
+    """
+    result = []
+    steel_etfs = ["철강/비철금속", "철강"]   # config.US_SECTOR_TICKERS의 value와 일치
+    threshold = config.STEEL_ETF_ALERT_THRESHOLD
+
+    for etf_label in steel_etfs:
+        data = sectors.get(etf_label, {})
+        change_str = data.get("change", "N/A")
+        if change_str == "N/A":
+            continue
+        try:
+            pct = float(change_str.replace("%", "").replace("+", ""))
+        except ValueError:
+            continue
+
+        if pct < threshold:
+            continue
+
+        # threshold 이상 — 철강 테마 고강도 발화
+        keywords  = config.COMMODITY_KR_INDUSTRY.get("steel", [])
+        관련종목  = _get_sector_top_stocks(by_sector, keywords)
+
+        강도 = 5 if pct >= 5.0 else 4   # 5% 이상이면 최강도
+
+        result.append({
+            "테마명":   "철강/비철금속",
+            "발화신호": f"신호2: 미국 {etf_label} ETF {change_str} 급등 — 철강 테마 선행 신호 [v10]",
+            "강도":     강도,
+            "신뢰도":   data.get("신뢰도", "yfinance"),
+            "발화단계": "1일차",
+            "상태":     "신규",
+            "관련종목": 관련종목,
+        })
+        logger.info(f"[signal] 신호2(철강ETF): {etf_label} {change_str} — 철강 테마 발화 (강도{강도})")
+        break   # XME, SLX 중 하나만 발화 (중복 방지)
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
+# v10.0 Phase 2 — 지정학·정책 이벤트 신호 (신호6)
+# ══════════════════════════════════════════════════════════════
+
+def _analyze_geopolitics(geopolitics_data: list[dict], by_sector: dict) -> list[dict]:
+    """
+    geopolitics_collector.collect() 반환값을 받아 신호6으로 변환.
+
+    각 이벤트 dict 형식:
+    {
+        event_type:        str,   # 이벤트 유형
+        affected_sectors:  list,  # 영향 섹터 리스트
+        impact_direction:  str,   # '+' 또는 '-'
+        confidence:        float, # 0~1
+        source_url:        str,
+        event_summary_kr:  str,   # 한국어 요약
+    }
+    """
+    signals = []
+    min_confidence = config.GEOPOLITICS_CONFIDENCE_MIN
+
+    for event in geopolitics_data:
+        confidence = event.get("confidence", 0.0)
+        if confidence < min_confidence:
+            continue
+
+        affected = event.get("affected_sectors", [])
+        direction = event.get("impact_direction", "+")
+        summary_kr = event.get("event_summary_kr", "")
+        event_type = event.get("event_type", "지정학이벤트")
+
+        for sector in affected[:3]:   # 최대 3개 섹터로 제한
+            keywords   = config.US_SECTOR_KR_INDUSTRY.get(sector, [sector])
+            관련종목   = _get_sector_top_stocks(by_sector, keywords)
+
+            강도 = 5 if confidence >= 0.85 else 4 if confidence >= 0.70 else 3
+            상태  = "신규" if direction == "+" else "경고"
+
+            signals.append({
+                "테마명":   sector,
+                "발화신호": (
+                    f"신호6: {event_type} — {summary_kr[:50]}"
+                    f" [신뢰도:{confidence:.0%}|지정학]"
+                ),
+                "강도":     강도,
+                "신뢰도":   f"geo:{confidence:.2f}",
+                "발화단계": "1일차",
+                "상태":     상태,
+                "관련종목": 관련종목,
+            })
 
     return signals
 
