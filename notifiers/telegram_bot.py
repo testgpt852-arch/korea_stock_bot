@@ -28,6 +28,9 @@ notifiers/telegram_bot.py
         format_morning_summary() — 300자 이내 핵심 요약 (아침봇 요약 발송용)
         format_weekly_report()  — 요약 최적화 (상세링크 구조)
 - v8.1: [쪽집게봇] format_oracle_section() 추가
+- v10.0: format_morning_report()에 🌍 글로벌 트리거 섹션 추가
+         geopolitics_data(신호6 분석 결과)가 있으면 미국증시 섹션 앞에 삽입
+         format_morning_report() 파라미터에 geopolitics_data 추가
         oracle_analyzer.analyze() 반환값 → 텔레그램 포맷
         아침봇·마감봇 최우선 선발송 (결론 먼저, 데이터는 후발송)
         픽마다 진입가·목표가·손절가·R/R + 판단 근거 배지 표시
@@ -189,15 +192,20 @@ def format_oracle_section(oracle_result: dict) -> str:
 # 아침봇 보고서 포맷
 # ══════════════════════════════════════════════════════════════
 
-def format_morning_report(report: dict) -> str:
+def format_morning_report(report: dict, geopolitics_data: list = None) -> str:
     """
     [v5.0 Phase 5] 아침봇 리포트 구조 개선.
 
     섹션 순서 재배치:
     ① 헤더 + 시장 환경 요약 (전날 지수 + 미국증시 + 원자재)
+       ↑ [v10.0] geopolitics_data가 있으면 🌍 글로벌 트리거 섹션 삽입
     ② 주요 공시 AI 분석 (가장 임팩트 높은 정보 먼저)
     ③ AI 추천 테마 / 발화 신호 (테마발화 + 기관/외인 수급)
     ④ 순환매 지도 + 증권사 리포트 (보조 정보)
+
+    Args:
+        report:           아침봇 분석 결과 dict
+        geopolitics_data: geopolitics_analyzer.analyze() 반환값 (None이면 섹션 생략)
     """
     today_str        = report.get("today_str", "")
     prev_str         = report.get("prev_str", "")
@@ -236,6 +244,23 @@ def format_morning_report(report: dict) -> str:
                 f"  ({sign}{prev_kosdaq.get('change_rate', 0):.2f}%)"
             )
 
+    # ── v10.0: 🌍 글로벌 트리거 섹션 ──────────────────────────
+    if geopolitics_data:
+        lines.append("\n🌍 <b>글로벌 트리거 — 오늘 왜 이 테마인가?</b>")
+        # 신뢰도 상위 3건만 표시
+        for event in geopolitics_data[:3]:
+            impact = event.get("impact_direction", "+")
+            confidence = event.get("confidence", 0.0)
+            sectors = event.get("affected_sectors", [])
+            summary = event.get("event_summary_kr", "")
+            emoji  = "📈" if impact == "+" else "📉" if impact == "-" else "🔀"
+            sector_str = " · ".join(sectors[:2])
+            lines.append(
+                f"  {emoji} <b>{sector_str}</b> — {summary[:50]} "
+                f"[신뢰도:{confidence:.0%}]"
+            )
+        lines.append("")   # 공백 구분
+
     # 미국증시
     lines.append("\n🌏 <b>미국증시 (전날 마감)</b>")
     nasdaq = us.get("nasdaq", "N/A")
@@ -271,6 +296,9 @@ def format_morning_report(report: dict) -> str:
         ("구리 (LME)", "copper"),
         ("은 (COMEX)", "silver"),
         ("천연가스", "gas"),
+        # v10.0 Phase 1: 철강 선행지표 추가
+        ("철광석", "steel"),
+        ("알루미늄 (LME)", "aluminum"),
     ]:
         c      = commodities.get(key, {})
         price  = c.get("price",  "N/A")
