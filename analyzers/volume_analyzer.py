@@ -145,7 +145,8 @@ def poll_all_markets() -> list[dict]:
     3. 장중 거래대금 < MIN_TRADE_AMOUNT(30억) → 스킵
     4. 전일거래량 < MIN_PREV_VOL(5만) → 스킵
     5. 누적RVOL < MIN_VOL_RATIO_ACML(30%) → 스킵
-    6. 순간Δ등락률 ≥ PRICE_DELTA_MIN AND 순간강도 ≥ VOLUME_DELTA_MIN → 카운터 증가
+    6. 누적 등락률 가속도(Δ등락률) ≥ PRICE_DELTA_MIN AND 순간강도 ≥ VOLUME_DELTA_MIN → 카운터 증가
+       [v8.2] Δ등락률 = curr["등락률"] - prev["등락률"] (가속도 기준, 구: 절대 가격 변화)
     7. CONFIRM_CANDLES회 연속 → 알림 발송 + 카운터 초기화
     8. [v4.0] 알림 대상 종목 → REST 호가 조회 → analyze_orderbook() 주입
     """
@@ -205,7 +206,12 @@ def poll_all_markets() -> list[dict]:
             if acml_rvol < config.MIN_VOL_RATIO_ACML:
                 continue
 
-            delta_rate = (curr_price - prev_price) / prev_price * 100
+            # [v8.2] 델타 기준 변경: 가격 변화율 → 누적 등락률 가속도
+            # 구: (curr_price - prev_price) / prev_price * 100
+            #   → 이미 3~12% 구간 종목의 절대 가격 변화는 10초에 1.5% 도달 거의 불가
+            # 신: curr_row["등락률"] - prev["등락률"]
+            #   → 모멘텀이 붙는 순간을 측정 (예: 4.2%→5.3% = +1.1%가속)
+            delta_rate = row["등락률"] - prev.get("등락률", row["등락률"])
             delta_vol  = max(0, acml_vol - prev["누적거래량"])
             순간강도    = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
