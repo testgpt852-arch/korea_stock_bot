@@ -1,6 +1,6 @@
 pykrx
 pandas
-feedparser
+feedparser>=6.0.0
 requests
 beautifulsoup4
 apscheduler
