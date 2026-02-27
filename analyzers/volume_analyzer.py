@@ -36,6 +36,15 @@ analyzers/volume_analyzer.py
         이유: 거래량 순위는 삼성전자·현대차 등 시총 대형주가 항상 상위에 포함되어
              실질적인 급등 신호가 아닌 노이즈 알림 발생
         감지소스 "volume" 배지 deprecated → 장중 REST 감지는 전부 "rate"
+- v9.0: [신규진입 감지 버그수정 / P0·P1]
+        poll_all_markets(): prev 없는 신규진입 종목 first-entry 감지 추가
+          - 기존: if not prev: continue → delta_rate=0 → 100% 스킵 (알림 0건 핵심 원인)
+          - 수정: FIRST_ENTRY_MIN_RATE(4%) + MIN_VOL_RATIO_ACML 단독 기준으로 포착
+          - 직전대비 = change_rate (미진입→현재 전체 등락률이 가속도)
+        config: PRICE_DELTA_MIN 1.0→0.5 (기존 종목 가속도 기준도 현실화)
+        config: GAP_UP_MIN 2.5→1.5 (임계값 5%→3%, 3~5% 신규진입 사각지대 해소)
+        _detect_gap_up(): MIN_VOL_RATIO_ACML 필터 추가 (GAP_UP_MIN 완화 노이즈 방지)
+        config: FIRST_ENTRY_MIN_RATE = 4.0 신규 (신규진입 단독 임계값)
 """
 
 from datetime import datetime, timezone, timedelta
@@ -179,38 +188,76 @@ def poll_all_markets() -> list[dict]:
                 continue
 
             prev = _prev_snapshot.get(ticker)
-            if not prev:
-                continue
 
-            prev_price = prev["현재가"]
-            curr_price = row["현재가"]
-            if prev_price <= 0:
-                continue
+            # ── 공통 전처리 (prev 유무 무관) ──────────────────────────
+            curr_price   = row["현재가"]
+            change_rate  = row["등락률"]
+            prdy_vol     = row["전일거래량"]
+            acml_vol     = row["누적거래량"]
 
-            change_rate = row["등락률"]
             if change_rate < config.MIN_CHANGE_RATE:
                 continue
             if change_rate > config.MAX_CATCH_RATE:
                 continue
 
-            trade_amount = row["누적거래량"] * curr_price
+            trade_amount = acml_vol * curr_price
             if trade_amount < config.MIN_TRADE_AMOUNT:
                 continue
 
-            prdy_vol = row["전일거래량"]
             if prdy_vol < config.MIN_PREV_VOL:
                 continue
 
-            acml_vol  = row["누적거래량"]
             acml_rvol = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
             if acml_rvol < config.MIN_VOL_RATIO_ACML:
                 continue
 
-            # [v8.2] 델타 기준 변경: 가격 변화율 → 누적 등락률 가속도
-            # 구: (curr_price - prev_price) / prev_price * 100
-            #   → 이미 3~12% 구간 종목의 절대 가격 변화는 10초에 1.5% 도달 거의 불가
-            # 신: curr_row["등락률"] - prev["등락률"]
-            #   → 모멘텀이 붙는 순간을 측정 (예: 4.2%→5.3% = +1.1%가속)
+            # ── [v9.0 신규진입 감지 버그수정] ─────────────────────────
+            # 이전 버그: prev 없으면 delta_rate=0 → PRICE_DELTA_MIN 미충족 → 무조건 continue
+            # 원인: 등락률 순위에 처음 등장한 종목(= 방금 급등 시작)은 직전 스냅샷이 없음
+            # 수정: prev 없는 종목은 FIRST_ENTRY_MIN_RATE + MIN_VOL_RATIO_ACML 단독 기준 적용
+            #       (delta_rate = change_rate — 미진입(0%)→현재값까지의 등락률 전체가 가속도)
+            if not prev:
+                if change_rate >= config.FIRST_ENTRY_MIN_RATE:
+                    _confirm_count[ticker] = _confirm_count.get(ticker, 0) + 1
+                    if _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES:
+                        _confirm_count[ticker] = 0
+                        순간강도 = round((acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0, 1)
+                        호가분석 = None
+                        if config.ORDERBOOK_ENABLED:
+                            ob_data = get_orderbook(ticker)
+                            호가분석 = analyze_orderbook(ob_data)
+                            if 호가분석:
+                                logger.info(
+                                    f"[volume] {row['종목명']} 호가강도={호가분석['호가강도']} "
+                                    f"매수매도비율={호가분석['매수매도비율']:.2f}"
+                                )
+                        alerted.append({
+                            "종목코드":   ticker,
+                            "종목명":     row["종목명"],
+                            "등락률":     change_rate,
+                            "직전대비":   round(change_rate, 2),  # prev=0(미진입) → 전체 등락률이 가속도
+                            "거래량배율": round(acml_rvol / 100, 2),
+                            "순간강도":   순간강도,
+                            "조건충족":   True,
+                            "감지시각":   _now_kst(),
+                            "감지소스":   row.get("_source", "rate"),
+                            "호가분석":   호가분석,
+                        })
+                        logger.info(
+                            f"[volume] 신규진입 감지: {row['종목명']} "
+                            f"+{change_rate:.1f}% (순위 첫 등장, RVOL {acml_rvol:.0f}%)"
+                        )
+                else:
+                    _confirm_count[ticker] = 0
+                continue
+
+            # ── 기존 종목: 누적 등락률 가속도(델타) 기준 감지 ─────────
+            prev_price = prev["현재가"]
+            if prev_price <= 0:
+                continue
+
+            # [v8.2] Δ등락률(가속도) = curr["등락률"] - prev["등락률"]
+            # 예: 4.2%→5.3% → Δ=+1.1% — 모멘텀이 붙는 순간을 정확히 측정
             delta_rate = row["등락률"] - prev.get("등락률", row["등락률"])
             delta_vol  = max(0, acml_vol - prev["누적거래량"])
             순간강도    = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
@@ -285,9 +332,10 @@ _gap_alerted: set[str] = set()
 def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> list[dict]:
     """
     [T2] 갭 상승 모멘텀 감지
-    - change_rate > GAP_UP_MIN × 2
+    - change_rate >= GAP_UP_MIN × 2 (v9.0: GAP_UP_MIN=1.5 → 임계값 3.0% = MIN_CHANGE_RATE)
     - [v3.8] change_rate ≤ MAX_CATCH_RATE
     - [v4.0] 호가 분석 포함 (ORDERBOOK_ENABLED=True 시)
+    - [v9.0] MIN_VOL_RATIO_ACML 필터 추가 — GAP_UP_MIN 완화에 따른 거래량 無 급등 노이즈 차단
     """
     from kis.rest_client import get_orderbook
 
@@ -318,9 +366,15 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         if trade_amount < config.MIN_TRADE_AMOUNT:
             continue
 
-        _gap_alerted.add(ticker)
+        # [v9.0 신규] 누적 RVOL 필터 — GAP_UP_MIN 완화(2.5→1.5)로 임계값이 낮아졌으므로
+        # 거래량 없이 갭업한 종목(세력 부재 갭)을 차단하기 위해 동일 RVOL 기준 적용
         acml_vol  = row.get("누적거래량", 0)
-        acml_rvol = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
+        acml_rvol = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
+        if acml_rvol < config.MIN_VOL_RATIO_ACML:
+            continue
+
+        _gap_alerted.add(ticker)
+        rvol_display = acml_rvol / 100  # x 단위로 변환
 
         # [v4.0] 호가 분석
         호가분석 = None
@@ -333,7 +387,7 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
             "종목명":     row.get("종목명", ticker),
             "등락률":     change_rate,
             "직전대비":   0.0,
-            "거래량배율": round(acml_rvol, 2),
+            "거래량배율": round(rvol_display, 2),
             "순간강도":   0.0,
             "조건충족":   True,
             "감지시각":   _now_kst(),
@@ -342,7 +396,7 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         })
         logger.info(
             f"[volume] T2 갭상승 감지: {row.get('종목명', ticker)} "
-            f"+{change_rate:.1f}% (갭업추정, RVOL {acml_rvol:.1f}x)"
+            f"+{change_rate:.1f}% (갭업추정, RVOL {rvol_display:.1f}x)"
         )
 
     return results
