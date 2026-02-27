@@ -351,14 +351,18 @@ graph TD
                    등락률 0~10% 구간 → 초기 급등 조기 포착
                    ※ get_volume_ranking() 제거: 삼성전자·현대차 등 대형주가
                      거래량 순위 상위에 항상 포함되어 노이즈 알림 발생했었음
-               [v2.8 델타 기준 감지 / v8.2 가속도 기준으로 변경]
+               [v2.8 델타 기준 감지 / v8.2 가속도 기준으로 변경 / v9.0 신규진입 감지 추가]
                → 첫 사이클: 워밍업 (스냅샷 저장만, 알림 없음)
-               → 이후 사이클: 직전 poll 대비 누적 등락률 가속도 판단
-                 [v8.2] Δ등락률(가속도) = curr["등락률"] - prev["등락률"]
-                 예: 4.2%→5.3% → Δ=+1.1% → PRICE_DELTA_MIN(1.0%) 충족
-                 구 방식(가격 변화율)은 3~12% 구간 종목에서 달성 불가 → 알림 0건 원인
-                 Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
-                 × CONFIRM_CANDLES(1)회 충족 → 알림
+               → 이후 사이클: 두 경로로 분기
+                 [경로1] 기존 종목 (prev 있음): 등락률 가속도 기준
+                   [v8.2] Δ등락률(가속도) = curr["등락률"] - prev["등락률"]
+                   예: 4.2%→4.7% → Δ=+0.5% → PRICE_DELTA_MIN(0.5%) 충족
+                   Δ등락률 ≥ PRICE_DELTA_MIN(0.5%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
+                   × CONFIRM_CANDLES(1)회 충족 → 알림
+                 [경로2] 신규진입 종목 (prev 없음): FIRST_ENTRY_MIN_RATE 단독 기준 [v9.0 신규]
+                   이전: if not prev: continue → delta_rate=0 → 100% 스킵 (알림 0건의 핵심 원인)
+                   수정: change_rate ≥ FIRST_ENTRY_MIN_RATE(4%) AND acml_rvol ≥ MIN_VOL_RATIO_ACML
+                   직전대비 = change_rate (미진입→현재 전체 등락률이 가속도)
                → 알림 포맷: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착)
                [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true 시:
                position_manager.check_exit() — 익절/손절/Trailing Stop 조건 검사
@@ -490,11 +494,15 @@ graph TD
 
 ```python
 # v2.8: 델타 기준 (감지 조건)
-PRICE_DELTA_MIN      = 1.0      # 폴링 간격 내 누적 등락률 가속도 최소값 (%)
+PRICE_DELTA_MIN      = 0.5      # 폴링 간격 내 누적 등락률 가속도 최소값 (%)
                                  # [v8.2] 가격 변화율 → 등락률 가속도로 변경
-                                 # 예: 4.2%→5.3% = +1.1%가속 → PRICE_DELTA_MIN(1.0%) 충족
+                                 # [v9.0] 1.0→0.5 완화: 10초 1%p 가속은 과도한 조건이었음
+                                 # 예: 4.2%→4.7% = +0.5%가속 → PRICE_DELTA_MIN(0.5%) 충족
 VOLUME_DELTA_MIN     = 5        # 폴링 간격 내 순간 거래량 증가 (전일 거래량 대비 %) — v8.2: 10→5
 CONFIRM_CANDLES      = 1        # 연속 충족 횟수 — v8.2: 2→1 (가속도 기준은 1회로 충분)
+FIRST_ENTRY_MIN_RATE = 4.0      # [v9.0 신규] 신규진입 종목(prev 없음) 단독 감지 임계값 (%)
+                                 # 직전 스냅샷에 없다 → delta_rate=0 버그 → 이 상수로 우회
+                                 # MIN_CHANGE_RATE(3%)보다 약간 높게: 노이즈 방지
 POLL_INTERVAL_SEC    = 60       # KIS REST 폴링 간격 (초)
 ALERT_COOLTIME_MIN   = 30       # 중복 알림 방지 쿨타임
 WS_MAX_RECONNECT     = 3
@@ -543,7 +551,9 @@ WS_ORDERBOOK_ENABLED   = False        # WebSocket 호가(H0STASP0) 구독 여부
 WS_ORDERBOOK_SLOTS     = 20           # WS 호가 구독 종목 수 (한도 분할 시)
 
 # v3.2: Phase 2 트리거 임계값
-GAP_UP_MIN             = 1.0    # T2 갭업 최소 비율 (%)
+GAP_UP_MIN             = 1.5    # T2 갭업 최소 비율 (%) — v9.0: 2.5→1.5 (임계값 3.0% = MIN_CHANGE_RATE)
+                                 # 기존 2.5: 임계값 5.0% → 3~5% 신규 급등 사각지대 발생
+                                 # 노이즈 방지: _detect_gap_up에 MIN_VOL_RATIO_ACML 필터 추가
 CLOSING_STRENGTH_MIN   = 0.75   # T5 마감 강도 최소값 (0~1)
 CLOSING_STRENGTH_TOP_N = 7
 VOLUME_FLAT_CHANGE_MAX = 5.0    # T6 횡보 인정 등락률 절대값 상한 (%)
@@ -565,6 +575,7 @@ FUND_INFLOW_TOP_N      = 7
  "직전대비": float,               # v2.8 신규 / v8.2 변경: 등락률 가속도 (curr등락률 - prev등락률)
                                   # 구: (curr_price - prev_price) / prev_price * 100 (가격 변화율)
                                   # 신: curr["등락률"] - prev["등락률"] (모멘텀 가속도 — 더 현실적 기준)
+                                  # [v9.0] 신규진입 종목(prev 없음): change_rate 그대로 (0%→현재 전체 가속도)
  "거래량배율": float,             # v3.8 변경: 누적RVOL (acml_vol / prdy_vol 배수)
  "순간강도": float,               # v3.8 신규: 순간 Δvol / 전일거래량 (%)
  "조건충족": bool, "감지시각": str,
@@ -856,6 +867,17 @@ gemini-2.5-flash   20회/일   ❌ 부족
     order_client.get_current_price()는 주문·잔고용 — "종목명" 반환 안 함, 혼용 금지
 79. run_memory_compression은 main.py scheduler에서만 호출 (일요일 03:30 cron)
     함수 정의 추가 시 반드시 scheduler.add_job()도 함께 등록 (누락 방지)
+
+[v9.0 신규진입 감지 규칙 — 2026-02-28]
+86. volume_analyzer.poll_all_markets(): prev 없는 신규진입 종목 처리는 first-entry 블록에서만
+    `if not prev: continue` 패턴으로 복귀 금지 — 신규진입 알림 0건 버그 재발 방지
+    first-entry 조건: FIRST_ENTRY_MIN_RATE + MIN_VOL_RATIO_ACML (두 조건 동시 준수)
+87. FIRST_ENTRY_MIN_RATE는 MIN_CHANGE_RATE 이상으로만 설정
+    MIN_CHANGE_RATE 미만으로 낮추면 기준 미달 종목의 신규진입 노이즈 발생
+88. _detect_gap_up()은 MIN_VOL_RATIO_ACML 필터 반드시 포함 (GAP_UP_MIN 완화 노이즈 방지)
+    GAP_UP_MIN 수치 변경 시 _detect_gap_up의 RVOL 필터 동시 확인 필수
+89. PRICE_DELTA_MIN은 0.3 미만으로 낮추지 말 것
+    너무 낮으면 이미 오른 종목의 소폭 가속도도 감지 → MAX_ALERTS_PER_CYCLE 포화 위험
 
 [Phase 4 포트폴리오 인텔리전스 규칙 — v4.4 추가]
 52. positions 테이블 sector 컬럼은 open_position() 진입 시 1회 기록, 이후 변경 금지
@@ -1376,6 +1398,80 @@ EVALUATE_CONV_TIMEOUT_SEC=120     # /evaluate 대화 타임아웃 (초)
 ```
 
 *v3.0 | 2026-02-25 | 등락률 순위 필터 전면 개편: 코스닥 노이즈제외 / 코스피 중형+소형 / 0~10% 구간*
+
+---
+
+## 🛠️ v9.0 버그수정 내역 (2026-02-28)
+
+### 장중봇 알림 무발송 원인 3종 수정
+
+| 파일 | 버그 (P0/P1) | 수정 내용 |
+|---|---|---|
+| `analyzers/volume_analyzer.py` | **P0-핵심** `if not prev: continue` — 신규진입 종목 delta_rate=0 강제 스킵 | first-entry 감지 블록 추가: `change_rate ≥ FIRST_ENTRY_MIN_RATE AND acml_rvol ≥ MIN_VOL_RATIO_ACML` |
+| `config.py` | **P0** `PRICE_DELTA_MIN=1.0` — 10초 안에 1%p 가속은 사실상 불가능한 조건 | `0.5`로 완화 |
+| `config.py` | **P1** `GAP_UP_MIN=2.5` → 임계값 5.0% — 3~5% 신규 급등 사각지대 | `1.5`로 완화 (임계값 → 3.0% = MIN_CHANGE_RATE) |
+| `analyzers/volume_analyzer.py` | **P1** `_detect_gap_up` GAP_UP_MIN 완화 시 거래량 無 종목 노이즈 우려 | `MIN_VOL_RATIO_ACML` 필터 추가 |
+| `config.py` | — | `FIRST_ENTRY_MIN_RATE = 4.0` 신규 상수 추가 |
+
+### 버그 원인 상세
+
+```
+[P0-핵심] 신규진입 종목 delta_rate=0 버그
+─────────────────────────────────────────
+증상: 장중 등락률 순위에 처음 등장한 종목 (= 지금 막 급등 시작한 종목)이 전혀 감지되지 않음
+원인: _prev_snapshot에 없으면 `if not prev: continue` 로 즉시 건너뜀
+      → 설령 갭업 경로(_detect_gap_up)로 가더라도 임계값이 GAP_UP_MIN×2=5%여서
+        3~5% 급등 신규 진입 종목은 두 경로 모두에서 누락
+수정: prev 없는 종목 전용 감지 블록 추가
+      FIRST_ENTRY_MIN_RATE(4%) + MIN_VOL_RATIO_ACML(30%) 단독 기준
+      → 4%+ 첫 등장 종목은 즉시 포착 / 3~4%는 gap_up 경로(GAP_UP_MIN 완화) 커버
+
+[P0] PRICE_DELTA_MIN=1.0 과도
+─────────────────────────────
+증상: 이미 3~7% 구간에 있는 종목이 10초 안에 1%p 추가 상승해야 조건 충족
+     → 실제 급등 중인 종목도 0.3~0.7%p/10초가 보통 → 조건 거의 불충족
+수정: 0.5로 완화 (0.5%p 가속 = 10초 안에 3.5%→4.0% 같은 움직임)
+
+[P1] GAP_UP_MIN=2.5 → 임계값 5.0%
+──────────────────────────────────
+증상: 3~5% 구간에서 신규 등장한 종목은 delta 경로(prev 없음)와 gap_up 경로(5% 미달) 모두 통과 불가
+수정: GAP_UP_MIN=1.5 → 임계값=3.0% — MIN_CHANGE_RATE(3%)와 동일선, 사각지대 소멸
+     단, _detect_gap_up에 MIN_VOL_RATIO_ACML 필터 추가해 거래량 없는 갭업 노이즈 차단
+```
+
+### first-entry 감지 흐름 (v9.0 신규)
+
+```
+poll_all_markets() 내부:
+
+  prev = _prev_snapshot.get(ticker)
+
+  if not prev:   ← 순위에 처음 등장 (이번 사이클)
+      if change_rate >= FIRST_ENTRY_MIN_RATE(4.0%)  ← 명시적 임계값
+         AND acml_rvol >= MIN_VOL_RATIO_ACML(30%):  ← 거래량 있는 급등만
+          → alerted 추가 (직전대비 = change_rate, 감지소스 = "rate")
+      continue                                       ← 나머지는 건너뜀
+
+  else:  ← 기존 종목, 가속도 기준 유지
+      delta_rate = row["등락률"] - prev["등락률"]
+      ...
+
+_detect_gap_up():
+  if change_rate >= GAP_UP_MIN(1.5) × 2 = 3.0%    ← P1 완화 (구: 5.0%)
+     AND acml_rvol >= MIN_VOL_RATIO_ACML(30%):     ← v9.0 신규 노이즈 필터
+      → gap_up 알림 (already_codes 중복 방지 내장)
+```
+
+### 감지 커버리지 변화
+
+```
+등락률 구간   | 구 버전               | v9.0 수정 후
+─────────────┼──────────────────────┼─────────────────────────────────
+3.0~3.9%    | ❌ 신규진입 전부 누락   | ✅ gap_up 경로 (GAP_UP_MIN×2=3.0%)
+4.0~4.9%    | ❌ 신규진입 전부 누락   | ✅ first-entry 경로 (FIRST_ENTRY_MIN_RATE=4.0%)
+5.0~12.0%   | △ gap_up 포착 (5%+만)  | ✅ 두 경로 모두 커버 (already_codes 중복 방지)
+기존 종목    | △ PRICE_DELTA≥1.0% 필요 | ✅ PRICE_DELTA≥0.5% (0.5%p 가속으로 충분)
+```
 
 ---
 
