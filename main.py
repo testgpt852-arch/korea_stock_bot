@@ -294,6 +294,38 @@ async def run_memory_compression():
     except Exception as e:
         logger.error(f"[main] 기억 압축 실패 (비치명적): {e}")
 
+
+async def run_geopolitics_collect():
+    """
+    [v10.0 Phase 2] 06:00 + 장중 GEOPOLITICS_POLL_MIN 간격 실행.
+    rule #90 준수: 수집(geopolitics_collector) → 분석(geopolitics_analyzer) → 캐시 저장.
+    소스 실패 시 비치명적 — 아침봇 blocking 절대 금지.
+    """
+    global _geopolitics_cache
+    try:
+        from collectors import geopolitics_collector
+        from analyzers import geopolitics_analyzer
+
+        logger.info("[main] 지정학 이벤트 수집 시작")
+        raw_news = await asyncio.get_event_loop().run_in_executor(
+            None, geopolitics_collector.collect
+        )
+        logger.info(f"[main] 지정학 뉴스 수집 완료 — {len(raw_news)}건")
+
+        if not raw_news:
+            logger.info("[main] 수집된 지정학 뉴스 없음 — 캐시 유지")
+            return
+
+        analyzed = await asyncio.get_event_loop().run_in_executor(
+            None, geopolitics_analyzer.analyze, raw_news
+        )
+        _geopolitics_cache = analyzed
+        logger.info(f"[main] 지정학 분석 캐시 갱신 완료 — {len(analyzed)}건")
+
+    except Exception as e:
+        logger.error(f"[main] 지정학 수집/분석 실패 (비치명적): {e}")
+
+
 async def main():
     config.validate_env()
 
