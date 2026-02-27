@@ -48,7 +48,11 @@ async def run_morning_bot():
         logger.info("[main] 휴장일 — 아침봇 건너뜀")
         return
     from reports.morning_report import run
-    await run()
+    # [v10.0 Phase 2 버그픽스] GEOPOLITICS_ENABLED=true 시 캐시 주입
+    # _geopolitics_cache: geopolitics_analyzer.analyze() 반환값 (list[dict])
+    # 비어있으면 morning_report에서 신호6 생략 (하위 호환)
+    geo_cache = _geopolitics_cache if _geopolitics_cache else []
+    await run(geopolitics_data=geo_cache)
 
 
 async def run_closing_bot():

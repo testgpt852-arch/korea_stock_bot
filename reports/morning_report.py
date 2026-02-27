@@ -49,8 +49,13 @@ import notifiers.telegram_bot      as telegram_bot
 import utils.watchlist_state        as watchlist_state   # v3.1 추가
 
 
-async def run() -> None:
-    """아침봇 메인 실행 함수 (AsyncIOScheduler에서 호출)"""
+async def run(geopolitics_data: list = None) -> None:
+    """아침봇 메인 실행 함수 (AsyncIOScheduler에서 호출)
+
+    [v10.0 Phase 2 버그픽스] geopolitics_data 파라미터 추가
+    - main.py의 _geopolitics_cache → 이 함수 → signal_analyzer.analyze() → telegram_bot
+    - None(기본) 또는 빈 리스트이면 신호6 생략 (하위 호환)
+    """
     today = get_today()
     prev  = get_prev_trading_day(today)
 
@@ -85,7 +90,8 @@ async def run() -> None:
         # ── ③ 신호 분석 (v2.1: price_data 전달) ───────────────
         logger.info("[morning] 신호 분석 중...")
         signal_result = signal_analyzer.analyze(
-            dart_data, market_data, news_data, price_data
+            dart_data, market_data, news_data, price_data,
+            geopolitics_data=geopolitics_data,          # [v10.0 Phase 2] 신호6 주입
         )
 
         # ── ④ AI 공시 분석 ────────────────────────────────────
@@ -178,7 +184,8 @@ async def run() -> None:
         await telegram_bot.send_async(summary_msg)
 
         # 상세 리포트 후발송
-        message = telegram_bot.format_morning_report(report)
+        # [v10.0 Phase 2 버그픽스] geopolitics_data 전달 → 🌍 글로벌 트리거 섹션 표시
+        message = telegram_bot.format_morning_report(report, geopolitics_data=geopolitics_data)
         await telegram_bot.send_async(message)
 
         # ── ⑧ WebSocket 워치리스트 저장 (v3.1) ──────────────

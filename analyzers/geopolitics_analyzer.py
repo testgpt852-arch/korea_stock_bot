@@ -152,10 +152,12 @@ def _enhance_with_ai(
 
     배치 처리: 최대 10건을 하나의 프롬프트로 처리 (AI 호출 횟수 최소화).
 
-    [v10.1 모델 정책] geopolitics_analyzer 전용:
-      Primary  : gemini-3-flash-preview  (Gemini 3 Flash — 높은 일일 쿼터)
-      Fallback : gemini-2.5-flash  (Primary 실패 시 자동 전환)
-      ※ gemini-1.5-flash / gemini-2.0-flash-exp 사용 금지 (Google 서비스 종료)
+    [v10.3 모델 정책] geopolitics_analyzer 전용:
+      Primary  : gemini-3-flash-preview  (Google 현행 지원 모델)
+      Fallback : gemini-2.5-flash        (Primary 실패 시 자동 전환)
+      ※ 절대 사용 금지 (Google 서비스 종료):
+        gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
+        gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
     """
     import google.generativeai as genai
 
@@ -197,8 +199,9 @@ def _enhance_with_ai(
 - 섹터명은 다음 중에서 선택: 철강/비철금속, 산업재/방산, 기술/반도체, 에너지/정유, 소재/화학, 바이오/헬스케어, 금융, 조선, 배터리, 자동차부품
 """
 
-    # [v10.1] Primary: gemini-2.0-flash → Fallback: gemini-2.5-flash
-    _MODELS = ["gemini-2.0-flash", "gemini-2.5-flash"]
+    # [v10.3] Primary: gemini-3-flash-preview → Fallback: gemini-2.5-flash
+    # gemini-2.0-flash / gemini-1.5-flash 계열 전부 서비스 종료 — 사용 금지
+    _MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash"]
 
     for model_name in _MODELS:
         try:

@@ -4,9 +4,32 @@
 > 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
 > **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2 개편 내용을 반영한 최신 아키텍처입니다.**
 >
+> **📋 v10.3 Gemini 모델 서비스종료 대응**: 2026-02-27, Claude Sonnet 4.6
+> Google Gemini 서비스 종료 확인에 따른 전면 교체:
+> ① analyzers/geopolitics_analyzer.py: `_MODELS` → `["gemini-3-flash-preview", "gemini-2.5-flash"]`
+> ② geopolitics_analyzer.py 모델 주석: Primary gemini-2.0-flash → gemini-3-flash-preview
+> ③ ARCHITECTURE_v10.md 전체 6곳 gemini-2.0-flash → gemini-3-flash-preview 교정
+> ④ AI 모델 표 금지 목록 확장: gemini-2.0-flash / gemini-2.0-flash-lite / gemini-1.5 전체 시리즈
+>
+> **⛔ Google Gemini 서비스 종료 확정 목록 (절대 사용 금지)**:
+> gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
+> gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
+>
+> **📋 v10.2 아키텍처 감사·코드버그픽스**: 2026-02-27, Claude Sonnet 4.6
+> Phase 1·2 구현 완료 후 코드↔아키텍처 전수 대조 감사. 발견 오류 3종:
+> ① [치명] main.py `run_morning_bot()`이 `_geopolitics_cache`를 `morning_report.run()`에 전달 안 함
+>    → Phase 2 지정학 파이프라인 완전 단절 (신호6·글로벌 트리거 섹션 미표시)
+>    → 수정: main.py `await run(geopolitics_data=geo_cache)` / morning_report.py 시그니처·흐름 연결
+> ② [당시 판단 오류 → v10.3에서 재교정] gemini-3-flash-preview를 비존재 모델로 잘못 판단
+>    → 실제로는 gemini-2.0-flash가 서비스 종료된 모델 / gemini-3-flash-preview가 현행 올바른 모델
+>    → v10.3에서 코드·아키텍처 전면 재교정 완료
+> ③ [반환값 불일치] `geopolitics_analyzer.analyze()` 반환값 key 불일치
+>    → 실제 코드: `event_summary_kr` / `affected_sectors` / `event_type` 로 교정
+>    → 신호6 구조: 영어 key → 한국어 key 형식으로 교정
+>
 > **📋 v10.1 버그픽스·모델교체**: 2026-02-27, Claude Sonnet 4.6
 > ① main.py run_geopolitics_collect 함수 누락 추가 (NameError 수정)
-> ② geopolitics_analyzer 전용 모델 교체: gemini-1.5-flash(서비스종료) → gemini-2.0-flash(Primary) + gemini-2.5-flash(Fallback)
+> ② geopolitics_analyzer 전용 모델: gemini-1.5-flash(서비스종료) → gemini-3-flash-preview(Primary) + gemini-2.5-flash(Fallback)
 >
 > **📋 v10.0 개편 이력**: 2026-02-27, Claude Sonnet 4.6 대규모 개편 구현 + 아키텍처 반영
 > Phase 1 (구현 완료): 철강/비철 ETF 수집 확장(XME·SLX·TIO=F·ALI=F), 지정학 맵 사전, 신호2 확장, oracle 철강/방산 부스팅
@@ -131,9 +154,9 @@ korea_stock_bot/
 │   │                                 테마/수급/공시/T5·T6·T3 종합 (외부 API·DB·발송 호출 없음)
 │   │                                 closing_report(T5/T6/T3 포함) + morning_report(수급·공시만) 양쪽 호출
 │   │                                 [v10.0 Phase 1] _score_theme(): 철강/방산 테마 +20 부스팅
-│   └── geopolitics_analyzer.py   ← [v10.1] 지정학 이벤트 → 섹터 매핑 + gemini-3.0-flash 분석 (fallback: gemini-2.5-flash)
+│   └── geopolitics_analyzer.py   ← [v10.3] 지정학 이벤트 → 섹터 매핑 + gemini-3-flash-preview 분석 (fallback: gemini-2.5-flash)
 │                                     geopolitics_map 사전 패턴 매칭 우선 (사전 6 : AI 4 가중 평균)
-│                                     gemini-3.0-flash 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
+│                                     gemini-3-flash-preview 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
 │                                     신뢰도 필터링 (GEOPOLITICS_CONFIDENCE_MIN 기본 0.6)
 │                                     KIS API·pykrx 호출 절대 금지 (rule #91)
 │
@@ -298,7 +321,7 @@ utils/geopolitics_map.py          → analyzers/geopolitics_analyzer (lookup 사
 collectors/geopolitics_collector.py  ← main.py (run_geopolitics_collect: 06:00 + 장중 30분 폴링)       ← v10.0
 collectors/geopolitics_collector.py  → raw_news 목록 → analyzers/geopolitics_analyzer                  ← v10.0
 analyzers/geopolitics_analyzer.py   → utils/geopolitics_map (lookup 사전 매칭)                         ← v10.0
-analyzers/geopolitics_analyzer.py   → gemini-3.0-flash API (배치 분석, 최대 10건/호출, fallback: gemini-2.5-flash)                     ← v10.0
+analyzers/geopolitics_analyzer.py   → gemini-3-flash-preview API (배치 분석, 최대 10건/호출, fallback: gemini-2.5-flash)               ← v10.0
 main.py                             → _geopolitics_cache (전역 캐시, 아침봇·마감봇 공유)               ← v10.0
 analyzers/signal_analyzer.py        ← reports/morning_report (geopolitics_data=캐시 주입)
                                       _analyze_geopolitics(): 신뢰도 → 강도 분기 (0.85+:5, 0.70+:4, 기타:3)
@@ -334,7 +357,7 @@ graph TD
         TA["theme_analyzer"]
         SA["signal_analyzer\n[v10.0] 신호2확장·신호6"]
         AI["ai_analyzer\nGemma-3-27b-it"]
-        GA["geopolitics_analyzer\n[v10.1] gemini-3.0-flash\nfallback: gemini-2.5-flash"]
+        GA["geopolitics_analyzer\n[v10.3] gemini-3-flash-preview\nfallback: gemini-2.5-flash"]
     end
 
     subgraph "📊 reports/"
@@ -393,7 +416,7 @@ graph TD
           Reuters RSS / Bloomberg RSS / 기재부 RSS / 방사청 RSS / Google News RSS
           소스 실패해도 비치명적 (빈 리스트 반환, 아침봇 08:30 blocking 절대 금지)
        ② geopolitics_analyzer.analyze(raw_news) → 이벤트 분석 결과
-          geopolitics_map 사전 매칭 우선 → gemini-3.0-flash 배치 분석 → fallback: gemini-2.5-flash → 사전 결과 fallback
+          geopolitics_map 사전 매칭 우선 → gemini-3-flash-preview 배치 분석 → fallback: gemini-2.5-flash → 사전 결과 fallback
           신뢰도 GEOPOLITICS_CONFIDENCE_MIN(0.6) 미달 이벤트 필터링
        ③ _geopolitics_cache 전역 변수에 캐시 저장 (아침봇·마감봇 공유)
        장중 GEOPOLITICS_POLL_MIN(30분) 간격 폴링: 긴급 이벤트 실시간 갱신
@@ -724,13 +747,18 @@ FUND_INFLOW_TOP_N      = 7
 # 소스 실패 시 해당 소스 빈 리스트 반환 (비치명적 — rule #90)
 
 # geopolitics_analyzer.analyze(raw_news) → list[dict]  [v10.0 신규]
+# [아키텍처 감사 v10.1] 실제 코드 기준으로 key명 교정:
+#   event_summary → event_summary_kr (한국어 요약)
+#   sectors → affected_sectors (영향 섹터)
+#   event_type 키 추가 (geopolitics_map 사전 패턴 키)
 [
     {
-        "event_summary":    str,         # 이벤트 요약 (50자 이내)
-        "sectors":          list[str],   # 영향 국내 섹터 (예: ["철강/비철금속", "방산"])
-        "impact_direction": str,         # "+" 상승 / "-" 하락 / "mixed" 혼재
-        "confidence":       float,       # 신뢰도 0.0~1.0
-        "source_url":       str,         # 원문 URL
+        "event_type":        str,         # 이벤트 유형 (geopolitics_map.py 패턴 키)
+        "affected_sectors":  list[str],   # 영향 국내 섹터 (예: ["철강/비철금속", "방산"])
+        "impact_direction":  str,         # "+" 상승 / "-" 하락 / "mixed" 혼재
+        "confidence":        float,       # 신뢰도 0.0~1.0
+        "source_url":        str,         # 원문 URL
+        "event_summary_kr":  str,         # 한국어 요약 (50자 이내, AI 생성 또는 제목 fallback)
     }
 ]
 # GEOPOLITICS_CONFIDENCE_MIN 미달 이벤트 자동 필터링
@@ -739,15 +767,18 @@ FUND_INFLOW_TOP_N      = 7
 # signal_analyzer.analyze() → dict  [v10.0 신호6 추가]
 # geopolitics_data 파라미터 추가 (기본 None — 하위 호환)
 # 신호6 구조 (signals 리스트 내):
+# [아키텍처 감사 v10.1] 실제 코드 확인: 신호6은 다른 신호와 동일한 한국어 key 형식 사용
 {
-    "type":             int,         # 6 (지정학)
-    "strength":         int,         # 3~5 (신뢰도 기반)
-    "event_summary":    str,
-    "sectors":          list[str],
-    "impact_direction": str,         # "+" | "-" | "mixed"
-    "confidence":       float,
+    "테마명":   str,         # 영향 섹터 (geopolitics_analyzer.affected_sectors에서)
+    "발화신호": str,         # "신호6: {event_type} — {summary_kr[:50]} [신뢰도:{conf:.0%}|지정학]"
+    "강도":     int,         # 3~5 (신뢰도 기반: 0.85+→5, 0.70+→4, 기타→3)
+    "신뢰도":   str,         # "geo:{confidence:.2f}" 형식
+    "발화단계": str,         # "1일차"
+    "상태":     str,         # "+" → "신규" / "-" → "경고"
+    "관련종목": list[str],   # by_sector에서 동적 추출
 }
 # signals 리스트: 강도 내림차순 정렬 (신호6 포함)
+# 참고: geopolitics_analyzer 반환값의 event_type / event_summary_kr / affected_sectors 필드 참조
 
 # oracle_analyzer.analyze() → dict  [v8.1 신규]
 {
@@ -836,14 +867,16 @@ VTS:  https://openapivts.koreainvestment.com:29443
 
 ```
 gemma-3-27b-it      14,400회/일  ✅ 채택 — 장중봇 급등 판단, 아침봇 공시·순환매 분석
-gemini-3-flash-preview    높은 쿼터    ✅ 채택 — [v10.1] geopolitics_analyzer 전용 Primary
-                                          (지정학 배치 분석, 최대 20건/호출)
+gemini-3-flash-preview  높은 쿼터  ✅ 채택 — [v10.3] geopolitics_analyzer 전용 Primary
+                                          (지정학 배치 분석, 최대 10건/호출)
                                           AI 실패 시 사전 결과 fallback
-gemini-2.5-flash    확인 완료    ✅ 채택 — [v10.1] geopolitics_analyzer 전용 Fallback
+gemini-2.5-flash    확인 완료    ✅ 채택 — [v10.3] geopolitics_analyzer 전용 Fallback
                                           (gemini-3-flash-preview 실패 시 자동 전환)
-gemini-2.0-flash    ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
-gemini-2.0-flash-lite ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
-gemini-1.5-flash ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
+gemini-2.0-flash    ❌ 서비스 종료 — 절대 사용 금지 (Google 지원 중단)
+gemini-2.0-flash-lite ❌ 서비스 종료 — 절대 사용 금지 (Google 지원 중단)
+gemini-1.5-flash    ❌ 서비스 종료 — 절대 사용 금지 (Google 지원 중단)
+gemini-1.5-flash-002 ❌ 서비스 종료 — 절대 사용 금지 (Google 지원 중단)
+gemini-1.5-pro      ❌ 서비스 종료 — 절대 사용 금지 (Google 지원 중단)
 ```
 
 ---
@@ -1114,6 +1147,23 @@ gemini-1.5-flash ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
 
 | 버전 | 날짜 | 변경 내용 |
 |------|------|---------|
+| v10.3 | 2026-02-27 | **Gemini 모델 서비스종료 대응 — gemini-3-flash-preview 전면 교체** |
+|       |            | analyzers/geopolitics_analyzer.py: `_MODELS` → `["gemini-3-flash-preview", "gemini-2.5-flash"]` |
+|       |            | geopolitics_analyzer.py 모델 주석 전면 교정 (Primary: gemini-3-flash-preview) |
+|       |            | ARCHITECTURE_v10.md 전체 6곳 교정 (파일구조·의존성지도·Mermaid·타임라인·AI모델표·rule#91) |
+|       |            | AI 모델 표: gemini-2.0-flash ❌서비스종료 명시, gemini-3-flash-preview ✅Primary 명시 |
+|       |            | 금지 목록 확정: gemini-1.5 전체 시리즈 + gemini-2.0-flash + gemini-2.0-flash-lite |
+| v10.2 | 2026-02-27 | **코드↔아키텍처 전수 감사 및 Phase 2 파이프라인 버그픽스** |
+|       |            | [버그①치명] main.py: run_morning_bot()에 _geopolitics_cache 미전달 → Phase 2 파이프라인 완전 단절 수정 |
+|       |            | main.py: await run(geopolitics_data=geo_cache) 전달 추가 |
+|       |            | reports/morning_report.py: run() 시그니처 geopolitics_data 파라미터 추가 |
+|       |            | reports/morning_report.py: signal_analyzer.analyze()에 geopolitics_data 주입 |
+|       |            | reports/morning_report.py: format_morning_report()에 geopolitics_data 전달 |
+|       |            | [할루시네이션] analyzers/geopolitics_analyzer.py 잘못된 모델 주석 교정 (gemini-3-flash-preview → gemini-2.0-flash) |
+|       |            | [아키텍처 교정①] AI 모델 표: gemini-3-flash-preview 비존재 모델 제거, gemini-2.0-flash Primary로 명시 |
+|       |            | [아키텍처 교정②] 파일구조·의존성지도·Mermaid·타임라인: gemini-3.0-flash → gemini-2.0-flash 전면 교정 |
+|       |            | [아키텍처 교정③] geopolitics_analyzer 반환값 규격: event_summary→event_summary_kr, sectors→affected_sectors, event_type 추가 |
+|       |            | [아키텍처 교정④] signal_analyzer 신호6 구조: 영어 key 형식 → 실제 한국어 key 형식으로 교정 |
 | v10.0 | 2026-02-27 | **철강/방산 예측 실패 사후분석 → 신호 수집 소스 확장 (Phase 1·2)** |
 |       |            | [Phase 1] config.py: XME·SLX US_SECTOR_TICKERS 추가, TIO=F·ALI=F COMMODITY_TICKERS 추가 |
 |       |            | [Phase 1] market_collector.py: 철광석·알루미늄 원자재 수집 (단위 $/MT) |
@@ -1770,7 +1820,7 @@ KIS API·pykrx 호출 **절대 금지**. 외부 의존성 없는 입력 파라�
 ```python
 # ✅ 허용
 from utils.geopolitics_map import lookup
-genai.GenerativeModel("gemini-2.0-flash").generate_content(prompt)  # fallback: gemini-2.5-flash
+genai.GenerativeModel("gemini-3-flash-preview").generate_content(prompt)  # fallback: gemini-2.5-flash
 # ❌ 금지
 from kis.rest_client import get_current_price     # KIS 호출 금지
 from pykrx import stock                            # pykrx 호출 금지
