@@ -131,9 +131,9 @@ korea_stock_bot/
 │   │                                 테마/수급/공시/T5·T6·T3 종합 (외부 API·DB·발송 호출 없음)
 │   │                                 closing_report(T5/T6/T3 포함) + morning_report(수급·공시만) 양쪽 호출
 │   │                                 [v10.0 Phase 1] _score_theme(): 철강/방산 테마 +20 부스팅
-│   └── geopolitics_analyzer.py   ← [v10.1] 지정학 이벤트 → 섹터 매핑 + gemini-2.0-flash 분석 (fallback: gemini-2.5-flash)
+│   └── geopolitics_analyzer.py   ← [v10.1] 지정학 이벤트 → 섹터 매핑 + gemini-3.0-flash 분석 (fallback: gemini-2.5-flash)
 │                                     geopolitics_map 사전 패턴 매칭 우선 (사전 6 : AI 4 가중 평균)
-│                                     gemini-2.0-flash 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
+│                                     gemini-3.0-flash 배치 분석 (최대 10건/호출) → fallback: gemini-2.5-flash
 │                                     신뢰도 필터링 (GEOPOLITICS_CONFIDENCE_MIN 기본 0.6)
 │                                     KIS API·pykrx 호출 절대 금지 (rule #91)
 │
@@ -298,7 +298,7 @@ utils/geopolitics_map.py          → analyzers/geopolitics_analyzer (lookup 사
 collectors/geopolitics_collector.py  ← main.py (run_geopolitics_collect: 06:00 + 장중 30분 폴링)       ← v10.0
 collectors/geopolitics_collector.py  → raw_news 목록 → analyzers/geopolitics_analyzer                  ← v10.0
 analyzers/geopolitics_analyzer.py   → utils/geopolitics_map (lookup 사전 매칭)                         ← v10.0
-analyzers/geopolitics_analyzer.py   → gemini-2.0-flash API (배치 분석, 최대 10건/호출, fallback: gemini-2.5-flash)                     ← v10.0
+analyzers/geopolitics_analyzer.py   → gemini-3.0-flash API (배치 분석, 최대 10건/호출, fallback: gemini-2.5-flash)                     ← v10.0
 main.py                             → _geopolitics_cache (전역 캐시, 아침봇·마감봇 공유)               ← v10.0
 analyzers/signal_analyzer.py        ← reports/morning_report (geopolitics_data=캐시 주입)
                                       _analyze_geopolitics(): 신뢰도 → 강도 분기 (0.85+:5, 0.70+:4, 기타:3)
@@ -334,7 +334,7 @@ graph TD
         TA["theme_analyzer"]
         SA["signal_analyzer\n[v10.0] 신호2확장·신호6"]
         AI["ai_analyzer\nGemma-3-27b-it"]
-        GA["geopolitics_analyzer\n[v10.1] gemini-2.0-flash\nfallback: gemini-2.5-flash"]
+        GA["geopolitics_analyzer\n[v10.1] gemini-3.0-flash\nfallback: gemini-2.5-flash"]
     end
 
     subgraph "📊 reports/"
@@ -393,7 +393,7 @@ graph TD
           Reuters RSS / Bloomberg RSS / 기재부 RSS / 방사청 RSS / Google News RSS
           소스 실패해도 비치명적 (빈 리스트 반환, 아침봇 08:30 blocking 절대 금지)
        ② geopolitics_analyzer.analyze(raw_news) → 이벤트 분석 결과
-          geopolitics_map 사전 매칭 우선 → gemini-2.0-flash 배치 분석 → fallback: gemini-2.5-flash → 사전 결과 fallback
+          geopolitics_map 사전 매칭 우선 → gemini-3.0-flash 배치 분석 → fallback: gemini-2.5-flash → 사전 결과 fallback
           신뢰도 GEOPOLITICS_CONFIDENCE_MIN(0.6) 미달 이벤트 필터링
        ③ _geopolitics_cache 전역 변수에 캐시 저장 (아침봇·마감봇 공유)
        장중 GEOPOLITICS_POLL_MIN(30분) 간격 폴링: 긴급 이벤트 실시간 갱신
@@ -836,13 +836,14 @@ VTS:  https://openapivts.koreainvestment.com:29443
 
 ```
 gemma-3-27b-it      14,400회/일  ✅ 채택 — 장중봇 급등 판단, 아침봇 공시·순환매 분석
-gemini-2.0-flash    높은 쿼터    ✅ 채택 — [v10.1] geopolitics_analyzer 전용 Primary
-                                          (지정학 배치 분석, 최대 10건/호출)
+gemini-3-flash-preview    높은 쿼터    ✅ 채택 — [v10.1] geopolitics_analyzer 전용 Primary
+                                          (지정학 배치 분석, 최대 20건/호출)
                                           AI 실패 시 사전 결과 fallback
 gemini-2.5-flash    확인 완료    ✅ 채택 — [v10.1] geopolitics_analyzer 전용 Fallback
-                                          (gemini-2.0-flash 실패 시 자동 전환)
-gemini-1.5-flash    ❌ 서비스 종료 — 사용 금지 (Google 중단)
-gemini-2.0-flash-exp ❌ 서비스 종료 — 사용 금지
+                                          (gemini-3-flash-preview 실패 시 자동 전환)
+gemini-2.0-flash    ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
+gemini-2.0-flash-lite ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
+gemini-1.5-flash ❌ 서비스 종료 — 사용 금지 (Google 지원 중단)
 ```
 
 ---
