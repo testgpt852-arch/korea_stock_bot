@@ -151,11 +151,15 @@ def _enhance_with_ai(
     rule #91: AI 호출만. KIS/pykrx/텔레그램/DB 없음.
 
     배치 처리: 최대 10건을 하나의 프롬프트로 처리 (AI 호출 횟수 최소화).
+
+    [v10.1 모델 정책] geopolitics_analyzer 전용:
+      Primary  : gemini-2.0-flash  (Gemini 3 Flash — 높은 일일 쿼터)
+      Fallback : gemini-2.5-flash  (Primary 실패 시 자동 전환)
+      ※ gemini-1.5-flash / gemini-2.0-flash-exp 사용 금지 (Google 서비스 종료)
     """
     import google.generativeai as genai
 
     genai.configure(api_key=config.GOOGLE_AI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")   # 무료 티어
 
     # 뉴스 요약 생성 (최대 10건)
     news_texts = []
@@ -193,25 +197,36 @@ def _enhance_with_ai(
 - 섹터명은 다음 중에서 선택: 철강/비철금속, 산업재/방산, 기술/반도체, 에너지/정유, 소재/화학, 바이오/헬스케어, 금융, 조선, 배터리, 자동차부품
 """
 
-    try:
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+    # [v10.1] Primary: gemini-2.0-flash → Fallback: gemini-2.5-flash
+    _MODELS = ["gemini-2.0-flash", "gemini-2.5-flash"]
 
-        # JSON 추출 (```json ... ``` 제거)
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
+    for model_name in _MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            text = response.text.strip()
 
-        ai_results = json.loads(text.strip())
+            # JSON 추출 (```json ... ``` 제거)
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
 
-        # AI 결과와 사전 결과 병합
-        merged = _merge_results(map_results, ai_results)
-        return merged
+            ai_results = json.loads(text.strip())
 
-    except (json.JSONDecodeError, Exception) as e:
-        logger.warning(f"[geopolitics_analyzer] AI JSON 파싱 실패: {e} — 사전 결과 유지")
-        return map_results
+            if model_name != _MODELS[0]:
+                logger.info(f"[geopolitics_analyzer] fallback 모델 사용: {model_name}")
+            else:
+                logger.info(f"[geopolitics_analyzer] AI 분석 완료 ({model_name})")
+
+            # AI 결과와 사전 결과 병합
+            return _merge_results(map_results, ai_results)
+
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"[geopolitics_analyzer] {model_name} 실패: {e}")
+
+    logger.warning("[geopolitics_analyzer] 모든 AI 모델 실패 — 사전 결과만 사용")
+    return map_results
 
 
 def _merge_results(
