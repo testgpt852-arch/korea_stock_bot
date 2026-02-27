@@ -351,11 +351,14 @@ graph TD
                    등락률 0~10% 구간 → 초기 급등 조기 포착
                    ※ get_volume_ranking() 제거: 삼성전자·현대차 등 대형주가
                      거래량 순위 상위에 항상 포함되어 노이즈 알림 발생했었음
-               [v2.8 델타 기준 감지]
+               [v2.8 델타 기준 감지 / v8.2 가속도 기준으로 변경]
                → 첫 사이클: 워밍업 (스냅샷 저장만, 알림 없음)
-               → 이후 사이클: 직전 poll 대비 1분간 변화량 판단
+               → 이후 사이클: 직전 poll 대비 누적 등락률 가속도 판단
+                 [v8.2] Δ등락률(가속도) = curr["등락률"] - prev["등락률"]
+                 예: 4.2%→5.3% → Δ=+1.1% → PRICE_DELTA_MIN(1.0%) 충족
+                 구 방식(가격 변화율)은 3~12% 구간 종목에서 달성 불가 → 알림 0건 원인
                  Δ등락률 ≥ PRICE_DELTA_MIN(1%) AND Δ거래량 ≥ VOLUME_DELTA_MIN(5%)
-                 × CONFIRM_CANDLES(2)회 연속 충족 → 알림
+                 × CONFIRM_CANDLES(1)회 충족 → 알림
                → 알림 포맷: 감지소스 배지 표시 (📊거래량포착 / 📈등락률포착)
                [v3.4 Phase 4 추가] AUTO_TRADE_ENABLED=true 시:
                position_manager.check_exit() — 익절/손절/Trailing Stop 조건 검사
@@ -487,9 +490,11 @@ graph TD
 
 ```python
 # v2.8: 델타 기준 (감지 조건)
-PRICE_DELTA_MIN      = 1.0      # 1분간 최소 추가 등락률 (%)
-VOLUME_DELTA_MIN     = 5        # 1분간 최소 추가 거래량 (전일 거래량 대비 %)
-CONFIRM_CANDLES      = 2        # 연속 충족 횟수
+PRICE_DELTA_MIN      = 1.0      # 폴링 간격 내 누적 등락률 가속도 최소값 (%)
+                                 # [v8.2] 가격 변화율 → 등락률 가속도로 변경
+                                 # 예: 4.2%→5.3% = +1.1%가속 → PRICE_DELTA_MIN(1.0%) 충족
+VOLUME_DELTA_MIN     = 5        # 폴링 간격 내 순간 거래량 증가 (전일 거래량 대비 %) — v8.2: 10→5
+CONFIRM_CANDLES      = 1        # 연속 충족 횟수 — v8.2: 2→1 (가속도 기준은 1회로 충분)
 POLL_INTERVAL_SEC    = 60       # KIS REST 폴링 간격 (초)
 ALERT_COOLTIME_MIN   = 30       # 중복 알림 방지 쿨타임
 WS_MAX_RECONNECT     = 3
@@ -557,7 +562,9 @@ FUND_INFLOW_TOP_N      = 7
 
 # volume_analyzer.poll_all_markets() → list[dict]
 {"종목코드": str, "종목명": str, "등락률": float,
- "직전대비": float,               # v2.8 신규: 순간 추가 상승률 (10초간 Δ등락률)
+ "직전대비": float,               # v2.8 신규 / v8.2 변경: 등락률 가속도 (curr등락률 - prev등락률)
+                                  # 구: (curr_price - prev_price) / prev_price * 100 (가격 변화율)
+                                  # 신: curr["등락률"] - prev["등락률"] (모멘텀 가속도 — 더 현실적 기준)
  "거래량배율": float,             # v3.8 변경: 누적RVOL (acml_vol / prdy_vol 배수)
  "순간강도": float,               # v3.8 신규: 순간 Δvol / 전일거래량 (%)
  "조건충족": bool, "감지시각": str,
@@ -1159,6 +1166,16 @@ gemini-2.5-flash   20회/일   ❌ 부족
 |      |            | - matplotlib 추가 |
 |      |            | 절대 금지 규칙 61~65 추가 (Phase 5 차트 & UX 규칙) |
 | v8.1 | 2026-02-27 | **쪽집게봇 — oracle_analyzer 통합 (아침봇·마감봇 픽 + 진입조건)** |
+| v8.2 | 2026-02-27 | **장중봇 알림 불발 근본 수정 — 델타 계산 기준 가격→등락률 가속도 전환** |
+|      |            | analyzers/volume_analyzer.py: poll_all_markets() 델타 계산 변경 |
+|      |            | 구: `delta_rate = (curr_price - prev_price) / prev_price * 100` |
+|      |            | 신: `delta_rate = row["등락률"] - prev["등락률"]` (누적 등락률 가속도) |
+|      |            | 원인: 이미 3~12% 구간 종목의 절대 가격 변화는 10초에 1.5% 도달 불가 |
+|      |            |      CONFIRM_CANDLES=2 조합 시 20초간 3% 추가 상승이 사실상 불가능 |
+|      |            | 효과: "지금 모멘텀이 붙고 있는" 종목(4.2%→5.3%)을 직접 포착 |
+|      |            | config.py: PRICE_DELTA_MIN 1.5→1.0 (가속도 1% = 의미있는 기준) |
+|      |            | config.py: VOLUME_DELTA_MIN 10→5 (10%는 10초에 전일거래량 10% 요구, 비현실) |
+|      |            | config.py: CONFIRM_CANDLES 2→1 (가속도 기준은 1회 충족으로 충분) |
 |      |            | analyzers/oracle_analyzer.py 신규: 컨플루언스 스코어링 엔진 |
 |      |            | - analyze(): 테마/수급/공시/T5·T6·T3 종합 → 최대 5종목 픽 |
 |      |            | - 컨플루언스 점수(0~100): 기관/외인30 + 소외도25 + T5마감강도20 + 공시AI15 + T3/T6 10 + 신호강도5 |
