@@ -20,6 +20,12 @@ collectors/geopolitics_collector.py
   - RSS보다 실시간성 우수, 주요 금융매체(Reuters·Bloomberg·FT) 직접 수집
   - 쿼리: 한반도·관세·방산·반도체·중국·NATO 등 지정학 키워드
 
+[v14.0 업그레이드 — 대한민국정책브리핑 RSS 전면 교체]
+  - 기재부(moef.go.kr) / 방사청(dapa.go.kr) RSS 접속 불가 → 제거
+  - 대한민국정책브리핑(korea.kr) 통합 RSS로 전면 교체 (공식 제공, 안정적)
+  - 주식 영향권 부처·위원회 9개 소스 추가:
+    기재부 / 산업부 / 과기부 / 금융위 / 국방부 / 방사청 / 통일부 / 중기부 / 공정위
+
 스케줄 (main.py):
   - 06:00 아침봇 전 수집 (아침봇 08:30 컨텍스트 제공)
   - 장중 GEOPOLITICS_POLL_MIN 분 간격 (긴급 이벤트 대응)
@@ -31,7 +37,7 @@ collectors/geopolitics_collector.py
       "summary":    str,   # 본문 요약 (feedparser summary, 없으면 "")
       "link":       str,   # 기사 URL
       "published":  str,   # 발행 시각 (ISO 형식)
-      "source":     str,   # 소스명 (reuters / bloomberg / moef / dapa / google / newsapi)
+      "source":     str,   # 소스명
       "raw_text":   str,   # title + summary 합산 (키워드 매칭용)
     }
   ]
@@ -46,10 +52,19 @@ from datetime import datetime, timezone
 
 # ── RSS 피드 소스 목록 ──────────────────────────────────────
 # rule #90: 수집 URL만 정의. 분석·발송·DB 로직 없음.
-# [v12.0] Reuters RSS 완전 폐지됨 → 제거. NewsAPI.org로 대체.
-#         기재부/방사청은 비표준 XML → requests로 직접 fetch 후 feedparser 처리.
+#
+# [v14.0] 대한민국정책브리핑(korea.kr) 통합 RSS 전면 교체
+#   - 기존 moef.go.kr / dapa.go.kr RSS → 접속 불가로 제거
+#   - korea.kr 공식 RSS (https://www.korea.kr/rss/) 사용
+#   - 부처별 RSS 형식: https://www.korea.kr/rss/dept_{코드}.xml
+#   - 전체 보도자료: https://www.korea.kr/rss/pressrelease.xml
+#
+# [소스 분류 기준 — 주식 영향도]
+#   ★★★ 직접 영향: 기재부·금융위·산업부
+#   ★★☆ 섹터 영향: 과기부(반도체·AI)·방사청(방산)·국방부(방산)
+#   ★☆☆ 간접 영향: 통일부(지정학)·공정위(M&A)·중기부(코스닥)
 _RSS_SOURCES = [
-    # [v13.0] Reuters RSS 폐기됨 → AP News + FT로 교체
+    # ── 영문 글로벌 소스 (해외 지정학·거시) ────────────────────
     {
         "name": "ap_business",
         "url":  "https://apnews.com/rss/apf-business",
@@ -66,14 +81,84 @@ _RSS_SOURCES = [
         "url":  "https://www.ft.com/markets?format=rss",
         "filter_keywords": [],
     },
+
+    # ── 대한민국정책브리핑 통합 소스 ────────────────────────────
+    # 전체 정부 보도자료 종합 (★★★ 커버리지 최대)
     {
-        "name": "moef",   # 기획재정부 — requests 선fetch (비표준 XML 대응)
-        "url":  "https://www.moef.go.kr/sty/rss/moefRss.do",
+        "name": "kr_pressrelease",
+        "url":  "https://www.korea.kr/rss/pressrelease.xml",
         "filter_keywords": [],
     },
+    # 부처 브리핑 종합
     {
-        "name": "dapa",   # 방위사업청 — requests 선fetch (비표준 XML 대응)
-        "url":  "https://www.dapa.go.kr/dapa/rss/rssService.do",
+        "name": "kr_ebriefing",
+        "url":  "https://www.korea.kr/rss/ebriefing.xml",
+        "filter_keywords": [],
+    },
+
+    # ── 주요 부처별 RSS (★★★ 직접 주식 영향) ────────────────────
+    # 기획재정부: 예산·세제·경제정책 → 시장 전체 영향
+    {
+        "name": "moef",
+        "url":  "https://www.korea.kr/rss/dept_moef.xml",
+        "filter_keywords": [],
+    },
+    # 산업통상자원부: 수출입·통상·에너지 → 수출주·에너지주
+    {
+        "name": "motir",
+        "url":  "https://www.korea.kr/rss/dept_motir.xml",
+        "filter_keywords": [],
+    },
+    # 금융위원회: 금융정책·증시규제·IPO → 금융주·전체 시장
+    {
+        "name": "fsc",
+        "url":  "https://www.korea.kr/rss/dept_fsc.xml",
+        "filter_keywords": [],
+    },
+
+    # ── 섹터 직결 부처 (★★☆) ────────────────────────────────────
+    # 과학기술정보통신부: 반도체·AI·6G 정책 → IT/반도체주
+    {
+        "name": "msit",
+        "url":  "https://www.korea.kr/rss/dept_msit.xml",
+        "filter_keywords": [],
+    },
+    # 방위사업청: 방산 수주·무기체계 계약 → 방산주 직결
+    {
+        "name": "dapa",
+        "url":  "https://www.korea.kr/rss/dept_dapa.xml",
+        "filter_keywords": [],
+    },
+    # 국방부: 방위비·군 정책·전력증강 → 방산주
+    {
+        "name": "mnd",
+        "url":  "https://www.korea.kr/rss/dept_mnd.xml",
+        "filter_keywords": [],
+    },
+
+    # ── 간접 영향 부처 (★☆☆) ────────────────────────────────────
+    # 통일부: 남북관계 → 지정학 리스크 지수
+    {
+        "name": "unikorea",
+        "url":  "https://www.korea.kr/rss/dept_unikorea.xml",
+        "filter_keywords": [],
+    },
+    # 공정거래위원회: M&A 심사·기업결합 → 개별 종목 이벤트
+    {
+        "name": "ftc",
+        "url":  "https://www.korea.kr/rss/dept_ftc.xml",
+        "filter_keywords": [],
+    },
+    # 중소벤처기업부: 중소기업·벤처 정책 → 코스닥 소형주
+    {
+        "name": "mss",
+        "url":  "https://www.korea.kr/rss/dept_mss.xml",
+        "filter_keywords": [],
+    },
+    # 외교부: 통상·FTA·외교 → 수출 기업 영향
+    {
+        "name": "mofa",
+        "url":  "https://www.korea.kr/rss/dept_mofa.xml",
         "filter_keywords": [],
     },
 ]
@@ -163,8 +248,8 @@ def _fetch_rss(
     """
     단일 RSS 피드를 파싱하여 필터링된 아이템 목록 반환.
 
-    [v12.0] requests로 직접 fetch 후 feedparser에 text 전달.
-    기재부/방사청처럼 비표준 XML(bozo)이어도 entries가 있으면 수집.
+    [v14.0] korea.kr 통합 RSS는 표준 XML이므로 feedparser 직접 파싱 가능.
+    비표준 XML(bozo)이어도 entries가 있으면 수집 (AP News 등 대응).
     rule #90: 수집·파싱만. 분석 없음.
     """
     try:

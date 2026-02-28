@@ -2,11 +2,11 @@
 collectors/event_calendar_collector.py
 기업 이벤트 캘린더 수집 전담
 
-[수집 전략 — 2소스 병행]
+[수집 전략 — DART 단일 소스]
 1순위: DART 공시목록 API (list.json) — pblntf_ty 없이 키워드 검색
        (pblntf_ty 분류 코드 사용 시 status=013 권한 오류 발생 → 제거)
-2순위: KRX KIND 공시시스템 (data.krx.co.kr) — 무료 REST API, 별도 인증 불필요
-       IR·실적발표·주주총회·배당 공시 수집
+2순위: KRX KIND 공시시스템 → 서버 점검 상태 지속으로 비활성화
+       (kind.krx.co.kr 접속 불가 확인 — v14.0 비활성화)
 
 [설계 원칙 — rule #90 계열 준수]
 - 수집만 담당: AI 분석·텔레그램 발송·DB 기록 절대 금지
@@ -23,7 +23,7 @@ collectors/event_calendar_collector.py
         "days_until":  int,   # 오늘부터 며칠 후 (0=당일, -1=불명확)
         "title":       str,   # 공시 제목
         "rcept_no":    str,   # 접수번호 (URL 조합용)
-        "source":      str,   # "dart" | "krx"
+        "source":      str,   # "dart"
     }
 ]
 
@@ -31,6 +31,10 @@ collectors/event_calendar_collector.py
 - DART pblntf_ty 분류 코드 제거 → 키워드 전문 검색 방식으로 전환
   (status=013 권한 오류 해결)
 - KRX KIND REST API 2순위 소스 추가 (별도 인증 불필요)
+
+[v14.0 수정 — 2025-02]
+- KRX KIND 비활성화: kind.krx.co.kr 서버 점검 상태 지속 확인
+  → _collect_krx_kind() 호출 제거 (코드 보존, 재활성화 가능)
 """
 
 import re
@@ -86,14 +90,15 @@ def collect(target_date: datetime = None) -> list[dict]:
     else:
         logger.info("[event_calendar] DART_API_KEY 없음 — DART 건너뜀, KRX 시도")
 
-    # 2순위: KRX KIND (DART 결과 부족 시 보완)
-    if len(events) < 5:
-        try:
-            krx_events = _collect_krx_kind(target_date)
-            events.extend(krx_events)
-            logger.info(f"[event_calendar] KRX KIND 수집: {len(krx_events)}건")
-        except Exception as e:
-            logger.warning(f"[event_calendar] KRX KIND 수집 실패 (비치명적): {e}")
+    # 2순위: KRX KIND — v14.0 비활성화 (kind.krx.co.kr 서버 점검 상태 지속)
+    # kind.krx.co.kr 접속 불가 확인. 재활성화 시 아래 주석 해제.
+    # if len(events) < 5:
+    #     try:
+    #         krx_events = _collect_krx_kind(target_date)
+    #         events.extend(krx_events)
+    #         logger.info(f"[event_calendar] KRX KIND 수집: {len(krx_events)}건")
+    #     except Exception as e:
+    #         logger.warning(f"[event_calendar] KRX KIND 수집 실패 (비치명적): {e}")
 
     # 중복 제거 (rcept_no 또는 title 기준)
     seen = set()
