@@ -1323,25 +1323,12 @@ def format_closing_report_full(report: dict) -> str:
     else:
         lines.append("  🟡 중변동 — 표준 R/R 1.5 이상 종목만 진입")
 
-    # 예측 정확도 (accuracy_tracker 데이터)
-    if accuracy_stats and accuracy_stats.get("sample_count", 0) >= 3:
-        avg_acc = accuracy_stats.get("avg_accuracy", 0.0)
-        sample  = accuracy_stats.get("sample_count", 0)
-        best_sig = accuracy_stats.get("best_signal", "")
-        lines.append(
-            f"\n  🧠 <b>예측 정확도 ({sample}일 누적)</b>: {avg_acc:.1%}"
-        )
-        if best_sig:
-            lines.append(f"    최고 신호: {best_sig}")
-        # 신호 가중치 상위/하위
-        weights = accuracy_stats.get("signal_weights", {})
-        changed = {k: v for k, v in weights.items() if abs(v - 1.0) > 0.08}
-        if changed:
-            w_lines = [
-                f"{k}:{v:.2f}" for k, v in
-                sorted(changed.items(), key=lambda x: -x[1])
-            ]
-            lines.append(f"    가중치 보정: {', '.join(w_lines)}")
+    # [v10.7 이슈 #13] 인라인 accuracy_stats 블록 → format_accuracy_stats() 호출로 교체
+    # /status 명령어·주간 리포트에서도 재사용 가능한 독립 포맷 함수 활용
+    acc_section = format_accuracy_stats(accuracy_stats)
+    if acc_section:
+        lines.append("")
+        lines.extend(acc_section.splitlines())
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ 투자 판단은 본인 책임. 참고용 정보입니다.")

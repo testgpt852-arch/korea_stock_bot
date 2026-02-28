@@ -151,10 +151,10 @@ def analyze(
         signals.extend(ev_signals)
         # event_scores 구성: 이벤트 발생 종목 강도 매핑
         for ev in event_impact_data:
-            ticker = ev.get(ticker, )
+            ticker = ev.get("ticker", "")
             if ticker:
                 event_scores[ticker] = max(
-                    event_scores.get(ticker, 0), ev.get(strength, 3)
+                    event_scores.get(ticker, 0), ev.get("strength", 3)
                 )
         logger.info(f"[signal] 신호8 (기업이벤트): {len(ev_signals)}개 신호 추가")
 

@@ -1,6 +1,6 @@
 """
 reports/morning_report.py
-아침봇 보고서 조립 전담 (08:30 / 07:40 실행)
+아침봇 보고서 조립 전담 (08:30 / 07:30 실행)
 
 [실행 흐름 — ARCHITECTURE.md 준수]
 ① dart_collector    → 전날 공시 수집
@@ -51,12 +51,16 @@ import notifiers.telegram_bot      as telegram_bot
 import utils.watchlist_state        as watchlist_state   # v3.1 추가
 
 
-async def run(geopolitics_data: list = None) -> None:
+async def run(geopolitics_data: list = None, event_cache: list = None) -> None:
     """아침봇 메인 실행 함수 (AsyncIOScheduler에서 호출)
 
     [v10.0 Phase 2 버그픽스] geopolitics_data 파라미터 추가
     - main.py의 _geopolitics_cache → 이 함수 → signal_analyzer.analyze() → telegram_bot
     - None(기본) 또는 빈 리스트이면 신호6 생략 (하위 호환)
+
+    [v10.7 버그픽스] event_cache 파라미터 추가 (이슈 #4)
+    - main.py의 _event_calendar_cache → 이 함수 → ②-b 블록에서 재수집 없이 활용
+    - None(기본) 또는 빈 리스트이면 직접 수집 (하위 호환)
 
     [v10.0 Phase 4-1] 기업 이벤트 캘린더 + DataLab 트렌드 연동
     - event_calendar_collector.collect() → event_impact_analyzer.analyze() → signal_analyzer(신호8)
@@ -95,17 +99,30 @@ async def run(geopolitics_data: list = None) -> None:
                 price_data = None
 
         # ── ②-b 기업 이벤트 캘린더 수집 (v10.0 Phase 4-1) ──────
+        # [v10.7 버그픽스] event_cache 주입 시 재수집 없이 캐시 활용 (이슈 #4)
         event_impact_signals = []
         try:
             import config as _cfg4
             if _cfg4.EVENT_CALENDAR_ENABLED:
-                logger.info("[morning] 기업 이벤트 캘린더 수집 중...")
-                event_calendar = event_calendar_collector.collect(today)
-                if event_calendar:
-                    event_impact_signals = event_impact_analyzer.analyze(event_calendar)
-                    logger.info(f"[morning] 이벤트 신호8 {len(event_impact_signals)}건 생성")
+                if event_cache:
+                    # main.py 06:30 캐시 주입 — 재수집 건너뜀
+                    event_impact_signals = event_cache
+                    logger.info(f"[morning] 기업 이벤트 캐시 사용 — {len(event_impact_signals)}건 (재수집 생략)")
+                else:
+                    logger.info("[morning] 기업 이벤트 캘린더 수집 중...")
+                    event_calendar = event_calendar_collector.collect(today)
+                    if event_calendar:
+                        event_impact_signals = event_impact_analyzer.analyze(event_calendar)
+                        logger.info(f"[morning] 이벤트 신호8 {len(event_impact_signals)}건 생성")
         except Exception as e:
             logger.warning(f"[morning] 기업 이벤트 수집 실패 ({e}) — 신호8 생략")
+
+        # ── ②-c 시장 환경 결정 (v10.7 버그픽스: 순서 앞당김) ──
+        # [v10.7 이슈 #3] oracle_analyzer 호출 전에 당일 시장 환경을 결정해야
+        # 올바른 R/R 기준이 적용됨. 기존 ⑨단계에서 ②-c로 이동.
+        if price_data:
+            _early_market_env = watchlist_state.determine_and_set_market_env(price_data)
+            logger.info(f"[morning] 시장 환경 조기 결정: {_early_market_env or '(미지정)'} (oracle 적용 전)")
 
         # ── ③ 신호 분석 (v2.1: price_data 전달) ───────────────
         logger.info("[morning] 신호 분석 중...")
@@ -158,7 +175,12 @@ async def run(geopolitics_data: list = None) -> None:
         # T5/T6/T3 없음: rule #16 준수 (마감봇 전용 트리거)
         # 수급 + 공시 AI + 소외도 기반으로만 아침봇 픽 생성
         logger.info("[morning] 쪽집게 분석 중 (수급+공시 기반 픽)...")
+        # [v10.7 이슈 #3] determine_and_set_market_env가 ②-c에서 이미 실행됨 → 당일 환경 사용
         market_env_val = watchlist_state.get_market_env() or ""
+        # [v10.7 이슈 #10] 아침봇은 sector_scores 항상 {} — rule #92(마감봇 전용) 으로 불가피
+        # 전날 마감봇이 수집한 데이터가 없으므로 명시적으로 경고 로그 출력
+        if not signal_result.get("sector_scores"):
+            logger.info("[morning] sector_scores 없음 (rule #92: 섹터ETF 수집은 마감봇 전용) — oracle 신호7 미반영")
         try:
             oracle_result = oracle_analyzer.analyze(
                 theme_map=theme_result.get("theme_map", []),
@@ -242,9 +264,14 @@ async def run(geopolitics_data: list = None) -> None:
             f"(장중봇이 09:00에 구독 예정)"
         )
 
-        # ── ⑨ 시장 환경 판단 + 저장 (v4.2) ─────────────────
-        market_env = watchlist_state.determine_and_set_market_env(price_data)
-        logger.info(f"[morning] 시장 환경 판단 완료: {market_env or '(미지정)'}")
+        # ── ⑨ 시장 환경 판단 + 저장 (v4.2 / v10.7 수정: ②-c로 이동됨) ─
+        # [v10.7 이슈 #3] 시장 환경 결정은 ②-c에서 이미 수행됨 (oracle 호출 전 선행)
+        # 이 단계는 price_data가 None이었을 경우의 안전망으로만 동작
+        if not price_data:
+            market_env = watchlist_state.get_market_env() or ""
+        else:
+            market_env = watchlist_state.get_market_env() or ""
+        logger.info(f"[morning] 시장 환경 최종 확인: {market_env or '(미지정)'}")
 
         # ── ⑩ 섹터 맵 저장 (v4.4) ──────────────────────────
         sector_map = _build_sector_map(price_data)

@@ -234,6 +234,7 @@ def poll_all_markets() -> list[dict]:
                         alerted.append({
                             "종목코드":   ticker,
                             "종목명":     row["종목명"],
+                            "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
                             "등락률":     change_rate,
                             "직전대비":   round(change_rate, 2),  # prev=0(미진입) → 전체 등락률이 가속도
                             "거래량배율": round(acml_rvol / 100, 2),
@@ -288,6 +289,7 @@ def poll_all_markets() -> list[dict]:
                 alerted.append({
                     "종목코드":   ticker,
                     "종목명":     row["종목명"],
+                    "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
                     "등락률":     change_rate,
                     "직전대비":   round(delta_rate, 2),
                     "거래량배율": round(acml_rvol / 100, 2),
@@ -385,6 +387,7 @@ def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> li
         results.append({
             "종목코드":   ticker,
             "종목명":     row.get("종목명", ticker),
+            "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
             "등락률":     change_rate,
             "직전대비":   0.0,
             "거래량배율": round(rvol_display, 2),

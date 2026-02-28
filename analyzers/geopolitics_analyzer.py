@@ -152,16 +152,22 @@ def _enhance_with_ai(
 
     배치 처리: 최대 10건을 하나의 프롬프트로 처리 (AI 호출 횟수 최소화).
 
-    [v10.3 모델 정책] geopolitics_analyzer 전용:
-      Primary  : gemini-3-flash-preview  (Google 현행 지원 모델)
-      Fallback : gemini-2.5-flash        (Primary 실패 시 자동 전환)
+    [v10.3 모델 정책 — v10.7 수정] geopolitics_analyzer 전용:
+      Primary  : gemini-2.5-flash        (Google 현행 지원 모델)
+      Fallback : gemini-2.5-flash-lite   (Primary 실패 시 자동 전환)
       ※ 절대 사용 금지 (Google 서비스 종료):
         gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
         gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
-    """
-    import google.generativeai as genai
+        gemini-3-flash-preview (미확인 모델 ID — 서비스 중단 위험)
 
-    genai.configure(api_key=config.GOOGLE_AI_API_KEY)
+    [v10.7 버그픽스] 구 SDK(google-generativeai) → 신 SDK(google-genai) 교체
+      변경 전: import google.generativeai as genai / genai.GenerativeModel()
+      변경 후: from google import genai / client.models.generate_content()
+    """
+    from google import genai as _genai
+    from google.genai import types as _types
+
+    _client = _genai.Client(api_key=config.GOOGLE_AI_API_KEY)
 
     # 뉴스 요약 생성 (최대 10건)
     news_texts = []
@@ -199,14 +205,20 @@ def _enhance_with_ai(
 - 섹터명은 다음 중에서 선택: 철강/비철금속, 산업재/방산, 기술/반도체, 에너지/정유, 소재/화학, 바이오/헬스케어, 금융, 조선, 배터리, 자동차부품
 """
 
-    # [v10.3] Primary: gemini-3-flash-preview → Fallback: gemini-2.5-flash
-    # gemini-2.0-flash / gemini-1.5-flash 계열 전부 서비스 종료 — 사용 금지
-    _MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash"]
+    # [v10.7] Primary: gemini-2.5-flash → Fallback: gemini-2.5-flash-lite
+    # gemini-3-flash-preview는 미확인 ID로 제거, 구 SDK 완전 제거
+    _MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
     for model_name in _MODELS:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = _client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=_types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=1500,
+                ),
+            )
             text = response.text.strip()
 
             # JSON 추출 (```json ... ``` 제거)

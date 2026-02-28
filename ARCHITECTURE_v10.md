@@ -4,6 +4,50 @@
 > 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
 > **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3·4 개편 내용을 반영한 최신 아키텍처입니다.**
 >
+> **📋 v10.7 버그픽스**: 2026-02-28, Claude Sonnet 4.6
+> v10.0 대규모 개편 이후 발견된 버그 13건 전수 수정 (버그분석보고서 기반):
+>
+> 🔴 CRITICAL 수정 (2건):
+> - 이슈 #1: geopolitics_analyzer — 구 SDK(google-generativeai) → 신 SDK(google-genai) 교체
+>   `import google.generativeai as genai` → `from google import genai / from google.genai import types`
+>   AI 보완(_enhance_with_ai) 완전 불가 상태 복구. Primary 모델 gemini-3-flash-preview(미확인) → gemini-2.5-flash로 변경.
+> - 이슈 #2: volume_analyzer — 출력 dict에 `"현재가"` 키 추가 (3개소: 신규진입/기존감지/갭상승)
+>   ai_analyzer._build_spike_prompt() 프롬프트에 `현재가: {current_price:,}원` 삽입
+>   dead variable current_price 정상 활용. AI target_price/stop_loss가 실제 주가 기반으로 생성됨.
+>
+> 🟠 MAJOR 수정 (4건):
+> - 이슈 #3: morning_report — `determine_and_set_market_env()` 호출을 ②-c로 이동 (oracle 호출 전 선행)
+>   기존 ⑨단계에서 ②-c(가격수집 직후)로 이동 → 당일 R/R 기준이 oracle_analyzer에 즉시 반영됨
+> - 이슈 #4: main.py → morning_report.run() 간 `event_cache` 파라미터 주입 연결
+>   `_event_calendar_cache` 캐시를 `morning_report.run(event_cache=...)` 으로 전달
+>   morning_report ②-b 블록에서 캐시 있으면 재수집 없이 사용 (geopolitics_data와 동일 패턴)
+> - 이슈 #5: closing_report — oracle_analyzer.analyze()에 `event_scores` 파라미터 추가
+>   마감봇에 기업 이벤트 캘린더 수집(4-d) + event_scores 구성 블록 신규 추가
+>   아침봇/마감봇 비대칭 구조 해소. EVENT_CALENDAR_ENABLED=false 시 event_scores={} (하위 호환)
+> - 이슈 #6: theme_history.init_table() Dead Function 제거 + DDL을 db_schema로 이관
+>   `db_schema._migrate_v100()` 신규 추가 (theme_event_history 테이블 idempotent 생성)
+>   `theme_history.record_closing()` 내 인라인 CREATE TABLE 제거 → rule #18 준수
+>   `theme_history.init_table()` 함수 삭제
+>
+> 🟡 MINOR 수정 (4건):
+> - 이슈 #7: main.py — weekly_report 스케줄에 `day_of_week='mon'` 추가 (매일→매주 월요일)
+> - 이슈 #8: morning_report docstring — 실행 시각 `07:40` → `07:30` 수정
+> - 이슈 #9: closing_report — 마감봇 완료 후 `determine_and_set_market_env(price_result)` 호출 추가(4-e)
+>   다음날 장중봇/수익률 배치가 당일 마감 기준 최신 시장 환경으로 시작 가능
+> - 이슈 #10: morning_report — sector_scores 비어있을 때 명시적 로그 출력 (rule #92 비대칭 구조 인지)
+>
+> ⚪ INFO 정리 (3건):
+> - 이슈 #11: config.py — `VOLUME_SPIKE_RATIO` deprecated 상수 제거 (Dead Code 완전 삭제)
+> - 이슈 #12: config.py docstring — `JOURNAL_MAX_CONTEXT_TOKENS` → `JOURNAL_MAX_CONTEXT_CHARS` 수정
+> - 이슈 #13: telegram_bot — format_closing_report_full() 내 인라인 accuracy_stats 블록
+>   → format_accuracy_stats() 호출로 교체 (재사용성 확보: /status·주간리포트에서도 활용 가능)
+>
+> 기타 수정:
+> - 5-1: geopolitics_analyzer Primary 모델 gemini-3-flash-preview → gemini-2.5-flash (이슈 #1과 통합)
+> - 5-2: config.py docstring에서 COPPER_KR_STOCKS 수정이력 삭제 (v2.3 삭제 상수 잔재 제거)
+> - signal_analyzer.py event_scores 구성부 변수명 버그 수정: `ev.get(ticker,)` → `ev.get("ticker","")`,
+>   `ev.get(strength, 3)` → `ev.get("strength", 3)` (런타임 TypeError 잠재 버그 수정)
+>
 > **📋 v10.6 Phase 4-2 구현**: 2026-02-28, Claude Sonnet 4.6
 > 완전 분석 리포트 포맷 + 테마 정확도 학습 DB 구현:
 > ① tracking/accuracy_tracker.py 신규 — 예측 테마 vs 실제 급등 테마 비교 누적

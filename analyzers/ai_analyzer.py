@@ -240,7 +240,7 @@ def _build_spike_prompt(
     [v4.2] 윌리엄 오닐 인격 + SYSTEM CONSTRAINTS + 강세장/약세장 분기 프롬프트 빌드
     """
 
-    current_price = analysis.get("현재가", 0) or analysis.get("등락률", 0)  # 가격 정보
+    current_price = analysis.get("현재가", 0)  # [v10.7 버그픽스] volume_analyzer 출력 키 "현재가" 사용
     종목명 = analysis.get("종목명", "N/A")
     종목코드 = analysis.get("종목코드", "N/A")
     등락률 = analysis.get("등락률", 0)
@@ -296,6 +296,7 @@ CAN SLIM 시스템 창시자. 철칙: "손실은 7~8%에서 자른다. 예외 �
 
 ## 분석 대상
 종목: {종목명} ({종목코드})
+현재가: {current_price:,}원
 등락률: +{등락률:.1f}%
 거래량: 전일 대비 {거래량배율:.1f}배 (RVOL)
 감지시각: {감지시각}{news_line}{context_line}

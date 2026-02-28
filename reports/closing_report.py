@@ -141,6 +141,30 @@ async def run() -> None:
             logger.warning(f"[closing] 섹터ETF/공매도 분석 실패 (비치명적): {_e}")
             sector_flow_result = {}
 
+        # ── 4-d. 기업 이벤트 캘린더 수집 (v10.7 이슈 #5) ─────
+        # 마감봇에서도 event_scores를 oracle_analyzer에 전달하여
+        # 아침봇과의 비대칭 구조 해소 (morning_report와 동일한 패턴 적용)
+        event_scores: dict = {}
+        try:
+            import config as _cfg_ev
+            if _cfg_ev.EVENT_CALENDAR_ENABLED:
+                from collectors import event_calendar_collector as _ev_coll
+                from analyzers  import event_impact_analyzer   as _ev_anl
+                logger.info("[closing] 기업 이벤트 캘린더 수집 중 (event_scores 구성)...")
+                _ev_raw = _ev_coll.collect(target)
+                if _ev_raw:
+                    _ev_signals = _ev_anl.analyze(_ev_raw)
+                    for ev in _ev_signals:
+                        ticker = ev.get("ticker", "")
+                        if ticker:
+                            event_scores[ticker] = max(
+                                event_scores.get(ticker, 0),
+                                ev.get("strength", 3),
+                            )
+                    logger.info(f"[closing] event_scores 구성 완료 — {len(event_scores)}종목")
+        except Exception as _ev_e:
+            logger.warning(f"[closing] 기업 이벤트 수집 실패 (비치명적): {_ev_e}")
+
         # ── 4-b. 쪽집게 분석 (v8.1 신규) ─────────────────────
         # T5/T6/T3 + 신호7 결과까지 종합 → 내일 주도 테마 + 종목 픽 + 진입조건
         # rule #16 준수: closing_report에서만 T5/T6/T3 전달 가능
@@ -158,10 +182,20 @@ async def run() -> None:
                 volume_flat=vf_result,       # T6 — 마감봇 전용
                 fund_inflow=fi_result,       # T3 — 마감봇 전용
                 sector_scores=sector_flow_result.get("sector_scores"),  # Phase 3 신호7
+                event_scores=event_scores,   # [v10.7 이슈 #5] 기업이벤트 보너스
             )
         except Exception as _e:
             logger.warning(f"[closing] 쪽집게 분석 실패 (비치명적): {_e}")
             oracle_result = None
+
+        # ── 4-e. 당일 시장 환경 갱신 (v10.7 이슈 #9) ──────────
+        # 마감봇 완료 후 최종 확정 price_data 기반으로 시장 환경 재결정.
+        # 다음날 장중봇(09:00) 및 수익률 배치(18:45)가 최신 환경으로 시작 가능.
+        try:
+            _updated_env = watchlist_state.determine_and_set_market_env(price_result)
+            logger.info(f"[closing] 당일 시장 환경 갱신: {_updated_env or '(미지정)'}")
+        except Exception as _env_e:
+            logger.warning(f"[closing] 시장 환경 갱신 실패 (비치명적): {_env_e}")
 
         # ── 5. 보고서 조립 ─────────────────────────────────────
         report = {

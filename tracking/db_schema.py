@@ -337,6 +337,9 @@ def init_db() -> None:
     _migrate_v60(db_path)
     # [v7.0] kospi_index_stats 테이블 마이그레이션 (idempotent)
     _migrate_v70(db_path)
+    # [v10.7 이슈 #6] theme_event_history 마이그레이션 (idempotent)
+    # theme_history.py의 init_table() 삭제 후 db_schema가 DDL 전담 (rule #18 준수)
+    _migrate_v100(db_path)
     # [v10.6 Phase 4-2] theme_accuracy + signal_weights 테이블 마이그레이션 (idempotent)
     _migrate_v106(db_path)
 
@@ -543,6 +546,43 @@ def _migrate_v70(db_path: str) -> None:
 
     except Exception as e:
         logger.warning(f"[db] v7.0 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v100(db_path: str) -> None:
+    """
+    [v10.7 이슈 #6] theme_event_history 테이블 생성.
+    theme_history.py의 인라인 CREATE TABLE 및 init_table() 제거 후
+    db_schema가 DDL 전담 (rule #18 준수). 기존 DB 하위 호환 idempotent 마이그레이션.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS theme_event_history (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                date             TEXT    NOT NULL,
+                event_type       TEXT,
+                event_summary    TEXT,
+                signal_type      TEXT,
+                triggered_sector TEXT    NOT NULL,
+                top_ticker       TEXT,
+                top_name         TEXT,
+                top_change_pct   REAL,
+                sector_avg_pct   REAL,
+                oracle_score     INTEGER,
+                created_at       TEXT    DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_theme_history_date
+            ON theme_event_history (date)
+        """)
+        conn.commit()
+        logger.info("[db] v10.7 마이그레이션 완료 — theme_event_history 테이블 확인")
+    except Exception as e:
+        logger.warning(f"[db] v10.7 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

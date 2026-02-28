@@ -44,7 +44,7 @@ _event_calendar_cache:  list[dict] = []   # [v10.0 Phase 4-1] 기업 이벤트 �
 
 
 async def run_morning_bot():
-    """08:30 아침봇"""
+    """07:30 / 08:30 아침봇"""
     if not is_market_open(get_today()):
         logger.info("[main] 휴장일 — 아침봇 건너뜀")
         return
@@ -52,8 +52,10 @@ async def run_morning_bot():
     # [v10.0 Phase 2 버그픽스] GEOPOLITICS_ENABLED=true 시 캐시 주입
     # _geopolitics_cache: geopolitics_analyzer.analyze() 반환값 (list[dict])
     # 비어있으면 morning_report에서 신호6 생략 (하위 호환)
-    geo_cache = _geopolitics_cache if _geopolitics_cache else []
-    await run(geopolitics_data=geo_cache)
+    geo_cache   = _geopolitics_cache if _geopolitics_cache else []
+    # [v10.7 이슈 #4] _event_calendar_cache 주입 — 06:30 수집 결과를 재수집 없이 활용
+    event_cache = _event_calendar_cache if _event_calendar_cache else []
+    await run(geopolitics_data=geo_cache, event_cache=event_cache)
 
 
 async def run_closing_bot():
@@ -410,7 +412,8 @@ async def main():
     scheduler.add_job(run_performance_batch, "cron", hour=18, minute=45, id="perf_batch")
 
     # Phase 3: 주간 성과 리포트 — 매주 월요일 08:45 (아침봇 완료 후) (v3.3)
-    scheduler.add_job(run_weekly_report, "cron", hour=8, minute=45, id="weekly_report")
+    # [v10.7 이슈 #7] day_of_week='mon' 추가 — 기존에 누락되어 매일 실행됨
+    scheduler.add_job(run_weekly_report, "cron", day_of_week="mon", hour=8, minute=45, id="weekly_report")
 
     # Phase 4: 강제 청산 — 14:50 (v3.4 / v4.4 AI 선택적 청산으로 업그레이드)
     scheduler.add_job(run_force_close, "cron", hour=14, minute=50, id="force_close")

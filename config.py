@@ -7,7 +7,7 @@ Railway: 서버 Variables에 입력
 [수정이력]
 - v2.1: DART 규모 필터 상수 추가
         미국증시 섹터 연동 매핑 추가 (US_SECTOR_TICKERS, US_SECTOR_KR_MAP)
-- v2.2: 비상장사 제거, COPPER_KR_STOCKS 추가, US_SECTOR_SIGNAL_MIN 1.5→1.0
+- v2.2: 비상장사 제거, US_SECTOR_SIGNAL_MIN 1.5→1.0
 - v2.3: 종목명 하드코딩 전면 제거
         US_SECTOR_KR_MAP (종목명 고정) → US_SECTOR_KR_INDUSTRY (업종명 키워드) 로 교체
         COMMODITY_KR_INDUSTRY 신규 추가
@@ -29,7 +29,7 @@ Railway: 서버 Variables에 입력
         REAL_MODE_CONFIRM_DELAY_SEC — TRADING_MODE=REAL 전환 시 확인 딜레이 (이슈④)
         REAL_MODE_CONFIRM_ENABLED  — REAL 전환 확인 절차 활성화 여부
         KIS_FAILURE_SAFE_LOSS_PCT  — KIS API 장애 시 보수적 미실현 손익 기본값 (이슈⑤)
-        JOURNAL_MAX_CONTEXT_TOKENS — 거래 일지 컨텍스트 최대 토큰 수 (이슈②)
+        JOURNAL_MAX_CONTEXT_CHARS  — 거래 일지 컨텍스트 최대 문자 수 (이슈②)
         JOURNAL_MAX_ITEMS          — 일지 컨텍스트 최대 항목 수 (이슈②)
         MEMORY_COMPRESS_LAYER1_DAYS — 기억 압축 Layer1 보존 기간 (5번 기억 압축)
         MEMORY_COMPRESS_LAYER2_DAYS — 기억 압축 Layer2 요약 보존 기간
@@ -142,7 +142,7 @@ MAX_ALERTS_PER_CYCLE = 5            # 폴링 사이클당 최대 알림 발송 �
 MIN_VOL_RATIO_ACML = 30.0            # 누적 RVOL 최솟값 (%): 전일 거래량의 30% 이상 소화
 
 # v3.1: PRICE_CHANGE_MIN — WebSocket 틱 기반 감지 임계값으로 재활성
-VOLUME_SPIKE_RATIO = 10      # deprecated (v2.8): 누적 거래량 배율 — REST 미사용
+# [v10.7 이슈 #11] VOLUME_SPIKE_RATIO 삭제 — deprecated (v2.8) 이후 미사용 Dead Code
 PRICE_CHANGE_MIN   = 3.0     # WebSocket 감지 임계값 (누적 등락률 %, v3.1 재활성)
 
 # ── 장중봇 REST 폴링 간격 (v2.4 추가) ───────────────────────

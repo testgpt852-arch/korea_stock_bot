@@ -64,24 +64,6 @@ ON theme_event_history (date)
 """
 
 
-def init_table() -> None:
-    """
-    theme_event_history 테이블 초기화 (idempotent).
-
-    rule #95: DB 초기화만. 분석·발송 없음.
-    """
-    if not _DB_AVAILABLE:
-        return
-    try:
-        with get_conn() as conn:
-            conn.execute(_CREATE_TABLE)
-            conn.execute(_CREATE_IDX_DATE)
-            conn.commit()
-        logger.info("[theme_history] 테이블 초기화 완료")
-    except Exception as e:
-        logger.warning(f"[theme_history] 테이블 초기화 실패 (비치명적): {e}")
-
-
 def record_closing(
     date_str:        str,
     top_gainers:     list[dict],
@@ -125,10 +107,7 @@ def record_closing(
     inserted = 0
     try:
         with get_conn() as conn:
-            # 테이블 없으면 자동 생성
-            conn.execute(_CREATE_TABLE)
-            conn.execute(_CREATE_IDX_DATE)
-
+            # [v10.7 이슈 #6] 인라인 CREATE TABLE 제거 — db_schema.init_db()에서 일괄 초기화
             for row in rows_to_insert:
                 conn.execute(
                     """
