@@ -124,19 +124,27 @@ def _fetch_short_volume(
     """
     pykrx로 공매도 거래량 조회.
 
+    [v11.0 pykrx 호환]
+    구버전 (1.0.46-): get_market_short_selling_volume_by_ticker
+    신버전 (1.0.47+): get_shorting_volume_by_ticker
+    → getattr 폴백으로 양쪽 모두 지원
+
     반환: list[dict] — 공매도 데이터 (신호 분류 전)
     """
+    # 버전별 함수명 자동 탐색
+    _vol_fn = getattr(pykrx_stock, "get_shorting_volume_by_ticker",
+              getattr(pykrx_stock, "get_market_short_selling_volume_by_ticker", None))
+    if _vol_fn is None:
+        logger.warning("[short_interest] 공매도 거래량 함수 없음 — pykrx>=1.0.47 업그레이드 권장")
+        return []
+
     results: list[dict] = []
 
     for market in ["KOSPI", "KOSDAQ"]:
         try:
             # 당일 공매도 거래량 상위 종목
-            df_today = pykrx_stock.get_market_short_selling_volume_by_ticker(
-                today_str, market=market
-            )
-            df_prev = pykrx_stock.get_market_short_selling_volume_by_ticker(
-                prev_str, market=market
-            )
+            df_today = _vol_fn(today_str, market=market)
+            df_prev  = _vol_fn(prev_str,  market=market)
 
             if df_today is None or df_today.empty:
                 logger.debug(f"[short_interest] {market} 당일 공매도 데이터 없음")

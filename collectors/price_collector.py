@@ -152,10 +152,17 @@ def collect_supply(ticker: str, target_date: datetime = None) -> dict:
         logger.warning(f"[price] {ticker} 기관/외인 수급 실패: {e}")
 
     try:
-        df = pykrx_stock.get_market_short_ohlcv_by_date(start_str, date_str, ticker)
+        # pykrx 버전별 함수명 분기
+        #   구버전: get_market_short_ohlcv_by_date (1.0.46 이하)
+        #   신버전: get_shorting_ohlcv_by_date      (1.0.47+)
+        _short_fn = getattr(pykrx_stock, "get_shorting_ohlcv_by_date",
+                    getattr(pykrx_stock, "get_market_short_ohlcv_by_date", None))
+        if _short_fn is None:
+            raise AttributeError("공매도 OHLCV 함수 없음 (pykrx 버전 확인 필요)")
+        df = _short_fn(start_str, date_str, ticker)
         if not df.empty:
-            ratio_col = _find_col(df, ["공매도비중", "비중"])
-            bal_col   = _find_col(df, ["대차잔고", "잔고"])
+            ratio_col = _find_col(df, ["공매도비중", "비중", "ShortRatio"])
+            bal_col   = _find_col(df, ["대차잔고", "잔고", "Balance"])
             last = df.iloc[-1]
             if ratio_col:
                 result["공매도잔고율"] = float(last[ratio_col])
@@ -343,18 +350,30 @@ def _fetch_institutional_by_tickers(
 def _fetch_short_selling(
     date_str: str, tickers: list[str], top_n: int = 10
 ) -> list[dict]:
-    """공매도 비중 — 개별 종목 조회"""
+    """
+    공매도 비중 — 개별 종목 조회
+
+    [v2.6 pykrx 호환]
+    구버전 (1.0.46-): get_market_short_ohlcv_by_date
+    신버전 (1.0.47+): get_shorting_ohlcv_by_date
+    → getattr 폴백으로 양쪽 모두 지원
+    """
+    # 버전별 함수명 자동 탐색
+    _short_fn = getattr(pykrx_stock, "get_shorting_ohlcv_by_date",
+                getattr(pykrx_stock, "get_market_short_ohlcv_by_date", None))
+    if _short_fn is None:
+        logger.warning("[price] 공매도 OHLCV 함수 없음 — pykrx>=1.0.47 업그레이드 권장")
+        return []
+
     results = []
     for ticker in tickers:
         try:
-            df = pykrx_stock.get_market_short_ohlcv_by_date(
-                date_str, date_str, ticker
-            )
+            df = _short_fn(date_str, date_str, ticker)
             if df.empty:
                 continue
             row       = df.iloc[-1]
-            ratio_col = _find_col(df, ["공매도비중", "비중"])
-            vol_col   = _find_col(df, ["공매도거래량", "거래량"])
+            ratio_col = _find_col(df, ["공매도비중", "비중", "ShortRatio"])
+            vol_col   = _find_col(df, ["공매도거래량", "거래량", "ShortVolume"])
             ratio_val = float(row[ratio_col]) if ratio_col else 0.0
             vol_val   = int(row[vol_col])     if vol_col   else 0
             if ratio_val > 0:

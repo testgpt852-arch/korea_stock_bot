@@ -1,6 +1,6 @@
 """
 collectors/geopolitics_collector.py
-지정학·정책 이벤트 수집 전담 — RSS 파싱 + URL 수집만 담당
+지정학·정책 이벤트 수집 전담 — RSS 파싱 + NewsAPI.org
 
 [ARCHITECTURE rule #90 — 절대 금지]
 - AI 분석 호출 금지 (geopolitics_analyzer.py에서 처리)
@@ -13,7 +13,12 @@ collectors/geopolitics_collector.py
   - Reuters RSS (한국 관련 필터)
   - Bloomberg RSS (무료 티어)
   - 기재부/방사청 보도자료 RSS
-  - Google News RSS (GOOGLE_NEWS_API_KEY 없어도 RSS는 무료)
+  - Google News RSS (API키 없이 무료)
+
+[v11.0 업그레이드]
+  - NewsAPI.org 실시간 영문 뉴스 추가 (NEWSAPI_ENABLED=true 시 자동 활성)
+  - RSS보다 실시간성 우수, 주요 금융매체(Reuters·Bloomberg·FT) 직접 수집
+  - 쿼리: 한반도·관세·방산·반도체·중국·NATO 등 지정학 키워드
 
 스케줄 (main.py):
   - 06:00 아침봇 전 수집 (아침봇 08:30 컨텍스트 제공)
@@ -26,13 +31,14 @@ collectors/geopolitics_collector.py
       "summary":    str,   # 본문 요약 (feedparser summary, 없으면 "")
       "link":       str,   # 기사 URL
       "published":  str,   # 발행 시각 (ISO 형식)
-      "source":     str,   # 소스명 (reuters / bloomberg / moef / dapa / google)
+      "source":     str,   # 소스명 (reuters / bloomberg / moef / dapa / google / newsapi)
       "raw_text":   str,   # title + summary 합산 (키워드 매칭용)
     }
   ]
 """
 
 import feedparser
+import requests
 import config
 from utils.logger import logger
 from datetime import datetime, timezone
@@ -110,6 +116,15 @@ def collect(max_per_source: int = 20) -> list[dict]:
     # Google News RSS (선택적, API키 없이도 동작)
     google_items = _fetch_google_news_rss(max_per_query=5)
     results.extend(google_items)
+
+    # ── v11.0: NewsAPI.org 실시간 지정학 뉴스 ────────────────
+    if config.NEWSAPI_ENABLED:
+        try:
+            newsapi_items = _fetch_newsapi_geopolitics(max_per_query=5)
+            results.extend(newsapi_items)
+            logger.info(f"[geopolitics_collector] NewsAPI.org: {len(newsapi_items)}건 수집")
+        except Exception as e:
+            logger.warning(f"[geopolitics_collector] NewsAPI.org 실패 (무시): {e}")
 
     # 중복 URL 제거
     seen_links = set()
@@ -214,3 +229,92 @@ def _parse_published(entry) -> str:
     except Exception:
         pass
     return datetime.now(timezone.utc).isoformat()
+
+
+# ─────────────────────────────────────────────────────────────
+# v11.0: NewsAPI.org 실시간 지정학 뉴스 수집
+# RSS 대비 장점: 실시간(~분 단위), 본문 스니펫 포함, 소스 신뢰도 높음
+# ─────────────────────────────────────────────────────────────
+
+_NEWSAPI_BASE = "https://newsapi.org/v2/everything"
+
+# 지정학·글로벌 매크로 쿼리 목록 (한국 주식 영향권 핵심 키워드)
+_NEWSAPI_GEO_QUERIES = [
+    "South Korea tariff trade war US",
+    "Korea defense NATO military",
+    "Korea semiconductor export restriction China",
+    "China economic stimulus steel battery",
+    "North Korea military provocation",
+    "Trump Korea trade policy",
+    "Fed FOMC rate decision emerging markets",
+]
+
+# 지정학 관련 신뢰 소스 도메인
+_NEWSAPI_GEO_DOMAINS = (
+    "reuters.com,bloomberg.com,ft.com,wsj.com,"
+    "apnews.com,bbc.com,theguardian.com,nytimes.com"
+)
+
+
+def _fetch_newsapi_geopolitics(max_per_query: int = 5) -> list[dict]:
+    """
+    NewsAPI.org /v2/everything 로 지정학 뉴스 수집.
+    rule #90: 수집·파싱만. 분석·AI 호출·발송·DB 기록 없음.
+
+    반환 형식은 _fetch_rss()와 동일 — geopolitics_analyzer.analyze()에 직접 전달.
+    """
+    from datetime import date, timedelta
+
+    items: list[dict] = []
+
+    for query in _NEWSAPI_GEO_QUERIES:
+        try:
+            params = {
+                "apiKey":   config.NEWSAPI_ORG_KEY,
+                "q":        query,
+                "language": "en",
+                "sortBy":   "publishedAt",          # 실시간 최신순
+                "pageSize": max_per_query,
+                "from":     (date.today() - timedelta(days=1)).isoformat(),  # 최근 24시간
+                "domains":  _NEWSAPI_GEO_DOMAINS,
+            }
+            resp = requests.get(_NEWSAPI_BASE, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("status") != "ok":
+                logger.warning(f"[geopolitics/newsapi] API 오류 '{query}': {data.get('message')}")
+                continue
+
+            for art in data.get("articles", []):
+                title   = art.get("title", "")   or ""
+                desc    = art.get("description", "") or ""
+                url     = art.get("url", "")
+                pub     = art.get("publishedAt", "") or datetime.now(timezone.utc).isoformat()
+                source  = art.get("source", {}).get("name", "newsapi")
+                raw_text = (title + " " + desc).lower()
+
+                items.append({
+                    "title":     title,
+                    "summary":   desc[:500],
+                    "link":      url,
+                    "published": pub,
+                    "source":    f"newsapi_{source.lower().replace(' ', '_')}",
+                    "raw_text":  raw_text,
+                })
+
+        except Exception as e:
+            # rule #90: 비치명적 — 쿼리 단위 실패는 무시
+            logger.warning(f"[geopolitics/newsapi] 쿼리 실패 '{query}' (무시): {e}")
+
+    # 중복 URL 제거
+    seen_links: set[str] = set()
+    unique: list[dict] = []
+    for item in items:
+        link = item.get("link", "")
+        if link and link not in seen_links:
+            seen_links.add(link)
+            unique.append(item)
+
+    return unique
+

@@ -74,8 +74,15 @@ GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
 NAVER_CLIENT_ID     = os.environ.get("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
-# v10.0: 지정학 뉴스 수집 (Phase 2 — geopolitics_collector.py)
-GOOGLE_NEWS_API_KEY = os.environ.get("GOOGLE_NEWS_API_KEY", "")
+# NewsAPI.org — 지정학·글로벌 시황 영문 뉴스 (geopolitics_collector + news_collector)
+# 환경변수: GOOGLE_NEWS_API_KEY (기존 이름 유지) 또는 NEWSAPI_ORG_KEY
+NEWSAPI_ORG_KEY     = (os.environ.get("NEWSAPI_ORG_KEY")
+                       or os.environ.get("GOOGLE_NEWS_API_KEY", ""))
+GOOGLE_NEWS_API_KEY = NEWSAPI_ORG_KEY   # 하위 호환 별칭
+
+# NewsAPI.org 수집 활성화 (키가 있으면 자동 활성, 명시적 비활성도 가능)
+NEWSAPI_ENABLED     = bool(NEWSAPI_ORG_KEY) and \
+                      os.environ.get("NEWSAPI_ENABLED", "true").lower() != "false"
 
 
 # ── 시작 시 키 누락 여부 체크 ─────────────────────────────────

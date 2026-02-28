@@ -11,6 +11,10 @@ collectors/news_collector.py
   DATALAB_ENABLED=false(기본) — 활성화 시 datalab_trends 반환값에 포함
   NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET 환경변수 필요
   (NAVER_CLIENT_ID와 동일 앱키 사용 가능 — DataLab API 권한 필요)
+- v11.0: NewsAPI.org 연동 추가
+  _collect_newsapi_reports()      — 영문 증권사 리포트·애널리스트 의견
+  _collect_newsapi_global_market() — 글로벌 시황·정책 뉴스 (한국 영향권)
+  NEWSAPI_ENABLED=true(키 있으면 자동) — 키 없어도 기존 네이버 단독으로 동작
 """
 
 import re
@@ -68,6 +72,21 @@ def collect(target_date: datetime = None) -> dict:
     reports        = _collect_reports(date_kr)
     policy_news    = _collect_policy_news(date_kr)
     datalab_trends = _collect_datalab_trends() if config.DATALAB_ENABLED else []
+
+    # ── v11.0: NewsAPI.org 영문 뉴스 보강 ────────────────────
+    if config.NEWSAPI_ENABLED:
+        try:
+            newsapi_reports = _collect_newsapi_reports()
+            reports = reports + newsapi_reports   # 네이버 결과 뒤에 append
+            logger.info(f"[news] NewsAPI.org 리포트 {len(newsapi_reports)}건 추가")
+        except Exception as e:
+            logger.warning(f"[news] NewsAPI.org 리포트 수집 실패 (무시): {e}")
+        try:
+            newsapi_global = _collect_newsapi_global_market()
+            policy_news = policy_news + newsapi_global
+            logger.info(f"[news] NewsAPI.org 글로벌 시황 {len(newsapi_global)}건 추가")
+        except Exception as e:
+            logger.warning(f"[news] NewsAPI.org 글로벌 시황 수집 실패 (무시): {e}")
 
     logger.info(f"[news] 리포트 {len(reports)}건, 정책뉴스 {len(policy_news)}건, "
                 f"DataLab 트렌드 {len(datalab_trends)}건")
@@ -293,3 +312,164 @@ def _collect_datalab_trends() -> list[dict]:
     # 급등 비율 내림차순 정렬
     results.sort(key=lambda x: x["ratio"], reverse=True)
     return results[:10]
+
+
+# ─────────────────────────────────────────────────────────────
+# v11.0: NewsAPI.org 연동
+# https://newsapi.org/v2/everything
+# 무료 플랜: 100req/day, 영문 기사, 최근 1개월
+# ─────────────────────────────────────────────────────────────
+
+_NEWSAPI_BASE = "https://newsapi.org/v2/everything"
+
+# 증권사 리포트·애널리스트 의견 관련 쿼리
+_NEWSAPI_REPORT_QUERIES = [
+    "Korea stock analyst target price upgrade",
+    "KOSPI KOSDAQ buy rating brokerage",
+    "Samsung SK Hynix LG analyst report",
+]
+
+# 글로벌 시황·정책 뉴스 — 한국 주식시장 영향권
+_NEWSAPI_MARKET_QUERIES = [
+    "Korea tariff trade US China",
+    "Korea defense semiconductor export",
+    "Fed interest rate FOMC Korea market",
+    "China stimulus economy Korea",
+]
+
+# 신뢰할 수 있는 금융·뉴스 도메인 우선
+_NEWSAPI_PREFERRED_DOMAINS = (
+    "reuters.com,bloomberg.com,ft.com,wsj.com,"
+    "cnbc.com,marketwatch.com,investing.com"
+)
+
+
+def _newsapi_search(query: str, page_size: int = 5) -> list[dict]:
+    """
+    NewsAPI.org /v2/everything 호출.
+    rule #90 계열: 수집·파싱만. 분석 없음.
+    """
+    from datetime import date, timedelta
+    params = {
+        "apiKey":     config.NEWSAPI_ORG_KEY,
+        "q":          query,
+        "language":   "en",
+        "sortBy":     "publishedAt",       # 실시간 최신순
+        "pageSize":   page_size,
+        "from":       (date.today() - timedelta(days=2)).isoformat(),  # 최근 2일
+        "domains":    _NEWSAPI_PREFERRED_DOMAINS,
+    }
+    resp = requests.get(_NEWSAPI_BASE, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("status") != "ok":
+        raise RuntimeError(f"NewsAPI.org 오류: {data.get('message', data)}")
+
+    return data.get("articles", [])
+
+
+def _collect_newsapi_reports() -> list[dict]:
+    """
+    NewsAPI.org 기반 영문 증권사 리포트·애널리스트 의견 수집.
+    반환 형식은 기존 _collect_reports()와 동일 — morning_report.py에서 통합 사용.
+    """
+    results = []
+    for query in _NEWSAPI_REPORT_QUERIES:
+        try:
+            articles = _newsapi_search(query, page_size=3)
+            for art in articles:
+                title   = art.get("title", "") or ""
+                desc    = art.get("description", "") or ""
+                source  = art.get("source", {}).get("name", "NewsAPI")
+                url     = art.get("url", "")
+                text    = title + " " + desc
+
+                results.append({
+                    "증권사": source,
+                    "종목명": _extract_english_stock(title),
+                    "액션":   _extract_english_action(text),
+                    "내용":   title[:120],
+                    "신뢰도": "NewsAPI.org",
+                    "출처":   url,
+                })
+        except Exception as e:
+            logger.warning(f"[news/newsapi] 리포트 쿼리 실패 '{query}': {e}")
+
+    # 중복 제목 제거
+    seen = set()
+    unique = []
+    for r in results:
+        key = r["내용"][:60]
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    return unique[:10]
+
+
+def _collect_newsapi_global_market() -> list[dict]:
+    """
+    NewsAPI.org 기반 글로벌 시황·정책 뉴스 수집.
+    반환 형식은 기존 _collect_policy_news()와 동일.
+    """
+    results = []
+    for query in _NEWSAPI_MARKET_QUERIES:
+        try:
+            articles = _newsapi_search(query, page_size=3)
+            for art in articles:
+                title   = art.get("title", "") or ""
+                desc    = art.get("description", "") or ""
+                source  = art.get("source", {}).get("name", "NewsAPI")
+                url     = art.get("url", "")
+                pub     = art.get("publishedAt", "")[:16].replace("T", " ")  # 2025-01-01 09:30
+
+                results.append({
+                    "제목": f"[{source}] {title[:100]}",
+                    "내용": (desc or title)[:150],
+                    "출처": url,
+                    "발행": pub,
+                    "신뢰도": "NewsAPI.org",
+                })
+        except Exception as e:
+            logger.warning(f"[news/newsapi] 글로벌 시황 쿼리 실패 '{query}': {e}")
+
+    # 중복 제거 + 최신순 정렬
+    seen = set()
+    unique = []
+    for r in sorted(results, key=lambda x: x.get("발행", ""), reverse=True):
+        key = r["제목"][:60]
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    return unique[:8]
+
+
+def _extract_english_stock(title: str) -> str:
+    """영문 기사 제목에서 종목명 추출 — 대문자 회사명 패턴."""
+    import re
+    # "Samsung Electronics", "SK Hynix", "LG Energy" 같은 패턴
+    m = re.search(r"\b(Samsung|SK Hynix|LG|Hyundai|POSCO|Kakao|Naver|Kia|Lotte)\b[^\s,]* ?[A-Z][a-z]*", title)
+    if m:
+        return m.group(0).strip()
+    # 단독 대문자 약어 (KOSPI, KOSDAQ 제외)
+    m = re.search(r"\b([A-Z]{2,6})\b(?! ?(?:ETF|Index|KOSPI|KOSDAQ|FOMC|Fed|GDP|CPI|USD|EUR))", title)
+    if m:
+        return m.group(1)
+    return "글로벌종목"
+
+
+def _extract_english_action(text: str) -> str:
+    """영문 기사에서 애널리스트 액션 추출."""
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in ["upgrade", "raised target", "price target raise", "buy rating"]):
+        return "목표가상향"
+    if any(kw in text_lower for kw in ["initiate", "initiates coverage", "new buy", "outperform"]):
+        return "신규매수"
+    if any(kw in text_lower for kw in ["downgrade", "sell", "underperform", "lower target"]):
+        return "목표가하향"
+    if any(kw in text_lower for kw in ["maintain", "reiterate", "hold rating"]):
+        return "매수유지"
+    return "언급"
+
