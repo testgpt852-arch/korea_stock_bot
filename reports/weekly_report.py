@@ -17,8 +17,8 @@ main.py 스케줄러 → 매주 월요일 08:30 아침봇 직후 run() 호출.
 [ARCHITECTURE 의존성]
 weekly_report → tracking/performance_tracker  (DB 조회)
 weekly_report → tracking/trading_journal      (get_weekly_patterns)  ← v4.3 추가
-weekly_report → notifiers/chart_generator     (주간 성과 차트 PNG)   ← v5.0 추가
-weekly_report → notifiers/telegram_bot        (포맷 + 발송)
+weekly_report → telegram/chart_builder     (주간 성과 차트 PNG)   ← v5.0 추가
+weekly_report → telegram/sender        (포맷 + 발송)
 weekly_report ← main.py  (월요일 08:45 cron)
 
 [절대 금지 규칙 — ARCHITECTURE #18]
@@ -29,7 +29,7 @@ weekly_report ← main.py  (월요일 08:45 cron)
 from utils.logger import logger
 from utils.date_utils import is_market_open, get_today
 import tracking.performance_tracker as performance_tracker
-import notifiers.telegram_bot as telegram_bot
+import telegram.sender as telegram_bot
 
 
 async def run() -> None:
@@ -65,7 +65,7 @@ async def run() -> None:
         chart_buf = None
         if stats.get("trigger_stats") or stats.get("top_picks"):
             try:
-                from notifiers.chart_generator import generate_weekly_performance_chart
+                from telegram.chart_builder import generate_weekly_performance_chart
                 chart_buf = generate_weekly_performance_chart(stats)
                 if chart_buf:
                     logger.info("[weekly] 주간 성과 차트 생성 완료")

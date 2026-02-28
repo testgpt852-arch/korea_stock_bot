@@ -2,6 +2,12 @@
 reports/realtime_alert.py
 장중봇 실행 전담 (09:00 시작 / 15:30 종료)
 
+[v12.0 개편]
+- AI 판단(analyze_spike) 완전 제거 — 숫자 조건 필터만 사용
+- volume_analyzer → intraday_analyzer 모듈명 변경
+- 2차 AI 팔로업 알림 제거 (1차 알림만 발송)
+- 자동매매: AI 판단 없이 등락률·호가강도·can_buy() 규칙으로 직접 진입
+
 [v3.1 방법 B+A 하이브리드]
 - 방법 B: WebSocket 고정 구독 — 아침봇 워치리스트(최대 40종목) 실시간 체결 감시
 - 방법 A: REST 폴링 간격 10초 — 워치리스트 外 신규 테마 종목 커버
@@ -12,39 +18,16 @@ reports/realtime_alert.py
 - WS_ORDERBOOK_ENABLED=true: 체결 20종목 + 호가(H0STASP0) 20종목 (합계 40, 한도 준수)
   → on_orderbook() 콜백: WS 호가 틱으로 REST 호출 없이 즉시 호가 분석
   ⚠️ true 설정 시 체결 커버리지 20종목으로 감소 — 신중히 설정
-
-[호가 분석 알림 기준]
-- 호가강도="약세": 매도 우세 → 알림에 ⚠️ 표시 (급등 지속 불투명)
-- 호가강도="강세": 매수 우세 → 알림에 🔥 표시 (급등 지속 가능성 높음)
-- 호가분석=None:  REST 조회 실패 또는 ORDERBOOK_ENABLED=false → 기존 알림 그대로
-
-[수정이력]
-- v2.5:   KIS REST 폴링 방식
-- v3.1:   WebSocket 루프 추가 (_ws_loop)
-- v3.4:   Phase 4 — 자동매매 연동
-- v4.0:   호가 분석 통합 (_ws_loop, _dispatch_alerts)
-          REST 급등 감지 후 호가 분석 결과를 1차 알림에 포함
-          WS_ORDERBOOK_ENABLED=true 시 on_orderbook() 콜백 활성화
-- v4.2:   Phase 2 — Trailing Stop & 매매전략 고도화 연동
-          _send_ai_followup():
-            1) watchlist_state.get_market_env() 로 시장 환경 주입
-            2) analyze_spike()에 market_env 전달 → 오닐 전략 분기
-            3) can_buy()에 ai_result + market_env 전달 → R/R 필터 적용
-          _handle_trade_signal():
-            1) stop_loss_price / market_env 파라미터 추가
-            2) open_position()에 stop_loss_price + market_env 전달 → Trailing Stop 초기화
 """
 
 import asyncio
 from utils.logger import logger
 from utils.state_manager import can_alert, mark_alerted, reset as reset_alerts
 import utils.watchlist_state    as watchlist_state
-import analyzers.volume_analyzer as volume_analyzer
-import analyzers.ai_analyzer     as ai_analyzer
-import tracking.ai_context        as ai_context
-import notifiers.telegram_bot    as telegram_bot
+import analyzers.intraday_analyzer as intraday_analyzer
+import telegram.sender    as telegram_bot
 from kis.websocket_client import ws_client
-import tracking.alert_recorder   as alert_recorder
+import tracking.trading_journal  as alert_recorder  # v12.0: alert_recorder → trading_journal 흡수
 import config
 
 _poll_task: asyncio.Task | None = None
@@ -53,7 +36,7 @@ _ws_task:   asyncio.Task | None = None
 
 async def start() -> None:
     global _poll_task, _ws_task
-    logger.info("[realtime] 장중봇 시작 — 방법B+A 하이브리드 (v4.0 호가분석 통합)")
+    logger.info("[realtime] 장중봇 시작 — 방법B+A 하이브리드 (v12.0 AI없음, 숫자조건만)")
 
     _poll_task = asyncio.create_task(_poll_loop())
     logger.info(
@@ -102,7 +85,7 @@ async def stop() -> None:
     _ws_task = None
     await ws_client.disconnect()
 
-    volume_analyzer.reset()
+    intraday_analyzer.reset()
     reset_alerts()
     watchlist_state.clear()
     logger.info("[realtime] 장중봇 종료 완료 ✅")
@@ -121,7 +104,7 @@ async def _poll_loop() -> None:
 
             # poll_all_markets() 내부에서 급등 종목에 한해 호가 분석 자동 수행 (v4.0)
             results = await asyncio.get_event_loop().run_in_executor(
-                None, volume_analyzer.poll_all_markets
+                None, intraday_analyzer.poll_all_markets
             )
 
             logger.info(f"[realtime] 폴링 사이클 #{cycle} 완료 — 조건충족 {len(results)}종목")
@@ -203,7 +186,7 @@ async def _ws_loop(watchlist: dict) -> None:
                 return
 
             tick["종목명"] = info["종목명"]
-            result = volume_analyzer.analyze_ws_tick(tick, info["전일거래량"])
+            result = intraday_analyzer.analyze_ws_tick(tick, info["전일거래량"])
             if not result:
                 return
 
@@ -212,12 +195,12 @@ async def _ws_loop(watchlist: dict) -> None:
             mark_alerted(ticker)
 
             if config.WS_ORDERBOOK_ENABLED and ticker in _ob_cache:
-                result = volume_analyzer.analyze_ws_orderbook_tick(_ob_cache[ticker], result)
+                result = intraday_analyzer.analyze_ws_orderbook_tick(_ob_cache[ticker], result)
             elif config.ORDERBOOK_ENABLED and not config.WS_ORDERBOOK_ENABLED:
                 loop = asyncio.get_event_loop()
                 from kis.rest_client import get_orderbook
                 ob_data = await loop.run_in_executor(None, lambda: get_orderbook(ticker))
-                호가분석 = volume_analyzer.analyze_orderbook(ob_data)
+                호가분석 = intraday_analyzer.analyze_orderbook(ob_data)
                 result = {**result, "호가분석": 호가분석}
 
             logger.info(
@@ -247,69 +230,32 @@ async def _dispatch_alerts(analysis: dict) -> None:
     msg_1st = telegram_bot.format_realtime_alert(analysis)
     await telegram_bot.send_async(msg_1st)
     logger.info(
-        f"[realtime] 1차 알림: {analysis['종목명']}  "
+        f"[realtime] 알림: {analysis['종목명']}  "
         f"+{analysis['등락률']:.1f}%  소스:{analysis.get('감지소스','?')}  "
         f"호가:{analysis.get('호가분석', {}).get('호가강도', '-') if analysis.get('호가분석') else '-'}"
     )
     alert_recorder.record_alert(analysis)
-    asyncio.create_task(_send_ai_followup(analysis))
+
+    # [v12.0] AI 팔로업 제거 — 자동매매는 숫자 조건만으로 직접 판단
+    if config.AUTO_TRADE_ENABLED:
+        asyncio.create_task(_handle_trade_signal_numeric(analysis))
 
 
-async def _send_ai_followup(analysis: dict) -> None:
+async def _handle_trade_signal_numeric(analysis: dict) -> None:
     """
-    [v4.2] 시장 환경 주입 추가:
-    - analyze_spike()에 market_env 전달 → 오닐 R/R 분기 전략 자동 적용
-    - can_buy()에 ai_result + market_env 전달 → R/R 필터 실행
-    - _handle_trade_signal()에 stop_loss_price + market_env 전달 → Trailing Stop 초기화
+    [v12.0] AI 제거 후 숫자 조건 기반 자동매매 진입 판단.
+    analyze_spike() 호출 없이 등락률·호가강도 필터만 적용.
     """
     try:
-        loop   = asyncio.get_event_loop()
-        ticker = analysis.get("종목코드", "")
-        source = analysis.get("감지소스", "unknown")
-
-        # [v4.2] 아침봇이 설정한 시장 환경 조회
-        market_env = watchlist_state.get_market_env()
-
-        ctx = await loop.run_in_executor(
-            None, lambda: ai_context.build_spike_context(ticker, source)
-        )
-        # [v4.2] market_env 주입 → 오닐 강세/약세 분기
-        ai_result = ai_analyzer.analyze_spike(
-            analysis, ai_context=ctx, market_env=market_env
-        )
-        msg_2nd = telegram_bot.format_realtime_alert_ai(analysis, ai_result)
-        await telegram_bot.send_async(msg_2nd)
-        logger.info(
-            f"[realtime] 2차 AI 알림: {analysis['종목명']} "
-            f"→ {ai_result.get('판단', 'N/A')}  "
-            f"R/R:{ai_result.get('risk_reward_ratio', 'N/A')}  "
-            f"시장:{market_env or '미지정'}"
-        )
-
-        if not config.AUTO_TRADE_ENABLED:
-            return
-
-        # [v6.0 이슈① 명문화] AI 실패/불명확 시 fail-safe = "차단"
-        # analyze_spike() 예외 시 판단=""(빈 문자열) 또는 "판단불가" 반환
-        # verdict != "진짜급등" → return (자동매매 차단)
-        # 즉: Gemma API 장기 다운 시 모든 AI 판단 함수가 "판단불가" 반환
-        # → 자동매매 진입 불가 (안전 방향으로 fail-safe)
-        verdict = ai_result.get("판단", "")
-        if verdict != "진짜급등":
-            if verdict in ("판단불가", ""):
-                logger.info(
-                    f"[realtime] AI 판단불가/실패 → 자동매매 차단 (fail-safe=차단). "
-                    f"종목: {analysis.get('종목명', ticker)}"
-                )
-            return
-
+        ticker      = analysis.get("종목코드", "")
         change_rate = analysis.get("등락률", 0.0)
+
         if change_rate < config.MIN_ENTRY_CHANGE:
             return
         if change_rate > config.MAX_ENTRY_CHANGE:
             return
 
-        # 호가강도가 "약세"이면 자동매매 진입 보류
+        # 호가강도가 "약세"이면 진입 보류
         호가분석 = analysis.get("호가분석")
         if 호가분석 and 호가분석.get("호가강도") == "약세":
             logger.info(
@@ -318,28 +264,27 @@ async def _send_ai_followup(analysis: dict) -> None:
             )
             return
 
-        name = analysis["종목명"]
+        name       = analysis["종목명"]
+        source     = analysis.get("감지소스", "unknown")
+        market_env = watchlist_state.get_market_env()
+        sector     = watchlist_state.get_sector(ticker)
 
         from traders import position_manager
-        # [v4.2] can_buy()에 ai_result + market_env 전달 → R/R 필터 적용
+        loop = asyncio.get_event_loop()
         ok, reason = await loop.run_in_executor(
             None,
-            lambda: position_manager.can_buy(ticker, ai_result=ai_result, market_env=market_env)
+            lambda: position_manager.can_buy(ticker, market_env=market_env)
         )
         if not ok:
             logger.info(f"[realtime] 자동매매 진입 불가 — {name}: {reason}")
             return
 
-        # [v4.2] stop_loss_price + market_env 전달
-        stop_loss_price = ai_result.get("stop_loss")
-        # [v4.4] sector 조회 (아침봇 섹터 맵 기반)
-        sector = watchlist_state.get_sector(ticker)
         asyncio.create_task(
-            _handle_trade_signal(ticker, name, source, stop_loss_price, market_env, sector)
+            _handle_trade_signal(ticker, name, source, None, market_env, sector)
         )
 
     except Exception as e:
-        logger.warning(f"[realtime] 2차 AI 알림 실패: {e}")
+        logger.warning(f"[realtime] 숫자조건 자동매매 판단 실패: {e}")
 
 
 async def _handle_trade_signal(

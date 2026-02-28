@@ -12,17 +12,18 @@ main.py
           기존: datetime.now() → Railway 서버 UTC 반환 → 장중 판단 오류
           수정: datetime.now(ZoneInfo("Asia/Seoul")) → KST 기준 정확한 판단
 - v3.3:  Phase 3 — DB init_db() 기동 시 1회 호출
-         18:45 수익률 추적 배치(performance_tracker.run_batch) 스케줄 추가
          매주 월요일 아침봇 직후 주간 성과 리포트(weekly_report) 발송 스케줄 추가
+- v12.0: 마감봇(18:30) 폐지 — closing_report.py 삭제
+         수익률배치 18:45 → 15:45 (장 마감 직후)로 이동
 - v3.4:  Phase 4 — 자동매매 강제청산 스케줄 추가
          14:50 run_force_close() — 미청산 포지션 전부 시장가 매도
          AUTO_TRADE_ENABLED=false 시 스케줄 등록 자체를 건너뜀
 - v6.0:  [이슈④] TRADING_MODE=REAL 전환 안전장치 — 시작 시 감지 + 텔레그램 확인 + 5분 딜레이
          [5번/P1] 기억 압축 배치 — 매주 일요일 03:30 스케줄 추가
 - v10.0: [Phase 2] 지정학 뉴스 수집 배치 추가
-         06:00 run_geopolitics_collect() — 아침봇(08:30) 전 지정학 이벤트 수집
-         장중 geopolitics 결과는 공유 변수(_geopolitics_cache)에 캐시
-         GEOPOLITICS_ENABLED=false 시 스케줄 등록 건너뜀
+- v12.0 Step 7: data_collector.run() 도입
+         06:00 data_collector.run() — 모든 수집기 asyncio.gather() 병렬 실행
+         기존 run_geopolitics_collect() / run_event_calendar_collect() 제거
 """
 
 import asyncio
@@ -37,10 +38,11 @@ KST = timezone(timedelta(hours=9))   # UTC+9, 외부 패키지 불필요
 # 장중봇 중복 실행 방지 플래그
 _realtime_started = False
 
-# v10.0 Phase 2: 지정학 이벤트 캐시 (아침봇·마감봇이 읽는 공유 변수)
-# rule #90 준수: 수집은 geopolitics_collector, 분석은 geopolitics_analyzer
-_geopolitics_cache:     list[dict] = []
-_event_calendar_cache:  list[dict] = []   # [v10.0 Phase 4-1] 기업 이벤트 캘린더 캐시
+# v12.0 Step 7: data_collector가 모든 캐시를 관리
+# _geopolitics_cache / _event_calendar_cache는 data_collector.get_cache() 경유로 접근
+# 하위 호환용 별칭 (data_collector.run() 전 빈 값)
+_geopolitics_cache:    list[dict] = []
+_event_calendar_cache: list[dict] = []
 
 
 async def run_morning_bot():
@@ -49,26 +51,31 @@ async def run_morning_bot():
         logger.info("[main] 휴장일 — 아침봇 건너뜀")
         return
     from reports.morning_report import run
-    # [v10.0 Phase 2 버그픽스] GEOPOLITICS_ENABLED=true 시 캐시 주입
-    # _geopolitics_cache: geopolitics_analyzer.analyze() 반환값 (list[dict])
-    # 비어있으면 morning_report에서 신호6 생략 (하위 호환)
-    geo_cache   = _geopolitics_cache if _geopolitics_cache else []
-    # [v10.7 이슈 #4] _event_calendar_cache 주입 — 06:30 수집 결과를 재수집 없이 활용
-    event_cache = _event_calendar_cache if _event_calendar_cache else []
-    await run(geopolitics_data=geo_cache, event_cache=event_cache)
+    from collectors.data_collector import get_cache, is_fresh
 
+    # [v12.0 Step 7] data_collector 캐시 활용
+    # 06:00 data_collector.run() 완료 후 캐시 신선도 확인
+    dc = get_cache()
+    if not is_fresh(max_age_minutes=180):
+        logger.warning("[main] data_collector 캐시 없음 또는 오래됨 — 아침봇이 직접 수집")
+        dc = {}
 
-async def run_closing_bot():
-    """18:30 마감봇"""
-    if not is_market_open(get_today()):
-        logger.info("[main] 휴장일 — 마감봇 건너뜀")
-        return
-    from reports.closing_report import run
-    await run()
+    await run(
+        geopolitics_raw  = dc.get("news_global_rss",           []),
+        event_cache      = dc.get("event_calendar",             []),
+        sector_etf_data  = dc.get("sector_etf_data",           []) or None,
+        short_data       = dc.get("short_data",                 []) or None,
+        # [v12.0 Step 7] 마감강도·거래량급증·자금집중을 morning에도 전달
+        # (data_collector가 06:00에 수집한 전날 데이터 재활용)
+        closing_strength_result   = dc.get("closing_strength_result",   []) or None,
+        volume_surge_result       = dc.get("volume_surge_result",       []) or None,
+        fund_concentration_result = dc.get("fund_concentration_result", []) or None,
+    )
+
 
 
 async def run_performance_batch():
-    """18:45 수익률 추적 배치 (Phase 3, v3.3)"""
+    """15:45 수익률 추적 배치 — 장 마감 직후 (Phase 3, v3.3 / v12.0: 18:45→15:45 이동)"""
     if not is_market_open(get_today()):
         logger.info("[main] 휴장일 — 수익률 배치 건너뜀")
         return
@@ -104,7 +111,7 @@ async def run_principles_extraction():
             f"업데이트:{result['updated']} 총:{result['total_principles']}개"
         )
         # 텔레그램 요약 알림
-        from notifiers import telegram_bot
+        from telegram import sender as telegram_bot
         if result["total_principles"] > 0:
             msg = (
                 f"🧠 매매 원칙 DB 업데이트\n"
@@ -130,7 +137,7 @@ async def run_force_close():
 
     loop = asyncio.get_event_loop()
     from traders.position_manager import force_close_all
-    import notifiers.telegram_bot as telegram_bot
+    import telegram.sender as telegram_bot
 
     closed_list = await loop.run_in_executor(None, force_close_all)
     if not closed_list:
@@ -160,7 +167,7 @@ async def run_final_close():
 
     loop = asyncio.get_event_loop()
     from traders.position_manager import final_close_all
-    import notifiers.telegram_bot as telegram_bot
+    import telegram.sender as telegram_bot
 
     closed_list = await loop.run_in_executor(None, final_close_all)
     if not closed_list:
@@ -240,7 +247,7 @@ async def _check_real_mode_safety():
         return
 
     delay = config.REAL_MODE_CONFIRM_DELAY_SEC
-    from notifiers import telegram_bot
+    from telegram import sender as telegram_bot
 
     warning_msg = (
         f"⚠️ <b>REAL 실전 자동매매 전환 감지</b>\n"
@@ -289,7 +296,7 @@ async def run_memory_compression():
             f"Layer2→3: {result.get('compressed_l2', 0)}건, "
             f"정리: {result.get('cleaned', 0)}건"
         )
-        from notifiers import telegram_bot
+        from telegram import sender as telegram_bot
         if result.get('compressed_l1', 0) + result.get('compressed_l2', 0) > 0:
             msg = (
                 f"🗜️ 기억 압축 완료\n"
@@ -302,69 +309,26 @@ async def run_memory_compression():
         logger.error(f"[main] 기억 압축 실패 (비치명적): {e}")
 
 
-async def run_event_calendar_collect():
+async def run_data_collector():
     """
-    [v10.0 Phase 4-1] 06:30 실행 — 아침봇(08:30) 전 기업 이벤트 캘린더 수집.
-    EVENT_CALENDAR_ENABLED=true 시에만 실행 (기본 false).
-    rule #90 계열 준수: 수집 → event_impact_analyzer 분석 → _event_cache 저장.
-    소스 실패 시 비치명적 — 아침봇 blocking 금지.
+    [v12.0 Step 7] 06:00 단일 실행 — 모든 수집기 병렬 실행.
+    기존 run_geopolitics_collect() + run_event_calendar_collect() 대체.
+
+    수집 결과는 data_collector._cache에 저장.
+    아침봇(08:30)은 data_collector.get_cache()로 캐시를 읽어 사용.
+    수집 실패 시 비치명적 — 아침봇이 직접 재수집 fallback.
     """
-    if not config.EVENT_CALENDAR_ENABLED:
-        return
-    global _event_calendar_cache
     try:
-        from collectors import event_calendar_collector
-        from analyzers  import event_impact_analyzer
-
-        logger.info("[main] 기업 이벤트 캘린더 수집 시작")
-        raw_events = await asyncio.get_event_loop().run_in_executor(
-            None, event_calendar_collector.collect
+        from collectors.data_collector import run as dc_run
+        cache = await dc_run()
+        logger.info(
+            f"[main] data_collector 완료 — "
+            f"총점:{cache.get('score_summary',{}).get('total_score',0)} | "
+            f"성공:{sum(cache.get('success_flags',{}).values())}/"
+            f"{len(cache.get('success_flags',{}))}"
         )
-        logger.info(f"[main] 기업 이벤트 수집 완료 — {len(raw_events)}건")
-
-        if not raw_events:
-            logger.info("[main] 수집된 기업 이벤트 없음 — 캐시 유지")
-            return
-
-        analyzed = await asyncio.get_event_loop().run_in_executor(
-            None, event_impact_analyzer.analyze, raw_events
-        )
-        _event_calendar_cache = analyzed
-        logger.info(f"[main] 기업 이벤트 분석 캐시 갱신 완료 — {len(analyzed)}건")
-
     except Exception as e:
-        logger.error(f"[main] 기업 이벤트 수집/분석 실패 (비치명적): {e}")
-
-
-async def run_geopolitics_collect():
-    """
-    [v10.0 Phase 2] 06:00 + 장중 GEOPOLITICS_POLL_MIN 간격 실행.
-    rule #90 준수: 수집(geopolitics_collector) → 분석(geopolitics_analyzer) → 캐시 저장.
-    소스 실패 시 비치명적 — 아침봇 blocking 절대 금지.
-    """
-    global _geopolitics_cache
-    try:
-        from collectors import geopolitics_collector
-        from analyzers import geopolitics_analyzer
-
-        logger.info("[main] 지정학 이벤트 수집 시작")
-        raw_news = await asyncio.get_event_loop().run_in_executor(
-            None, geopolitics_collector.collect
-        )
-        logger.info(f"[main] 지정학 뉴스 수집 완료 — {len(raw_news)}건")
-
-        if not raw_news:
-            logger.info("[main] 수집된 지정학 뉴스 없음 — 캐시 유지")
-            return
-
-        analyzed = await asyncio.get_event_loop().run_in_executor(
-            None, geopolitics_analyzer.analyze, raw_news
-        )
-        _geopolitics_cache = analyzed
-        logger.info(f"[main] 지정학 분석 캐시 갱신 완료 — {len(analyzed)}건")
-
-    except Exception as e:
-        logger.error(f"[main] 지정학 수집/분석 실패 (비치명적): {e}")
+        logger.error(f"[main] data_collector 실패 (비치명적): {e}")
 
 
 async def main():
@@ -379,24 +343,11 @@ async def main():
 
     scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
-    # 아침봇
-    # v10.0 Phase 2: 지정학 수집 (아침봇 전 선행 실행)
-    if config.GEOPOLITICS_ENABLED:
-        scheduler.add_job(run_geopolitics_collect, "cron", hour=6, minute=0, id="geopolitics_morning")
-        scheduler.add_job(
-            run_geopolitics_collect, "cron",
-            minute=f"*/{config.GEOPOLITICS_POLL_MIN}",
-            hour="9-15",
-            id="geopolitics_intraday",
-        )
-        logger.info(
-            f"[main] 지정학 수집 스케줄 등록 — 06:00 + 장중 {config.GEOPOLITICS_POLL_MIN}분 간격"
-        )
-
-    # v10.0 Phase 4-1: 기업 이벤트 캘린더 수집 (아침봇 전 06:30)
-    if config.EVENT_CALENDAR_ENABLED:
-        scheduler.add_job(run_event_calendar_collect, "cron", hour=6, minute=30, id="event_calendar_morning")
-        logger.info("[main] 기업 이벤트 캘린더 수집 스케줄 등록 — 06:30")
+    # ── 06:00 data_collector — 모든 수집기 병렬 실행 (v12.0 Step 7) ──────────────
+    # 기존: run_geopolitics_collect(06:00) + run_event_calendar_collect(06:30) 분리
+    # 변경: data_collector.run() 단일 스케줄로 통합
+    scheduler.add_job(run_data_collector, "cron", hour=6, minute=0, id="data_collector")
+    logger.info("[main] data_collector 스케줄 등록 — 06:00 (병렬 수집)")
 
     scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot_1")
     scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=30, id="morning_bot_2")
@@ -405,11 +356,8 @@ async def main():
     scheduler.add_job(start_realtime_bot, "cron", hour=9,  minute=0,  id="rt_start")
     scheduler.add_job(stop_realtime_bot,  "cron", hour=15, minute=30, id="rt_stop")
 
-    # 마감봇
-    scheduler.add_job(run_closing_bot, "cron", hour=18, minute=30, id="closing_bot")
-
-    # Phase 3: 수익률 추적 배치 (v3.3)
-    scheduler.add_job(run_performance_batch, "cron", hour=18, minute=45, id="perf_batch")
+    # Phase 3: 수익률 추적 배치 — 15:45 장 마감 직후 (v12.0: 18:45→15:45 이동)
+    scheduler.add_job(run_performance_batch, "cron", hour=15, minute=45, id="perf_batch")
 
     # Phase 3: 주간 성과 리포트 — 매주 월요일 08:45 (아침봇 완료 후) (v3.3)
     # [v10.7 이슈 #7] day_of_week='mon' 추가 — 기존에 누락되어 매일 실행됨
@@ -437,11 +385,11 @@ async def main():
 
     scheduler.start()
     logger.info("스케줄 등록 완료")
-    logger.info("  아침봇: 매일 08:30 / 07:30")
+    logger.info("  data_collector: 매일 06:00 (병렬 수집 — Step 7)")
+    logger.info("  아침봇: 매일 07:30 / 08:30")
     logger.info("  장중봇: 매일 09:00~15:30 (KIS REST 폴링)")
-    logger.info("  마감봇: 매일 18:30")
-    logger.info("  수익률배치: 매일 18:45 (Phase 3)")
-    logger.info("  주간리포트: 매주 월요일 08:45 (Phase 3)")
+    logger.info("  수익률배치: 매일 15:45 (장 마감 직후)")
+    logger.info("  주간리포트: 매주 월요일 08:45")
     if config.AUTO_TRADE_ENABLED:
         logger.info(
             f"  강제청산: 매일 14:50 (Phase 4, 모드: {config.TRADING_MODE}) ✅ 활성"
@@ -452,7 +400,7 @@ async def main():
     # [v5.0 Phase 5] 텔레그램 인터랙티브 명령어 핸들러 백그라운드 시작
     # /status, /holdings, /principles 명령어 처리
     try:
-        from notifiers.telegram_interactive import start_interactive_handler
+        from telegram.commands import start_interactive_handler
         asyncio.create_task(start_interactive_handler())
         logger.info("  인터랙티브 핸들러: /status /holdings /principles (Phase 5) ✅")
     except Exception as e:

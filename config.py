@@ -380,5 +380,5 @@ DATALAB_ENABLED = (
 # DataLab 급등 감지 임계값 (최근 3일 평균 / 7일 평균 비율)
 DATALAB_SPIKE_THRESHOLD   = float(os.environ.get("DATALAB_SPIKE_THRESHOLD", "1.5"))
 
-# 신호8 최소 강도 (이 값 이상인 기업 이벤트만 oracle에 전달)
+# 신호8 최소 강도 (이 값 이상인 기업 이벤트만 _pick_stocks()에 전달)
 EVENT_SIGNAL_MIN_STRENGTH = int(os.environ.get("EVENT_SIGNAL_MIN_STRENGTH", "3"))
