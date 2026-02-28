@@ -1,8 +1,23 @@
 """
 analyzers/signal_analyzer.py
-신호 1~5 통합 판단 전담
+신호 1~8 통합 판단 전담
 - dart, market, news, price 수집 결과를 받아 신호별로 정리
 - 수집/발송 로직 없음
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODULE CONTRACT (파이프라인 연결 검증용 — 수정 금지)
+  CALLED BY : reports/morning_report.py → signal_analyzer.analyze()
+              reports/closing_report.py → signal_analyzer.analyze()
+  INPUT     : dart_data(list), market_data(dict), news_data(dict),
+              price_data(dict), geopolitics_data(list|None),
+              sector_flow_data(dict|None), event_impact_data(list|None),
+              datalab_data(list|None)
+  OUTPUT    : {"signals": list, "market_summary": str, "commodities": dict,
+               "volatility": dict, "report_picks": list, "policy_summary": str,
+               "sector_scores": dict, "event_scores": dict}
+              ※ sector_scores/event_scores → oracle_analyzer.analyze() 경유 전달 필수
+  CALLS     : (없음 — 순수 계산)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [수정이력]
 - v2.1: 신호4 추가, 섹터 ETF 신호 추가, price_data 파라미터 추가

@@ -1,152 +1,240 @@
-# 🇰🇷 한국주식 봇 — 아키텍처 설계 문서 v10.0
+# 🇰🇷 한국주식 봇 — 아키텍처 설계 문서 v10.8
 
-> **📋 감사 이력**: 2026-02-27, Claude Sonnet 4.6 전수 감사 완료 (v9.1-AUDIT-CLEAN 기준)
-> 원본(v9.0)에서 발견된 오류 7종(할루시네이션 1, 자기모순 3, 퇴행규칙 3)을 교정 완료.
-> **이 문서는 v9.1-CLEAN을 기준으로 v10.0 Phase 1·2·3·4 개편 내용을 반영한 최신 아키텍처입니다.**
->
-> **📋 v10.7 버그픽스**: 2026-02-28, Claude Sonnet 4.6
-> v10.0 대규모 개편 이후 발견된 버그 13건 전수 수정 (버그분석보고서 기반):
->
-> 🔴 CRITICAL 수정 (2건):
-> - 이슈 #1: geopolitics_analyzer — 구 SDK(google-generativeai) → 신 SDK(google-genai) 교체
->   `import google.generativeai as genai` → `from google import genai / from google.genai import types`
->   AI 보완(_enhance_with_ai) 완전 불가 상태 복구. Primary 모델 gemini-3-flash-preview(미확인) → gemini-2.5-flash로 변경.
-> - 이슈 #2: volume_analyzer — 출력 dict에 `"현재가"` 키 추가 (3개소: 신규진입/기존감지/갭상승)
->   ai_analyzer._build_spike_prompt() 프롬프트에 `현재가: {current_price:,}원` 삽입
->   dead variable current_price 정상 활용. AI target_price/stop_loss가 실제 주가 기반으로 생성됨.
->
-> 🟠 MAJOR 수정 (4건):
-> - 이슈 #3: morning_report — `determine_and_set_market_env()` 호출을 ②-c로 이동 (oracle 호출 전 선행)
->   기존 ⑨단계에서 ②-c(가격수집 직후)로 이동 → 당일 R/R 기준이 oracle_analyzer에 즉시 반영됨
-> - 이슈 #4: main.py → morning_report.run() 간 `event_cache` 파라미터 주입 연결
->   `_event_calendar_cache` 캐시를 `morning_report.run(event_cache=...)` 으로 전달
->   morning_report ②-b 블록에서 캐시 있으면 재수집 없이 사용 (geopolitics_data와 동일 패턴)
-> - 이슈 #5: closing_report — oracle_analyzer.analyze()에 `event_scores` 파라미터 추가
->   마감봇에 기업 이벤트 캘린더 수집(4-d) + event_scores 구성 블록 신규 추가
->   아침봇/마감봇 비대칭 구조 해소. EVENT_CALENDAR_ENABLED=false 시 event_scores={} (하위 호환)
-> - 이슈 #6: theme_history.init_table() Dead Function 제거 + DDL을 db_schema로 이관
->   `db_schema._migrate_v100()` 신규 추가 (theme_event_history 테이블 idempotent 생성)
->   `theme_history.record_closing()` 내 인라인 CREATE TABLE 제거 → rule #18 준수
->   `theme_history.init_table()` 함수 삭제
->
-> 🟡 MINOR 수정 (4건):
-> - 이슈 #7: main.py — weekly_report 스케줄에 `day_of_week='mon'` 추가 (매일→매주 월요일)
-> - 이슈 #8: morning_report docstring — 실행 시각 `07:40` → `07:30` 수정
-> - 이슈 #9: closing_report — 마감봇 완료 후 `determine_and_set_market_env(price_result)` 호출 추가(4-e)
->   다음날 장중봇/수익률 배치가 당일 마감 기준 최신 시장 환경으로 시작 가능
-> - 이슈 #10: morning_report — sector_scores 비어있을 때 명시적 로그 출력 (rule #92 비대칭 구조 인지)
->
-> ⚪ INFO 정리 (3건):
-> - 이슈 #11: config.py — `VOLUME_SPIKE_RATIO` deprecated 상수 제거 (Dead Code 완전 삭제)
-> - 이슈 #12: config.py docstring — `JOURNAL_MAX_CONTEXT_TOKENS` → `JOURNAL_MAX_CONTEXT_CHARS` 수정
-> - 이슈 #13: telegram_bot — format_closing_report_full() 내 인라인 accuracy_stats 블록
->   → format_accuracy_stats() 호출로 교체 (재사용성 확보: /status·주간리포트에서도 활용 가능)
->
-> 기타 수정:
-> - 5-1: geopolitics_analyzer Primary 모델 gemini-3-flash-preview → gemini-2.5-flash (이슈 #1과 통합)
-> - 5-2: config.py docstring에서 COPPER_KR_STOCKS 수정이력 삭제 (v2.3 삭제 상수 잔재 제거)
-> - signal_analyzer.py event_scores 구성부 변수명 버그 수정: `ev.get(ticker,)` → `ev.get("ticker","")`,
->   `ev.get(strength, 3)` → `ev.get("strength", 3)` (런타임 TypeError 잠재 버그 수정)
->
-> **📋 v10.6 Phase 4-2 구현**: 2026-02-28, Claude Sonnet 4.6
-> 완전 분석 리포트 포맷 + 테마 정확도 학습 DB 구현:
-> ① tracking/accuracy_tracker.py 신규 — 예측 테마 vs 실제 급등 테마 비교 누적
->    record_prediction() (아침/마감봇 oracle 예측 기록)
->    record_actual() (마감봇 실제 급등 기록 + 정확도 계산)
->    get_signal_weights() (oracle_analyzer 가중치 로드)
->    get_accuracy_stats() (텔레그램 리포트용 통계)
-> ② tracking/db_schema.py 확장 — theme_accuracy + signal_weights 테이블 추가
->    _migrate_v106() 마이그레이션 추가 (기존 DB 하위 호환)
-> ③ notifiers/telegram_bot.py 확장 — FULL_REPORT_FORMAT=true 전용 포맷 추가
->    format_morning_report_full() — 4단계 구조 아침봇 리포트
->    format_closing_report_full() — 4단계 구조 마감봇 리포트 (accuracy_stats 포함)
->    format_accuracy_stats() — 신호 가중치 현황 독립 포맷
->    기존 format_morning_report() / format_closing_report() 하위 호환 유지
-> ④ reports/morning_report.py 확장 — FULL_REPORT_FORMAT 분기, accuracy_tracker.record_prediction()
-> ⑤ reports/closing_report.py 확장 — FULL_REPORT_FORMAT 분기, accuracy_tracker.record_actual()
->    5-b 단계 추가: 실제 급등 기록 → 정확도 계산 → accuracy_stats 보고서에 포함
-> ⑥ analyzers/oracle_analyzer.py 확장 — signal_weights 로드·적용
->    _load_signal_weights() 추가 (accuracy_tracker 의존, 비치명적 폴백)
->    _score_theme() 파라미터 signal_weights 추가
->    신호 강도 보너스에 학습 가중치 반영 (지수이동평균 방식, 범위 0.4~1.5)
-> ⑦ config.py — FULL_REPORT_FORMAT 기존 상수 활용 (신규 상수 불필요)
-> ⑧ 절대 금지 규칙 #100 추가 (accuracy_tracker 역할 경계)
->
-> **📋 v10.5 Phase 4-1 구현**: 2026-02-28, Claude Sonnet 4.6
-> 기업 이벤트 캘린더 + 네이버 DataLab 트렌드 신호 체계 구현:
-> ① collectors/event_calendar_collector.py 신규 — DART 공시 API로 IR/실적/주주총회/배당 일정 수집 (EVENT_CALENDAR_ENABLED=false 기본)
-> ② analyzers/event_impact_analyzer.py 신규 — 기업 이벤트 → 수급 모멘텀 예측 (D-1~D-5 범위, 신호8 강도 3~5)
-> ③ collectors/news_collector.py 확장 — 네이버 DataLab 검색어 트렌드 API 추가 (_collect_datalab_trends, DATALAB_ENABLED=false 기본)
->    반환값에 "datalab_trends" 키 추가 (빈 리스트 하위 호환)
-> ④ analyzers/signal_analyzer.py 확장 — event_impact_data/datalab_data 파라미터 추가
->    신호8 통합(_analyze_event_impact), DataLab 트렌드 신호(_analyze_datalab_trends)
->    반환값에 "event_scores" 키 추가 → oracle_analyzer 경유 전달
-> ⑤ analyzers/oracle_analyzer.py 확장 — event_scores 파라미터 추가
->    _score_theme()에 기업이벤트 보너스 +5~+15 반영 (D-1: +15, D-2: +10, D-3+: +5)
-> ⑥ reports/morning_report.py 확장 — 기업 이벤트 캘린더 수집·분석 파이프라인 연동
->    event_impact_signals → signal_analyzer(신호8) → oracle_analyzer(event_scores)
-> ⑦ main.py 확장 — _event_calendar_cache 전역 변수, run_event_calendar_collect() 추가
->    EVENT_CALENDAR_ENABLED=true 시 06:30 수집 스케줄 등록
-> ⑧ config.py 확장 — Phase 4-1 상수 6종 추가 (EVENT_CALENDAR_ENABLED, DATALAB_ENABLED 등)
->
-> **📋 v10.4 Phase 3 구현**: 2026-02-27, Claude Sonnet 4.6
-> 섹터 수급 분석 + 공매도 잔고 신호 체계 전면 구현:
-> ① collectors/sector_etf_collector.py 신규 — KODEX 섹터 ETF 11종 거래량 Z-스코어 수집 (pykrx, 마감봇 전용, rule #92)
-> ② collectors/short_interest_collector.py 신규 — 공매도 잔고 급감 종목 수집 (pykrx, SHORT_INTEREST_ENABLED=false 기본)
-> ③ analyzers/sector_flow_analyzer.py 신규 — ETF Z-스코어 + 공매도 클러스터 → 신호7 방향성 점수화 (rule #92)
-> ④ tracking/theme_history.py 신규 — 이벤트→급등 섹터 이력 DB 누적 (rule #95, 마감봇 완료 후 자동 기록)
-> ⑤ analyzers/signal_analyzer.py 확장 — sector_flow_data 파라미터 추가, 신호7 통합, sector_scores 반환
-> ⑥ analyzers/oracle_analyzer.py 확장 — sector_scores 파라미터 추가, _score_theme() 신호7 +10~+20 반영
-> ⑦ reports/closing_report.py 확장 — Phase 3 수집→분석→신호7→oracle→theme_history 파이프라인 완성
->
-> **📋 v10.3 Gemini 모델 서비스종료 대응**: 2026-02-27, Claude Sonnet 4.6
-> Google Gemini 서비스 종료 확인에 따른 전면 교체:
-> ① analyzers/geopolitics_analyzer.py: `_MODELS` → `["gemini-3-flash-preview", "gemini-2.5-flash"]`
-> ② geopolitics_analyzer.py 모델 주석: Primary gemini-2.0-flash → gemini-3-flash-preview
-> ③ ARCHITECTURE_v10.md 전체 6곳 gemini-2.0-flash → gemini-3-flash-preview 교정
-> ④ AI 모델 표 금지 목록 확장: gemini-2.0-flash / gemini-2.0-flash-lite / gemini-1.5 전체 시리즈
->
-> **⛔ Google Gemini 서비스 종료 확정 목록 (절대 사용 금지)**:
-> gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
-> gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
->
-> **📋 v10.2 아키텍처 감사·코드버그픽스**: 2026-02-27, Claude Sonnet 4.6
-> Phase 1·2 구현 완료 후 코드↔아키텍처 전수 대조 감사. 발견 오류 3종:
-> ① [치명] main.py `run_morning_bot()`이 `_geopolitics_cache`를 `morning_report.run()`에 전달 안 함
->    → Phase 2 지정학 파이프라인 완전 단절 (신호6·글로벌 트리거 섹션 미표시)
->    → 수정: main.py `await run(geopolitics_data=geo_cache)` / morning_report.py 시그니처·흐름 연결
-> ② [당시 판단 오류 → v10.3에서 재교정] gemini-3-flash-preview를 비존재 모델로 잘못 판단
->    → 실제로는 gemini-2.0-flash가 서비스 종료된 모델 / gemini-3-flash-preview가 현행 올바른 모델
->    → v10.3에서 코드·아키텍처 전면 재교정 완료
-> ③ [반환값 불일치] `geopolitics_analyzer.analyze()` 반환값 key 불일치
->    → 실제 코드: `event_summary_kr` / `affected_sectors` / `event_type` 로 교정
->    → 신호6 구조: 영어 key → 한국어 key 형식으로 교정
->
-> **📋 v10.1 버그픽스·모델교체**: 2026-02-27, Claude Sonnet 4.6
-> ① main.py run_geopolitics_collect 함수 누락 추가 (NameError 수정)
-> ② geopolitics_analyzer 전용 모델: gemini-1.5-flash(서비스종료) → gemini-3-flash-preview(Primary) + gemini-2.5-flash(Fallback)
->
-> **📋 v10.0 개편 이력**: 2026-02-27, Claude Sonnet 4.6 대규모 개편 구현 + 아키텍처 반영
-> Phase 1 (구현 완료): 철강/비철 ETF 수집 확장(XME·SLX·TIO=F·ALI=F), 지정학 맵 사전, 신호2 확장, oracle 철강/방산 부스팅
-> Phase 2 (구현 완료): 지정학 수집·분석 엔진 신규, main.py 06:00 스케줄·장중 폴링, 신호6 통합, telegram 글로벌 트리거 섹션
->
-> | 구분 | 원본 v9.0 | 교정 v9.1 |
-> |------|-----------|-----------|
-> | 중복 번호 | #71 × 5개 | #67~#71로 분리 |
-> | 자기모순 | #58 vs #71(PnL 반환값) | #58 삭제, #68로 통일 |
-> | 값 불일치 | POLL_INTERVAL_SEC 3가지 혼용 | 실제값 10초로 통일 |
-> | 값 불일치 | WS_WATCHLIST_MAX 50/40 혼용 | 실제값 40으로 통일 |
-> | 오삽입 | rule #34 내 rule #31 내용 혼입 | 제거 |
-> | 퇴행 규칙 | #43 장중 시장환경 동결 | 극단장세(±2%) 예외 추가 |
-> | 퇴행 규칙 | #66 AI 다운 시 전면 차단 | 8%+ 명확 급등 시 rule-based 허용 |
-> | 구조 맹점 | #19 oracle 픽 성과 미기록 | 아침/마감봇 oracle 기록 경로 추가 |
+---
+
+## ⚡ HOW TO USE THIS DOCUMENT (AI 필독)
+
+> **이 문서를 읽는 AI에게:**
+> 1. **`## 📌 현재 기준 진실 (CURRENT TRUTH)`** 섹션이 모든 것의 최우선 기준이다.
+>    changelog나 하단 히스토리와 충돌 시 이 섹션이 항상 이긴다.
+> 2. **개편/수정 후 반드시 `CURRENT TRUTH` 섹션만 업데이트**하라.
+>    changelog는 하단 `## 📜 변경 이력` 섹션에 한 줄 추가로 끝낸다.
+> 3. **`MODULE CONTRACT` 블록은 절대 수정하지 마라.**
+>    파이프라인 변경 시 CONTRACT를 먼저 업데이트하고, 코드를 맞춰라.
+> 4. **`## 🔴 절대 금지 규칙` 목록은 추가만 가능, 삭제·수정 금지.**
+
+---
+
+## 📌 현재 기준 진실 (CURRENT TRUTH)
+> **이 섹션이 유일한 진실이다. 하단 changelog와 충돌 시 이 섹션 우선.**
+> **개편 완료 후 이 섹션을 갱신하고, changelog에 한 줄만 추가하라.**
+
+### 현재 버전: v10.8 (2026-02-28)
+
+### ✅ 검증된 Gemini AI 모델 목록 (이 목록 외 모델 사용 절대 금지)
+
+| 모델 ID | 용도 | 상태 |
+|---------|------|------|
+| `gemini-3-flash-preview` | geopolitics_analyzer Primary | ✅ 실 운영 확인 완료 |
+| `gemini-2.5-flash` | geopolitics_analyzer Fallback / ai_analyzer | ✅ 지원 |
+| `gemini-2.5-flash-lite` | 경량 보조 | ✅ 지원 |
+
+> ⚠️ **AI 주의사항**: `gemini-3-flash-preview`는 실 운영 확인된 유효한 모델이다.
+> 버그 또는 미확인 모델로 언급하거나 제거하는 것은 **명백한 할루시네이션**이다.
+> 이 모델을 제거하거나 경고하는 코드·문서 변경을 절대 생성하지 마라.
+
+**절대 사용 금지 (Google 서비스 종료 확정):**
+```
+gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
+gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
+google-generativeai (구 SDK) — google-genai (신 SDK)로만 사용
+```
+
+### 현재 파일 구조 및 역할
+
+```
+korea_stock_bot/
+├── main.py                          ← 스케줄러 + 전역 캐시 (_geopolitics_cache, _event_calendar_cache)
+├── config.py                        ← 모든 상수/환경변수 단일 관리
+├── requirements.txt                 ← vulture>=2.11 포함 (배포 전 dead code 감지용)
+│
+├── collectors/                      ← 수집 전담 (AI/DB/텔레그램 금지)
+│   ├── dart_collector.py
+│   ├── event_calendar_collector.py  ← [v10.5] EVENT_CALENDAR_ENABLED=false 기본
+│   ├── geopolitics_collector.py     ← [v10.0 Phase 2]
+│   ├── market_collector.py
+│   ├── news_collector.py            ← datalab_trends 포함 (DATALAB_ENABLED=false 기본)
+│   ├── price_collector.py
+│   ├── sector_etf_collector.py      ← [v10.4 Phase 3] 마감봇 전용 (rule #92)
+│   └── short_interest_collector.py  ← [v10.4] SHORT_INTEREST_ENABLED=false 기본
+│
+├── analyzers/                       ← 분석 전담 (수집/발송/DB 금지)
+│   ├── ai_analyzer.py               ← Gemini 2.5-flash, DART·거래량 AI 분석
+│   ├── event_impact_analyzer.py     ← [v10.5] 기업이벤트 → 수급 모멘텀
+│   ├── geopolitics_analyzer.py      ← [v10.0] gemini-3-flash-preview Primary
+│   ├── oracle_analyzer.py           ← 쪽집게 픽 엔진 (_verify_integration 내장)
+│   ├── sector_flow_analyzer.py      ← [v10.4] 섹터ETF Z-스코어 (rule #92)
+│   ├── signal_analyzer.py           ← 신호1~8 통합
+│   ├── theme_analyzer.py
+│   └── volume_analyzer.py / closing_strength.py / volume_flat.py / fund_inflow_analyzer.py
+│
+├── reports/                         ← 보고서 조립 전담
+│   ├── morning_report.py            ← 08:30 (07:30 preview)
+│   ├── closing_report.py            ← 18:30
+│   ├── realtime_alert.py            ← 장중 실시간
+│   └── weekly_report.py             ← 매주 월요일 08:45
+│
+├── notifiers/
+│   ├── telegram_bot.py              ← 포맷·발송 전담
+│   ├── telegram_interactive.py      ← /status 등 대화형 명령
+│   └── chart_generator.py
+│
+├── tracking/                        ← DB 기록 전담
+│   ├── accuracy_tracker.py          ← [v10.6] 예측 정확도 누적
+│   ├── db_schema.py                 ← 마이그레이션 단일 관리 (theme_history DDL 포함)
+│   ├── theme_history.py             ← [v10.4] 이벤트→급등 이력
+│   └── ai_context.py / trading_journal.py / memory_compressor.py / ...
+│
+├── traders/
+│   └── position_manager.py
+│
+├── kis/                             ← KIS API 전담 (websocket + REST + order)
+│
+└── utils/
+    ├── geopolitics_map.py           ← 이벤트 키워드 → 섹터 매핑 사전
+    ├── watchlist_state.py           ← 시장 환경 상태 관리
+    └── date_utils.py / logger.py / rate_limiter.py / state_manager.py
+```
+
+### 현재 스케줄 (main.py 기준)
+
+| 시각 | 함수 | 설명 |
+|------|------|------|
+| 06:00 | `run_geopolitics_collect()` | 지정학 뉴스 수집 → `_geopolitics_cache` |
+| 06:30 | `run_event_calendar_collect()` | 기업이벤트 수집 → `_event_calendar_cache` |
+| 07:30 | `run_morning_bot()` | 아침봇 preview |
+| 08:30 | `run_morning_bot()` | 아침봇 본 실행 |
+| 08:45 | `run_weekly_report()` | **매주 월요일만** (day_of_week='mon') |
+| 09:00~15:30 | 장중봇 | WebSocket + REST 폴링 |
+| 18:30 | `run_closing_bot()` | 마감봇 |
+| 일요일 03:00 | memory compressor | |
+| 일요일 03:30 | principles extractor | |
+
+### 현재 주요 파이프라인 흐름
+
+```
+[아침봇]
+geopolitics_cache ──┐
+event_cache ────────┼→ morning_report.run()
+                    │    ├→ price_collector → price_data
+                    │    ├→ signal_analyzer(geopolitics_data, event_impact_data)
+                    │    │    └→ signals, sector_scores, event_scores
+                    │    ├→ determine_and_set_market_env() ← ②-c 단계 (oracle 전 필수)
+                    │    └→ oracle_analyzer.analyze(
+                    │            price_by_name, signals, market_env,
+                    │            sector_scores, event_scores)
+                    │         └→ _verify_integration() 자동 검증
+
+[마감봇]
+closing_report.run()
+    ├→ price_collector + T5/T6/T3 수집
+    ├→ sector_etf_collector (rule #92: 마감봇 전용)
+    ├→ signal_analyzer(sector_flow_data, event_scores)
+    ├→ oracle_analyzer.analyze(..., sector_scores, event_scores)
+    │    └→ _verify_integration() 자동 검증
+    ├→ accuracy_tracker.record_actual()  ← 실제 급등 기록
+    ├→ theme_history.record_closing()
+    └→ determine_and_set_market_env()  ← 4-e: 다음날 기준 환경 재설정
+```
+
+---
+
+## 🛡️ 3계층 버그 방어 시스템 (v10.8 신규)
+
+### 계층1: 파이프라인 연결 자동 검증 (_verify_integration)
+
+아래 모듈에 `_verify_integration()` 함수가 내장되어 있음.
+파이프라인 연결 누락 시 `IntegrationError` 발생 → 즉시 식별 가능.
+
+| 모듈 | 검증 항목 |
+|------|-----------|
+| `oracle_analyzer.py` | price_by_name 타입, signals 타입, market_env 유효값 (이슈 #2·#3 재발 방지) |
+
+### 계층2: 신규 모듈/기능 추가 시 의무 체크리스트
+
+**개편 작업 시 이 체크리스트를 먼저 확인하고 코드를 작성하라.**
+
+```
+A. 호출 연결 검증
+   [ ] 이 함수/모듈을 실제로 호출하는 곳이 존재하는가?
+   [ ] main.py 또는 스케줄러에 등록되어 있는가?
+   [ ] 초기화 함수(init_table 등)가 앱 시작 시 호출되는가?
+
+B. 데이터 파이프라인 검증
+   [ ] 필요한 파라미터가 모두 전달되고 있는가?
+   [ ] 캐시 데이터 주입이 필요한 경우 주입 코드가 있는가?
+   [ ] 반환값을 받아서 사용하는 곳이 있는가?
+
+C. 의존성 검증
+   [ ] 사용하는 외부 패키지가 requirements.txt에 있는가?
+   [ ] google-generativeai(구 SDK) import가 없는가?
+   [ ] AI 모델 ID가 위 '검증된 Gemini AI 모델 목록'에 있는가?
+
+D. 문서 동기화
+   [ ] ARCHITECTURE_v10.md의 CURRENT TRUTH 섹션을 업데이트했는가?
+   [ ] 스케줄 시간이 문서와 코드에서 동일한가?
+   [ ] 새 모듈에 MODULE CONTRACT 블록이 있는가?
+```
+
+### 계층3: 배포 전 Dead Code 자동 감지
+
+```bash
+# 배포 전 또는 대규모 개편 후 반드시 실행
+vulture . --min-confidence 80
+
+# 정상 결과: 0건 또는 의도적 dead code (whitelist 처리)
+# 경고: 함수가 발견되면 체크리스트 B 항목 재확인
+```
+
+---
+
+## 📋 MODULE CONTRACT 규격 (신규 모듈 작성 시 필수)
+
+```python
+"""
+analyzers/모듈명.py
+한줄 설명
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODULE CONTRACT (파이프라인 연결 검증용 — 수정 금지)
+  CALLED BY : 이 모듈을 호출하는 파일 → 함수명()
+  INPUT     : 파라미터명: 타입  ← 어디서 오는지 출처 명시
+  OUTPUT    : 반환값 타입 → 어디로 전달되는지 목적지 명시
+  CALLS     : 이 모듈이 의존하는 외부 서비스/모듈
+  AI MODEL  : 사용하는 AI 모델 (해당 시)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+```
+
+> **CONTRACT 규칙**: 파이프라인 변경 시 CONTRACT 먼저 수정 → 코드 맞춤 (반대 순서 금지)
+
+---
+
+## 📜 변경 이력 (신규 항목은 상단에 추가)
+
+| 버전 | 날짜 | 요약 |
+|------|------|------|
+| v10.8 | 2026-02-28 | gemini-3-flash-preview Primary 복원 (v10.7이 잘못 제거), 3계층 방어 시스템 추가, MODULE CONTRACT 도입, ARCHITECTURE 구조 개편 (CURRENT TRUTH 섹션) |
+| v10.7 | 2026-02-28 | 버그 13건 전수 수정 (이슈 #1~#13): SDK 교체, 현재가 키, oracle 파라미터 연결, 캐시 주입, event_scores, theme_history DDL 이관, 스케줄 수정 등 |
+| v10.6 | 2026-02-28 | Phase 4-2: accuracy_tracker 신규, 완전 분석 리포트 포맷, 신호 가중치 학습 |
+| v10.5 | 2026-02-28 | Phase 4-1: 기업 이벤트 캘린더, DataLab 트렌드, 신호8 추가 |
+| v10.4 | 2026-02-27 | Phase 3: 섹터ETF 수급, 공매도 잔고, theme_history, 신호7 추가 |
+| v10.3 | 2026-02-27 | Gemini 모델 정책 교정: gemini-3-flash-preview Primary 확정 |
+| v10.2 | 2026-02-27 | 아키텍처 감사, geopolitics 파이프라인 단절 수정 |
+| v10.1 | 2026-02-27 | run_geopolitics_collect 누락 추가, 모델 교체 |
+| v10.0 | 2026-02-27 | 대규모 개편: Phase 1·2 (지정학/섹터ETF), 신호6, 신규 모듈 다수 |
+| v9.1  | 2026-02-27 | 전수 감사: 할루시네이션 1, 자기모순 3, 퇴행규칙 3 교정 |
 
 ---
 
 > **이 문서의 목적**: AI에게 유지보수 요청 시 반드시 이 문서를 첨부할 것.
 > AI가 전체 구조를 파악하고 엉뚱한 파일을 건드리는 할루시네이션을 방지한다.
+>
+> **업데이트 원칙**: 개편 후 `## 📌 현재 기준 진실` 섹션만 수정 + `## 📜 변경 이력` 한 줄 추가.
+> 아래 기술 세부 내용(규칙, 흐름도 등)은 변경된 부분만 수정한다.
 
 ---
+
 
 ## 🚨 KIS WebSocket 운영 규칙 (위반 시 IP·앱키 차단)
 

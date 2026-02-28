@@ -11,3 +11,4 @@ yfinance
 google-genai
 websockets
 matplotlib
+vulture>=2.11          # Dead code 자동 탐지 — 배포 전 실행: vulture . --min-confidence 80

@@ -2,6 +2,18 @@
 analyzers/oracle_analyzer.py
 쪽집게 분석기 — 테마/수급/공시/T5·T6·T3 종합 → 내일 주도 테마 + 종목 픽 + 진입조건
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODULE CONTRACT (파이프라인 연결 검증용 — 수정 금지)
+  CALLED BY : reports/morning_report.py  → oracle_analyzer.analyze()
+              reports/closing_report.py  → oracle_analyzer.analyze()
+  INPUT     : theme_map(list), price_by_name(dict), institutional(list),
+              ai_dart_results(list), signals(list),
+              market_env(str), sector_scores(dict|None), event_scores(dict|None)
+              ※ closing_report 전용: closing_strength, volume_flat, fund_inflow
+  OUTPUT    : {"picks": list, "top_theme": str, "rr_threshold": float, ...}
+  CALLS     : tracking/accuracy_tracker.py (비치명적)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 [ARCHITECTURE 의존성]
 oracle_analyzer ← closing_report (price_result, theme_result, T5/T6/T3 결과 전달)
 oracle_analyzer ← morning_report (price_result, theme_result, 공시 AI 결과 전달)
@@ -106,6 +118,52 @@ def _load_signal_weights() -> dict[str, float]:
 # Public API
 # ══════════════════════════════════════════════════════════════════════
 
+# ── 파이프라인 연결 검증 (3계층 방어 — 계층1) ─────────────────────────
+class IntegrationError(RuntimeError):
+    """파이프라인 필수 파라미터 누락 시 발생. 호출처 연결 코드를 확인할 것."""
+
+def _verify_integration(
+    price_by_name: dict,
+    signals: list,
+    market_env: str,
+) -> None:
+    """
+    oracle_analyzer.analyze() 호출 전 파이프라인 연결 검증.
+
+    누락 발견 즉시 IntegrationError 발생 → 조용히 잘못된 계산을 하는 대신
+    명확한 오류 메시지로 연결 누락 위치를 즉시 식별할 수 있게 함.
+
+    ※ 이 함수는 analyze() 내부에서 자동 호출됨. 직접 호출 불필요.
+    """
+    errors = []
+
+    # price_by_name 검증 (이슈 #2 재발 방지)
+    if not isinstance(price_by_name, dict):
+        errors.append("price_by_name이 dict가 아님 — price_collector.collect_daily()[\"by_name\"] 전달 필요")
+    elif not price_by_name:
+        # 빈 dict는 경고만 (장 휴일 등 합법적 케이스 존재)
+        logger.warning("[oracle._verify] price_by_name 비어있음 — 픽 생성 불가")
+
+    # signals 검증
+    if not isinstance(signals, list):
+        errors.append("signals가 list가 아님 — signal_result[\"signals\"] 전달 필요")
+
+    # market_env 검증 (이슈 #3 재발 방지)
+    VALID_ENV = {"강세장", "약세장", "횡보", ""}
+    if market_env not in VALID_ENV:
+        errors.append(
+            f"market_env 값 이상: '{market_env}' — "
+            f"watchlist_state.get_market_env() 호출 후 전달 필요 "
+            f"(oracle 호출 전 determine_and_set_market_env() 선행 실행 필수)"
+        )
+
+    if errors:
+        raise IntegrationError(
+            "[oracle._verify_integration] 파이프라인 연결 오류:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+
+
 def analyze(
     theme_map: list,
     price_by_name: dict,
@@ -137,6 +195,13 @@ def analyze(
         쪽집게 분석 결과 dict (규격은 모듈 docstring 참조)
     """
     _empty = _empty_result(market_env)
+
+    # ── 파이프라인 연결 검증 (3계층 방어) ─────────────────────────
+    try:
+        _verify_integration(price_by_name, signals, market_env)
+    except IntegrationError as _ie:
+        logger.error(str(_ie))
+        return _empty  # 검증 실패 시 빈 결과 반환 (비치명적 처리)
 
     try:
         if not theme_map and not signals:

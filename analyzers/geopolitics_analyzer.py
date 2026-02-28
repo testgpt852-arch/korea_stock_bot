@@ -2,6 +2,19 @@
 analyzers/geopolitics_analyzer.py
 지정학 이벤트 → 영향 섹터 맵핑 + AI 분석 전담
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODULE CONTRACT (파이프라인 연결 검증용 — 수정 금지)
+  CALLED BY : analyzers/signal_analyzer.py  → analyze(geopolitics_data=...)
+              (main.py → morning_report.run() → signal_analyzer 경유)
+  INPUT     : raw_news: list[dict]  ← geopolitics_collector.collect() 반환값
+  OUTPUT    : list[dict]  → signal_analyzer.analyze()의 geopolitics_data 파라미터
+              [{"event_type": str, "affected_sectors": list, "impact_direction": str,
+                "confidence": float, "source_url": str, "event_summary_kr": str}]
+  CALLS     : Google AI API (gemini-3-flash-preview Primary / gemini-2.5-flash Fallback)
+  AI MODEL  : gemini-3-flash-preview (Primary, 실 운영 확인 완료)
+              gemini-2.5-flash (Fallback)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 [ARCHITECTURE rule #91 — 절대 금지]
 - KIS API 호출 금지
 - pykrx 호출 금지
@@ -152,17 +165,17 @@ def _enhance_with_ai(
 
     배치 처리: 최대 10건을 하나의 프롬프트로 처리 (AI 호출 횟수 최소화).
 
-    [v10.3 모델 정책 — v10.7 수정] geopolitics_analyzer 전용:
-      Primary  : gemini-2.5-flash        (Google 현행 지원 모델)
-      Fallback : gemini-2.5-flash-lite   (Primary 실패 시 자동 전환)
+    [v10.3 모델 정책 — v10.8 복원] geopolitics_analyzer 전용:
+      Primary  : gemini-3-flash-preview  (Google 현행 최신 모델, 실 운영 확인 완료)
+      Fallback : gemini-2.5-flash        (Primary 실패 시 자동 전환)
       ※ 절대 사용 금지 (Google 서비스 종료):
         gemini-1.5-flash / gemini-1.5-flash-002 / gemini-1.5-pro
         gemini-2.0-flash / gemini-2.0-flash-lite / gemini-2.0-flash-exp
-        gemini-3-flash-preview (미확인 모델 ID — 서비스 중단 위험)
 
     [v10.7 버그픽스] 구 SDK(google-generativeai) → 신 SDK(google-genai) 교체
       변경 전: import google.generativeai as genai / genai.GenerativeModel()
       변경 후: from google import genai / client.models.generate_content()
+    [v10.8 복원] v10.7이 gemini-3-flash-preview를 잘못 제거함 → Primary 복원
     """
     from google import genai as _genai
     from google.genai import types as _types
@@ -205,9 +218,10 @@ def _enhance_with_ai(
 - 섹터명은 다음 중에서 선택: 철강/비철금속, 산업재/방산, 기술/반도체, 에너지/정유, 소재/화학, 바이오/헬스케어, 금융, 조선, 배터리, 자동차부품
 """
 
-    # [v10.7] Primary: gemini-2.5-flash → Fallback: gemini-2.5-flash-lite
-    # gemini-3-flash-preview는 미확인 ID로 제거, 구 SDK 완전 제거
-    _MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    # [v10.8] Primary: gemini-3-flash-preview (실 운영 확인 완료)
+    # Fallback: gemini-2.5-flash (Primary 실패 시 자동 전환)
+    # ※ v10.7이 gemini-3-flash-preview를 잘못 제거 → v10.8에서 복원
+    _MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash"]
 
     for model_name in _MODELS:
         try:
