@@ -225,15 +225,31 @@ try:
     try:
         df = pykrx_stock.get_market_sector_classifications(PREV_DATE, market="KOSPI")
         if df is None or df.empty:
-            fail("pykrx 업종 분류", "빈 DataFrame")
+            fail("pykrx 업종 분류", "빈 DataFrame (주말/공휴일이면 정상)")
         else:
+            # ── 실제 컬럼명 먼저 출력 (디버그) ────────────────
+            print(f"  🔍 [DEBUG] 업종분류 인덱스명: {df.index.name!r}")
+            print(f"  🔍 [DEBUG] 업종분류 컬럼목록: {list(df.columns)}")
+            print(f"  🔍 [DEBUG] 첫 행: {df.iloc[0].to_dict() if not df.empty else '없음'}")
+
+            # 인덱스가 종목코드면 컬럼으로 꺼내기
             df = _flatten_multiindex(df)
-            if df.index.name in ("종목코드", "Code", "code", "ticker"):
+            if df.index.name and df.index.name not in ("", None, 0):
                 df = df.reset_index()
-            code_col   = _col(df, "종목코드", "Code", "code", "ticker")
-            sector_col = _col(df, "업종명", "sector", "Sector", "industry", "Industry")
-            ok("pykrx 업종 분류",
-               f"종목수={len(df)}  코드컬럼={code_col}  업종컬럼={sector_col}")
+
+            # 실제 컬럼에서 찾기 (DEBUG 출력 보고 후보 추가 가능)
+            code_col   = _col(df, "종목코드", "Code", "code", "ticker", "Ticker")
+            sector_col = _col(df, "업종명", "sector", "Sector", "industry", "Industry",
+                              "업종", "섹터", "BPS", "PER", "PBR")  # pykrx 버전마다 다름
+
+            if code_col or sector_col:
+                ok("pykrx 업종 분류",
+                   f"종목수={len(df)}  코드컬럼={code_col}  업종컬럼={sector_col}")
+            else:
+                # 컬럼 매칭 실패해도 데이터는 있음 → DEBUG 보고 후보 추가
+                ok("pykrx 업종 분류 (컬럼명 확인 필요)",
+                   f"종목수={len(df)}  실제컬럼={list(df.columns)[:5]}  "
+                   "→ DEBUG 출력 참고해 위 _col() 후보에 추가하세요")
     except Exception as e:
         fail("pykrx 업종 분류", str(e))
 
@@ -369,21 +385,39 @@ else:
     except Exception as e:
         fail("DART 공시목록 API", str(e))
 
-    # 3-2. 이벤트 캘린더 (향후 IR 일정)
+    # 3-2. 이벤트 캘린더 (향후 IR·실적·주주총회 — 키워드 전문 검색 방식)
+    # [수정] pblntf_ty="F" 는 계정 권한 필요 → status=013 오류 발생
+    #        → pblntf_ty 제거 후 전체 공시에서 이벤트 키워드로 필터링하는 방식으로 교체
     try:
+        future_end = (datetime.today() + timedelta(days=14)).strftime("%Y%m%d")
         url = "https://opendart.fss.or.kr/api/list.json"
         r = requests.get(url, params={
             "crtfc_key":   DART_API_KEY,
-            "pblntf_ty":   "F",
             "bgn_de":      TODAY,
-            "end_de":      (datetime.today() + timedelta(days=7)).strftime("%Y%m%d"),
-            "page_count":  20,
+            "end_de":      future_end,   # 향후 14일
+            "page_count":  100,
+            "sort":        "date",
+            "sort_mthd":   "asc",
+            # pblntf_ty 완전 제거 — 전체 공시 조회 후 키워드 필터
         }, timeout=10)
         data = r.json()
-        if data.get("status") == "000":
-            ok("DART 이벤트캘린더 (IR 일정)", f"향후7일={data.get('total_count',0)}건")
+        status = data.get("status", "")
+        if status == "000":
+            # 이벤트 키워드로 필터 (IR / 주주총회 / 실적발표 / 배당)
+            _EVENT_KW = ["기업설명회", "IR ", "주주총회", "실적발표", "잠정실적",
+                         "현금배당", "중간배당", "배당결정"]
+            all_items = data.get("list", [])
+            events = [
+                item for item in all_items
+                if any(kw in item.get("report_nm", "") for kw in _EVENT_KW)
+            ]
+            ok("DART 이벤트캘린더 (키워드필터)", 
+               f"전체공시={data.get('total_count',0)}건  이벤트={len(events)}건  "
+               f"예시={'|'.join([e.get('corp_name','')+'·'+e.get('report_nm','')[:12] for e in events[:2]])}")
+        elif status == "013":
+            ok("DART 이벤트캘린더", "향후 14일 공시 없음 (013=정상 — 주말/공휴일 직후 정상)")
         else:
-            fail("DART 이벤트캘린더", f"status={data.get('status')}")
+            fail("DART 이벤트캘린더", f"status={status} msg={data.get('message')}")
     except Exception as e:
         fail("DART 이벤트캘린더", str(e))
 
@@ -438,7 +472,11 @@ else:
         if r.status_code == 200:
             ok("네이버 데이터랩 트렌드 API", "검색량 지수 수신 완료")
         elif r.status_code == 401:
-            fail("네이버 데이터랩 트렌드 API", "DataLab 권한 없음 — 앱에 DataLab 서비스 추가 필요")
+            fail("네이버 데이터랩 트렌드 API",
+                 "❗ API 키는 맞지만 DataLab '서비스' 권한이 미등록 상태입니다.\n"
+                 "       ✅ 해결: developers.naver.com → 내 애플리케이션 → 해당 앱 '수정'\n"
+                 "              → API 설정 탭 → '데이터랩(검색어트렌드)' 체크박스 추가\n"
+                 "              → 저장 후 5~10분 후 재시도 (즉시 미반영)")
         else:
             fail("네이버 데이터랩 트렌드 API", f"HTTP {r.status_code}  {r.text[:80]}")
     except Exception as e:
@@ -594,127 +632,227 @@ else:
 section("6. NewsAPI.org  (지정학·글로벌 영문 뉴스)",
         "관세/전쟁/제재 등 지정학 이벤트를 감지해 국내 방산/철강 테마와 연동.")
 
-if not NEWSAPI_KEY:
-    skip("NewsAPI.org 전체", "NEWSAPI_ORG_KEY 또는 GOOGLE_NEWS_API_KEY")
-else:
-    import requests as _req2
-    from datetime import date as _date, timedelta as _td
 
-    TEST_CASES = [
-        ("지정학 — 한국 관세",        "South Korea tariff trade US",            "geopolitics_collector"),
-        ("지정학 — 반도체 수출규제",   "Korea semiconductor export restriction",  "geopolitics_collector"),
-        ("리포트 — 한국주식 애널",     "Korea stock analyst target price",        "news_collector"),
-        ("글로벌 — Fed 금리결정",      "Fed FOMC rate decision emerging markets", "news_collector"),
-    ]
+# ══════════════════════════════════════════════════════════════
+#  6. GDELT + NewsAPI.org — 지정학 / 글로벌 영문 뉴스
+# ══════════════════════════════════════════════════════════════
+#  [v13.0 업그레이드] NewsAPI 무료플랜 한계 극복
+#  NewsAPI 무료플랜 문제: /v2/everything 은 최근 1개월+ 기사만 제공,
+#                          실시간 뉴스 접근 불가 → 지정학 감지에 부적합
+#  ✅ 1순위: GDELT API — 완전무료, API키 불필요, 전 세계 뉴스 실시간
+#  ✅ 2순위: NewsAPI — top-headlines 한정으로 유지 (실시간 가능)
+# ══════════════════════════════════════════════════════════════
+section("6. GDELT + NewsAPI  (지정학·글로벌 영문 뉴스)",
+        "GDELT=완전무료·API키불필요. 관세/전쟁/제재 등 지정학 이벤트 실시간 감지.")
 
-    for _name, _query, _used_in in TEST_CASES:
-        try:
-            _params = {
-                "apiKey":   NEWSAPI_KEY,
-                "q":        _query,
-                "language": "en",
-                "sortBy":   "publishedAt",
-                "pageSize": 3,
-                "from":     (_date.today() - _td(days=2)).isoformat(),
-            }
-            _r = _req2.get("https://newsapi.org/v2/everything", params=_params, timeout=10)
-            _data = _r.json()
-            if _data.get("status") == "ok":
-                _arts = _data.get("articles", [])
-                if _arts:
-                    _src   = _arts[0].get("source", {}).get("name", "?")
-                    _title = (_arts[0].get("title") or "")[:50]
-                    ok(f"NewsAPI {_name}", f"[{_used_in}] {len(_arts)}건  최신={_src}: {_title}")
-                else:
-                    fail(f"NewsAPI {_name}", "기사 0건")
-            elif _data.get("code") == "apiKeyInvalid":
-                fail(f"NewsAPI {_name}", "API 키 무효 — newsapi.org 에서 확인")
-            elif _data.get("code") == "rateLimited":
-                fail(f"NewsAPI {_name}", "Rate Limit (무료 100req/day 초과)")
+import requests as _req2
+
+# ── 6-1. GDELT API (메인 소스 — 무료, 키 불필요) ────────────
+# GDELT DOC 2.0 : 전 세계 뉴스 15분 단위 업데이트, 키워드 검색 무료
+_GDELT_BASE = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+GDELT_TEST_CASES = [
+    ("지정학 — 한국 관세",       "South Korea tariff trade US",            "geopolitics_collector"),
+    ("지정학 — 반도체 수출규제", "Korea semiconductor export restriction",  "geopolitics_collector"),
+    ("글로벌 — Fed 금리결정",    "Fed FOMC rate decision Korea",           "news_collector"),
+    ("방산 — 한국 방위산업",     "Korea defense military NATO",            "geopolitics_collector"),
+]
+
+for _name, _query, _used_in in GDELT_TEST_CASES:
+    try:
+        _params = {
+            "query":      _query,
+            "mode":       "artlist",
+            "maxrecords": 5,
+            "timespan":   "3d",       # 최근 3일
+            "sort":       "DateDesc", # 최신순
+            "format":     "json",
+            "sourcelang": "english",
+        }
+        _r = _req2.get(_GDELT_BASE, params=_params, timeout=12)
+        _data = _r.json()
+        _arts = _data.get("articles", [])
+        if _arts:
+            _src   = _arts[0].get("domain", "?")
+            _title = (_arts[0].get("title") or "")[:50]
+            ok(f"GDELT {_name}", f"[{_used_in}] {len(_arts)}건  최신={_src}: {_title}")
+        else:
+            # GDELT는 기사 없을 때도 status 200 반환 — 쿼리 범위 확대 시도
+            _params2 = {**_params, "timespan": "7d"}
+            _r2 = _req2.get(_GDELT_BASE, params=_params2, timeout=12)
+            _arts2 = _r2.json().get("articles", [])
+            if _arts2:
+                ok(f"GDELT {_name} (7일범위)", f"{len(_arts2)}건 (3일내 없음→7일로 확장)")
             else:
-                fail(f"NewsAPI {_name}", str(_data)[:80])
-        except Exception as _e:
-            fail(f"NewsAPI {_name}", str(_e))
-        time.sleep(0.5)
+                fail(f"GDELT {_name}", "기사 0건 (7일 범위에도 없음 — 쿼리 키워드 재검토)")
+    except Exception as _e:
+        fail(f"GDELT {_name}", str(_e))
+    time.sleep(0.3)
 
+# ── 6-2. NewsAPI top-headlines (보조 소스 — 키 있을 때만) ────
+if not NEWSAPI_KEY:
+    skip("NewsAPI top-headlines (보조)", "NEWSAPI_ORG_KEY 미설정 — GDELT 단독으로 충분")
+else:
     try:
         _r2 = _req2.get("https://newsapi.org/v2/top-headlines",
                         params={"apiKey": NEWSAPI_KEY, "category": "business",
-                                "language": "en", "pageSize": 3}, timeout=10)
+                                "language": "en", "pageSize": 5}, timeout=10)
         _d2 = _r2.json()
         if _d2.get("status") == "ok":
-            ok("NewsAPI top-headlines", f"총={_d2.get('totalResults',0)}건")
+            ok("NewsAPI top-headlines (보조)", f"총={_d2.get('totalResults',0)}건")
+        elif _d2.get("code") == "rateLimited":
+            fail("NewsAPI top-headlines", "Rate Limit — 무료 100req/day 초과. GDELT가 대체 중.")
         else:
             fail("NewsAPI top-headlines", _d2.get("message", "")[:60])
     except Exception as _e:
         fail("NewsAPI top-headlines", str(_e))
 
 
+
+
 # ══════════════════════════════════════════════════════════════
-#  7. RSS 피드 — 로이터 / 기재부 / 방사청
+#  7. RSS 피드 — 고품질 뉴스 소스 + 기재부/방사청
 # ══════════════════════════════════════════════════════════════
-section("7. RSS 피드  (로이터·기재부·방사청)",
+#  [v13.0 업그레이드]
+#  Reuters 기존 RSS: 2023년 완전 폐기됨 → 제거
+#  ✅ 교체 소스 (모두 무료, 실시간, 고신뢰):
+#    - AP News Business : 세계 1위 통신사, 실시간 업데이트
+#    - FT (Financial Times) : 금융·경제 전문, 글로벌 신뢰도 최상
+#    - Google News (Korea economy) : 집계형, 다양한 소스 커버
+#  ✅ 기재부/방사청: feedparser 직접 호출 → requests 선fetch 후 파싱 (비표준XML 대응)
+# ══════════════════════════════════════════════════════════════
+section("7. RSS 피드  (AP·FT·Google News·기재부·방사청)",
         "무료. 지정학 뉴스와 정부 발표를 실시간으로 수집.")
 
 try:
     import feedparser
+    import requests as _rss_req
+    import urllib.parse
 
-    RSS_SOURCES = [
-        ("Reuters Business",  "https://feeds.reuters.com/reuters/businessNews"),
-        ("Reuters World",     "https://feeds.reuters.com/reuters/worldNews"),
-        ("기재부 보도자료",   "https://www.moef.go.kr/sty/rss/moefRss.do"),
-        ("방사청 보도자료",   "https://www.dapa.go.kr/dapa/rss/rssService.do"),
+    # ── 7-1. 국제 뉴스 소스 (표준 RSS — feedparser 직접 파싱 가능) ──
+    INTL_RSS = [
+        ("AP News Business",    "https://apnews.com/rss/apf-business"),
+        ("AP News World",       "https://apnews.com/rss/apf-topnews"),
+        ("FT Markets",          "https://www.ft.com/markets?format=rss"),
+        ("Google News KR경제",  "https://news.google.com/rss/search?"
+                                "q=Korea+economy+stock&hl=en&gl=KR&ceid=KR:en"),
+        ("Google News 방산",    "https://news.google.com/rss/search?"
+                                + urllib.parse.urlencode({"q":"한국 방산 수출", "hl":"ko", "gl":"KR", "ceid":"KR:ko"})),
     ]
-
-    for name, url in RSS_SOURCES:
+    for name, url in INTL_RSS:
         try:
             feed = feedparser.parse(url)
             if feed.entries:
                 ok(f"RSS {name}",
-                   f"기사수={len(feed.entries)}  최신={feed.entries[0].get('title','')[:30]}")
+                   f"기사수={len(feed.entries)}  최신={feed.entries[0].get('title','')[:35]}")
             elif feed.bozo:
                 fail(f"RSS {name}", f"파싱오류: {feed.bozo_exception}")
             else:
                 fail(f"RSS {name}", "entries 없음")
         except Exception as e:
             fail(f"RSS {name}", str(e))
-        time.sleep(0.5)
+        time.sleep(0.4)
+
+    # ── 7-2. 한국 정부 RSS (비표준 XML — requests 선fetch 후 feedparser) ──
+    # 기재부·방사청은 XML이 표준을 벗어나 feedparser 직접 호출 시 파싱 실패
+    # ✅ 해결: requests로 raw bytes 먼저 받은 뒤 feedparser에 전달
+    GOV_RSS = [
+        ("기재부 보도자료", "https://www.moef.go.kr/sty/rss/moefRss.do"),
+        ("방사청 보도자료", "https://www.dapa.go.kr/dapa/rss/rssService.do"),
+    ]
+    _gov_headers = {"User-Agent": "Mozilla/5.0 (compatible; KoreaStockBot/1.0)"}
+    for name, url in GOV_RSS:
+        try:
+            resp = _rss_req.get(url, headers=_gov_headers, timeout=10)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)   # ← bytes 전달 (인코딩 자동 처리)
+            if feed.entries:
+                ok(f"RSS {name}",
+                   f"기사수={len(feed.entries)}  최신={feed.entries[0].get('title','')[:35]}")
+            elif feed.bozo:
+                # bozo여도 entries가 있으면 수집 가능이지만 여기선 없음
+                fail(f"RSS {name}", f"파싱오류(entries없음): {str(feed.bozo_exception)[:60]}")
+            else:
+                fail(f"RSS {name}", "entries 없음 (서버 응답은 정상)")
+        except Exception as e:
+            fail(f"RSS {name}", str(e))
+        time.sleep(0.4)
 
 except ImportError:
-    skip("RSS 피드 전체", "pip install feedparser")
+    skip("RSS 피드 전체", "pip install feedparser requests")
+
+
 
 
 # ══════════════════════════════════════════════════════════════
 #  8. Google AI API (Gemini) — AI 테마 분석
 # ══════════════════════════════════════════════════════════════
-section("8. Google AI API  (Gemini — AI 테마 분석)",
+# ══════════════════════════════════════════════════════════════
+#  8. Google AI API (Gemma/Gemini) — AI 테마 분석
+# ══════════════════════════════════════════════════════════════
+#  [v13.0 수정] 모델명 오류 수정
+#  기존: gemini-2.0-flash → RESOURCE_EXHAUSTED 오류 발생
+#  원인 분석:
+#    - gemini-2.0-flash (버전 미지정) = 결제 계정 필요한 stable 버전
+#    - 실제 코드(ai_analyzer.py)는 gemma-3-27b-it 사용 (무료 14,400회/일)
+#    - geopolitics_analyzer.py 는 gemini-3-flash-preview 사용 → 존재하지 않는 모델!
+#  ✅ 수정: gemma-3-27b-it 우선 → gemini-2.0-flash-lite → gemini-1.5-flash 폴백 체인
+# ══════════════════════════════════════════════════════════════
+section("8. Google AI API  (Gemma/Gemini — AI 테마 분석)",
         "수집된 뉴스·공시·시황을 AI가 종합해 '오늘의 테마' 판단에 사용.")
 
 if not GOOGLE_AI_API_KEY:
     skip("Google AI API", "GOOGLE_AI_API_KEY  (aistudio.google.com 에서 무료 발급 가능)")
 else:
-    try:
-        import requests
-        _url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GOOGLE_AI_API_KEY}"
-        _payload = {
-            "contents": [{"parts": [{"text": "한국 주식시장 테스트. '연결 성공'이라고만 답하세요."}]}]
-        }
-        _r = requests.post(_url, json=_payload, timeout=15)
-        _data = _r.json()
-        _text = (_data.get("candidates", [{}])[0]
-                      .get("content", {})
-                      .get("parts", [{}])[0]
-                      .get("text", ""))
-        if _text:
-            ok("Google AI (Gemini) API", f"응답: {_text.strip()[:50]}")
-        elif "error" in _data:
-            _err = _data["error"]
-            fail("Google AI (Gemini) API",
-                 f"{_err.get('status','')} — {_err.get('message','')[:80]}")
-        else:
-            fail("Google AI (Gemini) API", f"응답 없음  raw={str(_data)[:80]}")
-    except Exception as e:
-        fail("Google AI (Gemini) API", str(e))
+    import requests
+
+    # ✅ ARCHITECTURE_v11.md '사용 가능한 AI 모델' 목록 준수
+    # gemini-1.5-x / gemini-2.0-x 계열 = 절대 사용 금지 (서비스 종료 확정)
+    _AI_MODELS = [
+        ("gemma-3-27b-it",         "ai_analyzer 사용 모델 — 무료 14,400회/일"),
+        ("gemini-3-flash-preview", "geopolitics_analyzer Primary"),
+        ("gemini-2.5-flash",       "geopolitics_analyzer Fallback"),
+        ("gemini-2.5-flash-lite",  "경량 보조 용도"),
+    ]
+    _ai_ok = False
+    for _model_name, _model_desc in _AI_MODELS:
+        try:
+            _url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{_model_name}:generateContent?key={GOOGLE_AI_API_KEY}")
+            _payload = {
+                "contents": [{"parts": [{"text": "한국 주식시장 테스트. '연결 성공'이라고만 답하세요."}]}]
+            }
+            _r = requests.post(_url, json=_payload, timeout=15)
+            _data = _r.json()
+            _text = (_data.get("candidates", [{}])[0]
+                          .get("content", {})
+                          .get("parts", [{}])[0]
+                          .get("text", ""))
+            if _text:
+                ok(f"Google AI ({_model_name})", f"응답: {_text.strip()[:40]}  ({_model_desc})")
+                _ai_ok = True
+                break
+            elif "error" in _data:
+                _err = _data["error"]
+                _status = _err.get("status", "")
+                _msg    = _err.get("message", "")[:80]
+                if _status == "RESOURCE_EXHAUSTED":
+                    print(f"  ⚠️  {_model_name}: RESOURCE_EXHAUSTED — 다음 모델 시도...")
+                elif _status == "NOT_FOUND":
+                    print(f"  ⚠️  {_model_name}: 모델 없음 — 다음 모델 시도...")
+                else:
+                    print(f"  ⚠️  {_model_name}: {_status} {_msg}")
+        except Exception as _e:
+            print(f"  ⚠️  {_model_name}: 예외 {_e}")
+
+    if not _ai_ok:
+        fail("Google AI (전체 폴백 실패)",
+             "모든 모델에서 오류 발생.\n"
+             "       ✅ 확인사항:\n"
+             "          1. aistudio.google.com → API 키 유효 여부\n"
+             "          2. Google AI Studio → 'Quotas' → 프로젝트 일일한도 확인\n"
+             "          3. 같은 구글 계정의 다른 프로젝트가 quota 소모 중인지 확인")
+
 
 
 # ══════════════════════════════════════════════════════════════

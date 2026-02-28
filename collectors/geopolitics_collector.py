@@ -49,15 +49,32 @@ from datetime import datetime, timezone
 # [v12.0] Reuters RSS 완전 폐지됨 → 제거. NewsAPI.org로 대체.
 #         기재부/방사청은 비표준 XML → requests로 직접 fetch 후 feedparser 처리.
 _RSS_SOURCES = [
+    # [v13.0] Reuters RSS 폐기됨 → AP News + FT로 교체
     {
-        "name": "moef",   # 기획재정부 보도자료
-        "url":  "https://www.moef.go.kr/sty/rss/moefRss.do",
-        "filter_keywords": [],   # 전체 수집 (기재부 = 한국 정책 전용)
+        "name": "ap_business",
+        "url":  "https://apnews.com/rss/apf-business",
+        "filter_keywords": [],
     },
     {
-        "name": "dapa",   # 방위사업청 보도자료
+        "name": "ap_world",
+        "url":  "https://apnews.com/rss/apf-topnews",
+        "filter_keywords": ["Korea", "trade", "tariff", "semiconductor", "defense",
+                            "China", "NATO", "Fed", "FOMC"],
+    },
+    {
+        "name": "ft_markets",
+        "url":  "https://www.ft.com/markets?format=rss",
+        "filter_keywords": [],
+    },
+    {
+        "name": "moef",   # 기획재정부 — requests 선fetch (비표준 XML 대응)
+        "url":  "https://www.moef.go.kr/sty/rss/moefRss.do",
+        "filter_keywords": [],
+    },
+    {
+        "name": "dapa",   # 방위사업청 — requests 선fetch (비표준 XML 대응)
         "url":  "https://www.dapa.go.kr/dapa/rss/rssService.do",
-        "filter_keywords": [],   # 전체 수집
+        "filter_keywords": [],
     },
 ]
 
@@ -107,7 +124,15 @@ def collect(max_per_source: int = 20) -> list[dict]:
     google_items = _fetch_google_news_rss(max_per_query=5)
     results.extend(google_items)
 
-    # ── v11.0: NewsAPI.org 실시간 지정학 뉴스 ────────────────
+    # ── v13.0: GDELT 실시간 지정학 뉴스 (메인 소스 — 무료, 키 불필요) ──
+    try:
+        gdelt_items = _fetch_gdelt_geopolitics(max_per_query=5)
+        results.extend(gdelt_items)
+        logger.info(f"[geopolitics_collector] GDELT: {len(gdelt_items)}건 수집")
+    except Exception as e:
+        logger.warning(f"[geopolitics_collector] GDELT 실패 (무시): {e}")
+
+    # ── v11.0: NewsAPI.org 보조 소스 (GDELT 보완용) ──────────
     if config.NEWSAPI_ENABLED:
         try:
             newsapi_items = _fetch_newsapi_geopolitics(max_per_query=5)
@@ -327,3 +352,79 @@ def _fetch_newsapi_geopolitics(max_per_query: int = 5) -> list[dict]:
 
     return unique
 
+
+
+# ─────────────────────────────────────────────────────────────
+# v13.0: GDELT API 실시간 지정학 뉴스 수집
+# 완전 무료, API 키 불필요, 15분 단위 업데이트
+# NewsAPI 무료플랜 대체 (최신 1개월 제한 문제 해결)
+# ─────────────────────────────────────────────────────────────
+
+_GDELT_BASE = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+_GDELT_GEO_QUERIES = [
+    "South Korea tariff trade US China",
+    "Korea defense military NATO export",
+    "Korea semiconductor export restriction",
+    "North Korea military provocation",
+    "KOSPI Korea stock market outlook",
+    "China economic stimulus Korea steel battery",
+    "Fed FOMC rate decision emerging markets Korea",
+    "Trump Korea trade tariff Bloomberg Reuters",
+]
+
+
+def _fetch_gdelt_geopolitics(max_per_query: int = 5) -> list[dict]:
+    """
+    GDELT DOC 2.0 API — 완전 무료, API키 불필요, 15분 단위 업데이트.
+    rule #90: 수집·파싱만. 분석·AI 호출·발송·DB 기록 없음.
+    """
+    import time as _time
+    items: list[dict] = []
+
+    for query in _GDELT_GEO_QUERIES:
+        try:
+            params = {
+                "query":      query,
+                "mode":       "artlist",
+                "maxrecords": max_per_query,
+                "timespan":   "3d",       # 최근 3일
+                "sort":       "DateDesc",
+                "format":     "json",
+                "sourcelang": "english",
+            }
+            resp = requests.get(_GDELT_BASE, params=params, timeout=12)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for art in data.get("articles", []):
+                title    = art.get("title", "") or ""
+                url      = art.get("url", "")
+                domain   = art.get("domain", "gdelt")
+                seendate = art.get("seendate", "") or ""
+                raw_text = title.lower()
+
+                items.append({
+                    "title":     title,
+                    "summary":   "",
+                    "link":      url,
+                    "published": seendate[:16] if seendate else datetime.now(timezone.utc).isoformat(),
+                    "source":    f"gdelt_{domain.replace('.', '_')}",
+                    "raw_text":  raw_text,
+                })
+
+            _time.sleep(0.3)   # GDELT 서버 과부하 방지
+
+        except Exception as e:
+            logger.warning(f"[geopolitics/gdelt] 쿼리 실패 '{query}' (무시): {e}")
+
+    # 중복 URL 제거
+    seen_links: set[str] = set()
+    unique: list[dict] = []
+    for item in items:
+        link = item.get("link", "")
+        if link and link not in seen_links:
+            seen_links.add(link)
+            unique.append(item)
+
+    return unique
