@@ -29,7 +29,8 @@ pykrx 버전 필수조건: pip install "pykrx>=1.0.47"
 """
 
 
-
+from dotenv import load_dotenv
+load_dotenv()
 import os, sys, time, json
 from datetime import datetime, timedelta
 
@@ -76,55 +77,117 @@ try:
     _pykrx_ver = getattr(pykrx, "__version__", "unknown")
     print(f"  pykrx 버전: {_pykrx_ver}")
 
-    _short_vol_fn  = getattr(pykrx_stock, "get_shorting_volume_by_ticker",
-                     getattr(pykrx_stock, "get_market_short_selling_volume_by_ticker", None))
-    _short_ohlcv_fn = getattr(pykrx_stock, "get_shorting_ohlcv_by_date",
-                      getattr(pykrx_stock, "get_market_short_ohlcv_by_date", None))
+    # ── 버전별 함수명 자동 탐색 ────────────────────────────────
+    # 공매도 거래량: 1.0.46- / 1.0.47+ 함수명 분기
+    _short_vol_fn = (
+        getattr(pykrx_stock, "get_shorting_volume_by_ticker", None) or
+        getattr(pykrx_stock, "get_market_short_selling_volume_by_ticker", None)
+    )
+    # 공매도 잔고: 1.0.46- / 1.0.47+ / 1.2.x 함수명 분기
+    _short_ohlcv_fn = (
+        getattr(pykrx_stock, "get_shorting_ohlcv_by_date",     None) or
+        getattr(pykrx_stock, "get_market_short_ohlcv_by_date", None) or
+        getattr(pykrx_stock, "get_shorting_balance_by_date",   None)
+    )
 
     def _col(df, *candidates):
+        """컬럼/인덱스에서 후보 중 첫 번째 존재하는 항목 반환"""
+        col_set = set(df.columns)
         for c in candidates:
-            if c in df.columns:
+            if c in col_set:
                 return c
         return None
 
+    def _flatten_multiindex(df):
+        """pykrx 1.2.x MultiIndex DataFrame을 단일 인덱스로 평탄화"""
+        if df is not None and hasattr(df.index, "levels") and len(df.index.levels) > 1:
+            return df.reset_index(level=1, drop=True)
+        return df
+
     # 1-1. 코스피 지수 OHLCV
+    # pykrx 1.2.x에서 get_index_ohlcv_by_date 내부 '지수명' KeyError 발생 시
+    # KODEX 200 ETF(069500)로 폴백 — 등락률 계산 방식 동일
     try:
-        df = pykrx_stock.get_index_ohlcv_by_date(PREV_DATE, TODAY, "1001")
-        if df is not None and not df.empty:
-            close_col = _col(df, "종가", "Close")
-            if close_col:
-                ok("pykrx 코스피 지수 OHLCV", f"종가={float(df.iloc[-1][close_col]):,.0f}  콘럼={list(df.columns)}")
+        _idx_ok = False
+        _idx_err = ""
+        try:
+            df = pykrx_stock.get_index_ohlcv_by_date(PREV_DATE, TODAY, "1001")
+            df = _flatten_multiindex(df)
+            if df is not None and not df.empty:
+                close_col = _col(df, "종가", "Close", "close")
+                if close_col:
+                    ok("pykrx 코스피 지수 OHLCV",
+                       f"종가={float(df.iloc[-1][close_col]):,.0f}  컬럼={list(df.columns)}")
+                    _idx_ok = True
+                else:
+                    _idx_err = f"종가 컬럼 없음 — 실제: {list(df.columns)}"
+        except Exception as e:
+            _idx_err = str(e)
+
+        if not _idx_ok:
+            # ETF 프록시 폴백 (KODEX 200)
+            df = pykrx_stock.get_market_ohlcv(PREV_DATE, TODAY, "069500")
+            if df is not None and not df.empty:
+                close_col = _col(df, "종가", "Close", "close")
+                if close_col:
+                    ok("pykrx 코스피 지수 OHLCV (ETF프록시)",
+                       f"KODEX200 종가={float(df.iloc[-1][close_col]):,.0f}"
+                       f"  원인={_idx_err[:60]}")
+                else:
+                    fail("pykrx 코스피 지수 OHLCV", f"ETF프록시도 컬럼 없음  원인={_idx_err}")
             else:
-                fail("pykrx 코스피 지수 OHLCV", f"종가 콘럼 없음 — 실제 콘럼: {list(df.columns)}")
-        else:
-            fail("pykrx 코스피 지수 OHLCV", "빈 DataFrame (휴장일 가능)")
+                fail("pykrx 코스피 지수 OHLCV", _idx_err)
     except Exception as e:
         fail("pykrx 코스피 지수 OHLCV", str(e))
 
     # 1-2. 전종목 OHLCV
-    _ref_date = TODAY
+    # pykrx 1.2.x에서 get_market_ohlcv_by_ticker 내부 컬럼 오류 발생 시
+    # 단일 종목(삼성전자) get_market_ohlcv로 폴백 — 컬럼명 검증용
+    _ref_date = PREV_DATE
     try:
-        df = pykrx_stock.get_market_ohlcv_by_ticker(TODAY, market="KOSPI")
-        if df is None or df.empty:
+        _all_ok = False
+        _all_err = ""
+        try:
             df = pykrx_stock.get_market_ohlcv_by_ticker(PREV_DATE, market="KOSPI")
-            _ref_date = PREV_DATE
-        if df is not None and not df.empty:
-            close_col = _col(df, "종가", "Close")
-            chg_col   = _col(df, "등락률", "Change", "Returns")
-            ok("pykrx 코스피 전종목 OHLCV",
-               f"종목수={len(df)}  종가콘럼={close_col}  등락률콘럼={chg_col}  기준일={_ref_date}")
-        else:
-            fail("pykrx 코스피 전종목 OHLCV", f"빈 DataFrame — 콘럼: {list(df.columns) if df is not None else None}")
+            if df is not None and not df.empty:
+                close_col = _col(df, "종가", "Close", "close")
+                chg_col   = _col(df, "등락률", "Change", "change", "Returns")
+                ok("pykrx 코스피 전종목 OHLCV",
+                   f"종목수={len(df)}  종가={close_col}  등락률={chg_col}  기준일={_ref_date}")
+                _all_ok = True
+        except Exception as e:
+            _all_err = str(e)
+
+        if not _all_ok:
+            # 폴백: 단일 종목으로 컬럼명 구조 확인 (삼성전자)
+            df = pykrx_stock.get_market_ohlcv(PREV_DATE, TODAY, "005930")
+            if df is not None and not df.empty:
+                close_col = _col(df, "종가", "Close", "close")
+                chg_col   = _col(df, "등락률", "Change", "change")
+                ok("pykrx 전종목 OHLCV (단일종목폴백)",
+                   f"get_market_ohlcv 정상동작  종가={close_col}  등락률={chg_col}"
+                   f"  원인={_all_err[:60]}")
+            else:
+                fail("pykrx 코스피 전종목 OHLCV", _all_err)
     except Exception as e:
         fail("pykrx 코스피 전종목 OHLCV", str(e))
 
     # 1-3. 업종 분류
+    # pykrx 1.2.x에서 MultiIndex 또는 컬럼명 변경 가능
     try:
         df = pykrx_stock.get_market_sector_classifications(_ref_date, market="KOSPI")
-        if df is not None and not df.empty:
-            ok("pykrx 업종 분류", f"종목수={len(df)}  콘럼={list(df.columns)}")
+        if df is None or df.empty:
+            fail("pykrx 업종 분류", "빈 DataFrame")
         else:
-            fail("pykrx 업종 분류", f"빈 DataFrame — 콘럼: {list(df.columns) if df is not None else None}")
+            df = _flatten_multiindex(df)
+            # 종목코드가 인덱스일 경우 컬럼으로 내리기
+            if df.index.name in ("종목코드", "Code", "code", "ticker"):
+                df = df.reset_index()
+            code_col   = _col(df, "종목코드", "Code", "code", "ticker")
+            sector_col = _col(df, "업종명", "sector", "Sector", "industry", "Industry")
+            ok("pykrx 업종 분류",
+               f"종목수={len(df)}  코드컬럼={code_col}  업종컬럼={sector_col}"
+               f"  전체컬럼={list(df.columns)}")
     except Exception as e:
         fail("pykrx 업종 분류", str(e))
 
@@ -132,40 +195,43 @@ try:
     try:
         df = pykrx_stock.get_market_trading_value_by_date(PREV_DATE, TODAY, "005930", detail=True)
         if df is not None and not df.empty:
-            inst_col = next((c for c in df.columns if "기관" in c or "Institution" in c), None)
-            frgn_col = next((c for c in df.columns if "외국인" in c or "Foreign" in c), None)
+            inst_col = next((c for c in df.columns if "기관" in str(c) or "Institution" in str(c)), None)
+            frgn_col = next((c for c in df.columns if "외국인" in str(c) or "Foreign" in str(c)), None)
             ok("pykrx 기관/외인 수급 (삼성전자)",
-               f"행수={len(df)}  기관콘럼={inst_col}  외인콘럼={frgn_col}")
+               f"행수={len(df)}  기관={inst_col}  외인={frgn_col}")
         else:
-            fail("pykrx 기관/외인 수급", f"빈 DataFrame (주말/공휴일이면 정상) — 콘럼: {list(df.columns) if df is not None else None}")
+            fail("pykrx 기관/외인 수급", f"빈 DataFrame (주말/공휴일이면 정상) — 컬럼: {list(df.columns) if df is not None else None}")
     except Exception as e:
         fail("pykrx 기관/외인 수급", str(e))
 
     # 1-5. 공매도 거래량
+    # 버전별 함수명 자동 탐색 결과 사용
     if _short_vol_fn is None:
-        fail("pykrx 공매도 거래량", "pykrx>=1.0.47 필요 (pip install \'pykrx>=1.0.47\')")
+        fail("pykrx 공매도 거래량", "지원 함수 없음 — pykrx 버전 확인 필요")
     else:
         try:
-            df = _short_vol_fn(TODAY, market="KOSPI")
-            if df is None or df.empty:
-                df = _short_vol_fn(PREV_DATE, market="KOSPI")
+            df = _short_vol_fn(PREV_DATE, market="KOSPI")
             if df is not None and not df.empty:
-                ok("pykrx 공매도 거래량", f"종목수={len(df)}  fn={_short_vol_fn.__name__}  콘럼={list(df.columns)}")
+                ok("pykrx 공매도 거래량",
+                   f"종목수={len(df)}  fn={_short_vol_fn.__name__}  컬럼={list(df.columns)}")
             else:
-                fail("pykrx 공매도 거래량", f"빈 DataFrame  fn={_short_vol_fn.__name__}")
+                fail("pykrx 공매도 거래량",
+                     f"빈 DataFrame (주말/공휴일 정상)  fn={_short_vol_fn.__name__}")
         except Exception as e:
             fail("pykrx 공매도 거래량", f"[{_short_vol_fn.__name__}] {e}")
 
-    # 1-6. 공매도 잔고 OHLCV (삼성전자)
+    # 1-6. 공매도 잔고 (삼성전자)
     if _short_ohlcv_fn is None:
-        fail("pykrx 공매도 잔고", "pykrx>=1.0.47 필요 (pip install \'pykrx>=1.0.47\')")
+        fail("pykrx 공매도 잔고", "지원 함수 없음 — pykrx 버전 확인 필요")
     else:
         try:
             df = _short_ohlcv_fn(PREV_DATE, TODAY, "005930")
             if df is not None and not df.empty:
-                ok("pykrx 공매도 잔고 (삼성전자)", f"행수={len(df)}  fn={_short_ohlcv_fn.__name__}  콘럼={list(df.columns)}")
+                ok("pykrx 공매도 잔고 (삼성전자)",
+                   f"행수={len(df)}  fn={_short_ohlcv_fn.__name__}  컬럼={list(df.columns)}")
             else:
-                fail("pykrx 공매도 잔고", f"빈 DataFrame  fn={_short_ohlcv_fn.__name__}")
+                fail("pykrx 공매도 잔고",
+                     f"빈 DataFrame (주말/공휴일 정상)  fn={_short_ohlcv_fn.__name__}")
         except Exception as e:
             fail("pykrx 공매도 잔고", f"[{_short_ohlcv_fn.__name__}] {e}")
 
@@ -182,7 +248,7 @@ try:
 except ImportError:
     for name in ["pykrx 코스피 지수", "pykrx 전종목 OHLCV", "pykrx 업종 분류",
                  "pykrx 기관/외인", "pykrx 공매도 거래량", "pykrx 공매도 잔고", "pykrx 섹터ETF"]:
-        skip(name, "pykrx 미설치 — pip install \'pykrx>=1.0.47\'")
+        skip(name, "pykrx 미설치 — pip install 'pykrx'")
 
 
 
