@@ -365,11 +365,17 @@ FULL_REPORT_FORMAT        = os.environ.get("FULL_REPORT_FORMAT", "false").lower(
 EVENT_CALENDAR_ENABLED    = os.environ.get("EVENT_CALENDAR_ENABLED",  "false").lower() == "true"
 
 # 네이버 DataLab 검색어 트렌드 수집 활성화
-DATALAB_ENABLED           = os.environ.get("DATALAB_ENABLED",         "false").lower() == "true"
-
 # 네이버 DataLab 전용 앱키 (없으면 NAVER_CLIENT_ID 폴백 — DataLab 권한 필요)
-NAVER_DATALAB_CLIENT_ID     = os.environ.get("NAVER_DATALAB_CLIENT_ID")
-NAVER_DATALAB_CLIENT_SECRET = os.environ.get("NAVER_DATALAB_CLIENT_SECRET")
+NAVER_DATALAB_CLIENT_ID     = (os.environ.get("NAVER_DATALAB_CLIENT_ID")
+                                or os.environ.get("NAVER_CLIENT_ID", ""))
+NAVER_DATALAB_CLIENT_SECRET = (os.environ.get("NAVER_DATALAB_CLIENT_SECRET")
+                                or os.environ.get("NAVER_CLIENT_SECRET", ""))
+
+# DATALAB_ENABLED: 전용 키 있으면 자동 활성화 (명시적 false로 비활성 가능)
+DATALAB_ENABLED = (
+    bool(os.environ.get("NAVER_DATALAB_CLIENT_ID"))  # 전용 키 있으면 자동 활성
+    or os.environ.get("DATALAB_ENABLED", "false").lower() == "true"
+)
 
 # DataLab 급등 감지 임계값 (최근 3일 평균 / 7일 평균 비율)
 DATALAB_SPIKE_THRESHOLD   = float(os.environ.get("DATALAB_SPIKE_THRESHOLD", "1.5"))

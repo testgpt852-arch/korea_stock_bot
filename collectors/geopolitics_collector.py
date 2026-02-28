@@ -46,19 +46,9 @@ from datetime import datetime, timezone
 
 # ── RSS 피드 소스 목록 ──────────────────────────────────────
 # rule #90: 수집 URL만 정의. 분석·발송·DB 로직 없음.
+# [v12.0] Reuters RSS 완전 폐지됨 → 제거. NewsAPI.org로 대체.
+#         기재부/방사청은 비표준 XML → requests로 직접 fetch 후 feedparser 처리.
 _RSS_SOURCES = [
-    {
-        "name": "reuters_korea",
-        "url":  "https://feeds.reuters.com/reuters/businessNews",
-        "filter_keywords": ["korea", "한국", "steel", "defense", "tariff",
-                            "semiconductor", "battery", "nato", "china"],
-    },
-    {
-        "name": "reuters_world",
-        "url":  "https://feeds.reuters.com/reuters/worldNews",
-        "filter_keywords": ["korea", "nato", "defense", "steel", "tariff",
-                            "china", "russia", "ukraine"],
-    },
     {
         "name": "moef",   # 기획재정부 보도자료
         "url":  "https://www.moef.go.kr/sty/rss/moefRss.do",
@@ -73,10 +63,10 @@ _RSS_SOURCES = [
 
 # Google News RSS (키워드 기반, API키 없이 무료 사용)
 _GOOGLE_NEWS_QUERIES = [
-    "한국 철강 관세 site:reuters.com OR site:bloomberg.com",
     "NATO 방위비 한국",
     "트럼프 관세 한국 수출",
     "중국 부양책 철강",
+    "한국 반도체 수출규제",
 ]
 
 
@@ -148,13 +138,31 @@ def _fetch_rss(
     """
     단일 RSS 피드를 파싱하여 필터링된 아이템 목록 반환.
 
+    [v12.0] requests로 직접 fetch 후 feedparser에 text 전달.
+    기재부/방사청처럼 비표준 XML(bozo)이어도 entries가 있으면 수집.
     rule #90: 수집·파싱만. 분석 없음.
     """
-    feed = feedparser.parse(url)
-
-    if feed.bozo and not feed.entries:
-        logger.warning(f"[geopolitics_collector] {name} RSS 파싱 오류: {feed.bozo_exception}")
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; KoreaStockBot/1.0)"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        raw_content = resp.content   # bytes 전달 — feedparser가 인코딩 자동 감지
+    except Exception as e:
+        logger.warning(f"[geopolitics_collector] {name} HTTP 요청 실패: {e}")
         return []
+
+    feed = feedparser.parse(raw_content)
+
+    # bozo여도 entries가 있으면 계속 진행 (기재부/방사청 비표준 XML 대응)
+    if not feed.entries:
+        if feed.bozo:
+            logger.warning(f"[geopolitics_collector] {name} RSS 파싱 오류 + entries 없음: {feed.bozo_exception}")
+        else:
+            logger.debug(f"[geopolitics_collector] {name} entries 없음")
+        return []
+
+    if feed.bozo:
+        logger.debug(f"[geopolitics_collector] {name} bozo=True이나 entries={len(feed.entries)}건 수집 진행")
 
     items = []
     for entry in feed.entries[:max_items * 2]:   # 필터 후 max_items 맞추기 위해 여유분
@@ -233,12 +241,14 @@ def _parse_published(entry) -> str:
 
 # ─────────────────────────────────────────────────────────────
 # v11.0: NewsAPI.org 실시간 지정학 뉴스 수집
-# RSS 대비 장점: 실시간(~분 단위), 본문 스니펫 포함, 소스 신뢰도 높음
+# v12.0: domains 파라미터 제거 (무료 플랜 미지원 → 0건 버그 수정)
+#        Reuters RSS 폐지 대체 쿼리 대폭 확장
 # ─────────────────────────────────────────────────────────────
 
 _NEWSAPI_BASE = "https://newsapi.org/v2/everything"
 
 # 지정학·글로벌 매크로 쿼리 목록 (한국 주식 영향권 핵심 키워드)
+# [v12.0] Reuters 대체 쿼리 추가 — Reuters/Bloomberg 기사를 NewsAPI로 직접 수집
 _NEWSAPI_GEO_QUERIES = [
     "South Korea tariff trade war US",
     "Korea defense NATO military",
@@ -247,13 +257,11 @@ _NEWSAPI_GEO_QUERIES = [
     "North Korea military provocation",
     "Trump Korea trade policy",
     "Fed FOMC rate decision emerging markets",
+    # v12.0 추가 — Reuters RSS 대체
+    "Korea stock market KOSPI outlook",
+    "Korea steel shipbuilding defense export",
+    "Korea US tariff trade Bloomberg Reuters",
 ]
-
-# 지정학 관련 신뢰 소스 도메인
-_NEWSAPI_GEO_DOMAINS = (
-    "reuters.com,bloomberg.com,ft.com,wsj.com,"
-    "apnews.com,bbc.com,theguardian.com,nytimes.com"
-)
 
 
 def _fetch_newsapi_geopolitics(max_per_query: int = 5) -> list[dict]:
@@ -261,6 +269,7 @@ def _fetch_newsapi_geopolitics(max_per_query: int = 5) -> list[dict]:
     NewsAPI.org /v2/everything 로 지정학 뉴스 수집.
     rule #90: 수집·파싱만. 분석·AI 호출·발송·DB 기록 없음.
 
+    [v12.0] domains 파라미터 제거 — 무료 플랜(Developer)에서 미지원으로 0건 버그 수정.
     반환 형식은 _fetch_rss()와 동일 — geopolitics_analyzer.analyze()에 직접 전달.
     """
     from datetime import date, timedelta
@@ -276,7 +285,7 @@ def _fetch_newsapi_geopolitics(max_per_query: int = 5) -> list[dict]:
                 "sortBy":   "publishedAt",          # 실시간 최신순
                 "pageSize": max_per_query,
                 "from":     (date.today() - timedelta(days=1)).isoformat(),  # 최근 24시간
-                "domains":  _NEWSAPI_GEO_DOMAINS,
+                # domains 파라미터 제거 — 무료 플랜 미지원 (0건 버그)
             }
             resp = requests.get(_NEWSAPI_BASE, params=params, timeout=10)
             resp.raise_for_status()

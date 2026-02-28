@@ -380,6 +380,16 @@ def _fetch_sector_map(date_str: str, all_stocks: dict) -> dict:
             if df is None or df.empty:
                 continue
 
+            # [v12.0] pykrx 1.2.x 버그 방어: OHLCV 컬럼(종가/Close 등)이 있으면
+            # 업종 분류가 아닌 가격 데이터가 잘못 반환된 것 → 건너뜀
+            ohlcv_cols = {"종가", "Close", "close", "시가", "고가", "저가", "거래량"}
+            if ohlcv_cols & set(df.columns):
+                logger.warning(
+                    f"[price] {market} get_market_sector_classifications가 OHLCV 반환 "
+                    f"(pykrx 버그) — 업종분류 건너뜀. 실제컬럼: {df.columns.tolist()}"
+                )
+                continue
+
             # MultiIndex 또는 종목코드가 index인 경우 평탄화
             if hasattr(df.index, "levels"):
                 df = df.reset_index()

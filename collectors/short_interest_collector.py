@@ -142,9 +142,21 @@ def _fetch_short_volume(
 
     for market in ["KOSPI", "KOSDAQ"]:
         try:
-            # 당일 공매도 거래량 상위 종목
-            df_today = _vol_fn(today_str, market=market)
-            df_prev  = _vol_fn(prev_str,  market=market)
+            # [v12.0] IndexError 방어: pykrx 1.2.x에서 빈 날짜 조회 시
+            # 내부에서 index -1 접근 → IndexError 발생. 명시적으로 잡아서 continue.
+            try:
+                df_today = _vol_fn(today_str, market=market)
+            except IndexError:
+                logger.debug(f"[short_interest] {market} 당일 공매도 IndexError — 데이터 없음 (주말/공휴일)")
+                continue
+            except Exception as e:
+                logger.debug(f"[short_interest] {market} 당일 공매도 조회 실패: {e}")
+                continue
+
+            try:
+                df_prev = _vol_fn(prev_str, market=market)
+            except (IndexError, Exception):
+                df_prev = None
 
             if df_today is None or df_today.empty:
                 logger.debug(f"[short_interest] {market} 당일 공매도 데이터 없음")

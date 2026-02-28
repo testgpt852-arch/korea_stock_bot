@@ -338,6 +338,8 @@ _NEWSAPI_MARKET_QUERIES = [
 ]
 
 # 신뢰할 수 있는 금융·뉴스 도메인 우선
+# [v12.0] domains 파라미터는 _newsapi_search에서 제거 (무료 플랜 미지원 → 0건 버그)
+# 아래 상수는 참고용으로만 유지
 _NEWSAPI_PREFERRED_DOMAINS = (
     "reuters.com,bloomberg.com,ft.com,wsj.com,"
     "cnbc.com,marketwatch.com,investing.com"
@@ -348,6 +350,8 @@ def _newsapi_search(query: str, page_size: int = 5) -> list[dict]:
     """
     NewsAPI.org /v2/everything 호출.
     rule #90 계열: 수집·파싱만. 분석 없음.
+
+    [v12.0] domains 파라미터 제거 — 무료 플랜(Developer) 미지원으로 0건 버그 수정.
     """
     from datetime import date, timedelta
     params = {
@@ -357,7 +361,7 @@ def _newsapi_search(query: str, page_size: int = 5) -> list[dict]:
         "sortBy":     "publishedAt",       # 실시간 최신순
         "pageSize":   page_size,
         "from":       (date.today() - timedelta(days=2)).isoformat(),  # 최근 2일
-        "domains":    _NEWSAPI_PREFERRED_DOMAINS,
+        # domains 파라미터 제거 — 무료 플랜 미지원 (0건 버그)
     }
     resp = requests.get(_NEWSAPI_BASE, params=params, timeout=10)
     resp.raise_for_status()
