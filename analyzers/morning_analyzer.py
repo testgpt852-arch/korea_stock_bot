@@ -127,8 +127,8 @@ async def analyze(cache: dict) -> dict:
             f"/ 테마후보: {market_env.get('주도테마후보', [])}"
         )
     except Exception as e:
-        logger.error(f"[morning_analyzer] ①시장환경 분석 실패: {e}")
-        return result
+        logger.error(f"[morning_analyzer] ①시장환경 분석 실패 — 중립 폴백 후 계속: {e}")
+        # return 제거: result["market_env"]={} 폴백으로 ②③ 계속 실행
 
     # ── 호출② 재료 검증 + 후보 압축 ────────────────────────
     try:
@@ -139,8 +139,8 @@ async def analyze(cache: dict) -> dict:
         n_cand = len(candidates.get("후보종목", []))
         logger.info(f"[morning_analyzer] ②후보종목 {n_cand}개 선별 완료")
     except Exception as e:
-        logger.error(f"[morning_analyzer] ②재료검증 분석 실패: {e}")
-        return result
+        logger.error(f"[morning_analyzer] ②재료검증 분석 실패 — 후보 없음 폴백 후 계속: {e}")
+        # return 제거: result["candidates"]={"후보종목":[],...} 폴백으로 ③ 계속 실행
 
     # ── 호출③ 최종 픽 15종목 (RAG 포함) ────────────────────
     try:

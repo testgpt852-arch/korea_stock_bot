@@ -394,6 +394,8 @@ def update_trailing_stops() -> int:
         return 0
 
     updated = 0
+    pending: list[tuple] = []   # (new_peak, new_stop, pos_id) — 루프 후 일괄 커밋
+
     for row in rows:
         pos_id, ticker, name, buy_price, peak_price, stop_loss, market_env = row
         try:
@@ -409,25 +411,31 @@ def update_trailing_stops() -> int:
             current_stop = stop_loss or round(buy_price * (1 + config.STOP_LOSS / 100))
             new_stop = max(new_stop, current_stop)
 
-            conn2 = db_schema.get_conn()
-            try:
-                c2 = conn2.cursor()
-                c2.execute("""
-                    UPDATE positions SET peak_price = ?, stop_loss = ?
-                    WHERE id = ?
-                """, (new_peak, new_stop, pos_id))
-                conn2.commit()
-                updated += 1
-                logger.info(
-                    f"[position] Trailing Stop 갱신 — {name}({ticker})  "
-                    f"현재가:{current_price:,}  고점:{new_peak:,}  "
-                    f"손절가:{new_stop:,}({market_env or '미지정'})"
-                )
-            finally:
-                conn2.close()
+            pending.append((new_peak, new_stop, pos_id))
+            logger.info(
+                f"[position] Trailing Stop 갱신 — {name}({ticker})  "
+                f"현재가:{current_price:,}  고점:{new_peak:,}  "
+                f"손절가:{new_stop:,}({market_env or '미지정'})"
+            )
 
         except Exception as e:
             logger.warning(f"[position] {ticker} trailing stop 갱신 실패: {e}")
+
+    # 수집한 갱신값 일괄 커밋 (연결 1회, commit 1회)
+    if pending:
+        conn2 = db_schema.get_conn()
+        try:
+            c2 = conn2.cursor()
+            c2.executemany("""
+                UPDATE positions SET peak_price = ?, stop_loss = ?
+                WHERE id = ?
+            """, pending)
+            conn2.commit()
+            updated = len(pending)
+        except Exception as e:
+            logger.warning(f"[position] Trailing Stop 일괄 커밋 실패: {e}")
+        finally:
+            conn2.close()
 
     logger.info(f"[position] Trailing Stop 일괄 갱신 완료 — {updated}종목")
     return updated

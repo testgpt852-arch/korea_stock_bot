@@ -18,6 +18,10 @@ from utils.logger import logger
 
 KST = timezone(timedelta(hours=9))
 
+# pykrx 공휴일 확인 결과 캐시 — {"YYYYMMDD": True/False}
+# 06:00 첫 호출 시 저장, 이후 장중 호출은 캐시에서 읽어 pykrx 재호출 방지
+_market_open_cache: dict[str, bool] = {}
+
 
 def get_today() -> datetime:
     """현재 시각 KST로 반환. Railway는 UTC 서버이므로 반드시 KST 명시."""
@@ -50,6 +54,10 @@ def is_market_open(today: datetime = None) -> bool:
     장 운영일 여부 반환
     주말이면 False
     공휴일은 pykrx로 추가 검증 (실패 시 True로 fallback)
+
+    [v13.1 수정] pykrx 장중(09:00~15:30) 호출 금지 규칙 준수.
+    날짜별 결과를 모듈 캐시(_market_open_cache)에 저장해
+    06:00 첫 호출에서만 pykrx를 실행하고 이후 장중 호출은 캐시에서 반환.
     """
     if today is None:
         today = get_today()
@@ -59,18 +67,25 @@ def is_market_open(today: datetime = None) -> bool:
         logger.info(f"[date_utils] 오늘은 주말({today.strftime('%A')}) — 봇 미실행")
         return False
 
-    # pykrx로 공휴일 확인 (실패해도 진행)
+    date_str = today.strftime("%Y%m%d")
+
+    # 캐시 히트 — pykrx 재호출 없이 반환 (장중 09:00/14:50/15:20 호출 대응)
+    if date_str in _market_open_cache:
+        return _market_open_cache[date_str]
+
+    # 캐시 미스(첫 호출, 주로 06:00) — pykrx로 공휴일 확인 후 캐시 저장
     try:
         from pykrx import stock
-        date_str = today.strftime("%Y%m%d")
         tickers = stock.get_market_ticker_list(date_str, market="KOSPI")
-        if not tickers:
+        result = bool(tickers)
+        if not result:
             logger.warning(f"[date_utils] {date_str} 공휴일 감지 — 봇 미실행")
-            return False
     except Exception as e:
         logger.warning(f"[date_utils] pykrx 공휴일 확인 실패 ({e}) — 장 열린 것으로 간주")
+        result = True
 
-    return True
+    _market_open_cache[date_str] = result
+    return result
 
 
 def fmt_kr(dt: datetime) -> str:
