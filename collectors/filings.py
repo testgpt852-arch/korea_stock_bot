@@ -119,10 +119,17 @@ def _fetch_dart_api(date_str: str) -> list[dict]:
 
 
 def _fetch_dart_web(date_str: str) -> list[dict]:
-    """DART 메인 페이지 공시 목록 fetch (API 실패 시 백업)"""
+    """
+    DART 웹사이트 공시 목록 fetch (API 실패 시 백업)
+
+    ⚠️ [v13.0 주의] 이 함수는 공식 OpenAPI가 아닌 비공식 엔드포인트를 사용.
+    dart.fss.or.kr/api/search.json 은 실제 DART 웹 내부 Ajax 엔드포인트로
+    파라미터 구조·응답 형식·가용성이 opendart.fss.or.kr/api/list.json 과 다름.
+    실패 시 빈 리스트 반환이므로 비치명적이나 안정성 보장 불가.
+    """
     url = "https://dart.fss.or.kr/api/search.json"
     params = {
-        "key":        config.DART_API_KEY,
+        "key":        config.DART_API_KEY,   # ⚠️ 공식 OpenAPI의 crtfc_key와 다름
         "ds":         date_str,
         "de":         date_str,
         "page_count": 100,

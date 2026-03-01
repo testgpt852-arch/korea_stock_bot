@@ -2,6 +2,11 @@
 tracking/accuracy_tracker.py
 테마 예측 정확도 학습 DB — Phase 4-2 신규
 
+[⚠️ v13.0 고아(Orphan) 경고]
+이 파일은 현재 어디서도 호출되지 않습니다.
+_build_signals() 삭제(v13.0)와 함께 signals 키 참조가 무효화됐고,
+accuracy_tracker를 호출하는 모듈이 없습니다.
+
 [역할]
 - 아침봇/마감봇 oracle_analyzer 예측 테마 기록
 - 다음날 마감봇 실제 급등 테마와 비교

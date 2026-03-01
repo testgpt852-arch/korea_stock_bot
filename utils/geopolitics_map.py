@@ -2,13 +2,18 @@
 utils/geopolitics_map.py
 지정학·정책 이벤트 키워드 → 국내 영향 섹터 매핑 사전
 
+[⚠️ v13.0 고아(Orphan) 경고]
+이 파일은 현재 어디서도 import 되지 않습니다.
+_sig_geopolitics_from_rss() 함수가 data_collector.py에서 삭제(v13.0 Step 4)된 이후
+참조하는 모듈이 없습니다. 향후 지정학 분석 기능을 재도입할 때 활용할 수 있습니다.
+
 [ARCHITECTURE rule #93 — 절대 금지]
 - 이 파일은 키워드→섹터 매핑 사전 파일 전용
 - 분석 로직·API 호출 절대 금지
 - 신규 이벤트 패턴 추가 시 이 파일만 수정
 
 [v10.0 Phase 1 신규]
-- geopolitics_analyzer.py에서 참조
+- geopolitics_analyzer.py에서 참조 (현재 사용 중단)
 - 이벤트 뉴스 텍스트에서 패턴 매칭 후 영향 섹터 결정
 - AI 보완용 사전: AI 분석이 주도, 이 사전이 교차 검증
 

@@ -53,7 +53,9 @@ def init_db() -> None:
     [v4.2] 기존 DB 마이그레이션 자동 실행 (_migrate_v42).
     """
     db_path = config.DB_PATH
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    parent_dir = os.path.dirname(db_path)
+    if parent_dir:   # [v13.0 버그수정] 빈 문자열이면 makedirs 실패 방지
+        os.makedirs(parent_dir, exist_ok=True)
 
     conn = sqlite3.connect(db_path)
     try:

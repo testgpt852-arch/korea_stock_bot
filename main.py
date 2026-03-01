@@ -39,10 +39,7 @@ KST = timezone(timedelta(hours=9))   # UTC+9, 외부 패키지 불필요
 _realtime_started = False
 
 # v12.0 Step 7: data_collector가 모든 캐시를 관리
-# _geopolitics_cache / _event_calendar_cache는 data_collector.get_cache() 경유로 접근
-# 하위 호환용 별칭 (data_collector.run() 전 빈 값)
-_geopolitics_cache:    list[dict] = []
-_event_calendar_cache: list[dict] = []
+# 모든 수집 데이터는 data_collector.get_cache()로 접근
 
 
 async def run_morning_bot():

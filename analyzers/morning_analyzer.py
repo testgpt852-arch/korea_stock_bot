@@ -179,9 +179,13 @@ def _analyze_market_env(market_data: dict) -> dict:
             "한국시장영향": str,
         }
     """
-    us_sectors  = market_data.get("us_sectors")  or market_data.get("us_market", {})
+    # [v13.0 버그수정] market_global.collect() 반환 구조:
+    #   {"us_market": {"sectors": {...}, "nasdaq":..., "summary":...}, "commodities": {...}}
+    # "us_sectors" 키는 존재하지 않음 → us_market["sectors"] 경유로 수정
+    us_market   = market_data.get("us_market", {})
+    us_sectors  = us_market.get("sectors", {})
     commodities = market_data.get("commodities", {})
-    forex       = market_data.get("forex", {})
+    forex       = market_data.get("forex", {})   # market_global 미수집 — 빈 dict graceful degradation
 
     prompt = f"""오늘 한국 주식시장 환경을 판단해라.
 

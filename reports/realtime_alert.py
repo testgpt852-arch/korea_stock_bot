@@ -27,7 +27,7 @@ import utils.watchlist_state    as watchlist_state
 import analyzers.intraday_analyzer as intraday_analyzer
 import telegram.sender    as telegram_bot
 from kis.websocket_client import ws_client
-import tracking.trading_journal  as alert_recorder  # v12.0: alert_recorder → trading_journal 흡수
+import tracking.alert_recorder   as alert_recorder  # [v13.0 버그수정] trading_journal 잘못 alias된 것 원복 — trading_journal.record_alert() 존재하지 않음
 import config
 
 _poll_task: asyncio.Task | None = None

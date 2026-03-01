@@ -342,7 +342,7 @@ def _send_raw_data_to_telegram(cache: dict) -> None:
       💰 자금집중 상위 5
       ⚠️ Gemini 장애 시 이 메시지를 Claude에게 전달하세요.
     """
-    from telegram.sender import send_message
+    from telegram.sender import send as send_message  # [v13.0 버그수정] send_message → send (sender.py에는 send()만 존재)
 
     lines: list[str] = []
     lines.append("📊 [06:00 수집 완료] 원시 데이터 요약\n")

@@ -36,10 +36,10 @@ Railway: 서버 Variables에 입력
         EVALUATE_CONV_TIMEOUT_SEC  — /evaluate 대화 타임아웃 (P2)
 - v10.0: [대규모 개편 — 테마 쪽집게 예측 엔진 전면 강화]
         Phase 1: 철강/비철 원자재 ETF 확장, 지정학 맵 기반 상수 추가
-        STEEL_ETF_ALERT_THRESHOLD  — 미국 철강 ETF XME 급등 임계값
+        STEEL_ETF_ALERT_THRESHOLD  — [v13.0 삭제] _sig_steel_etf() 제거로 미사용
         GEOPOLITICS_ENABLED        — 지정학 뉴스 수집 활성화 여부 (Phase 2~)
         GEOPOLITICS_POLL_MIN       — 장중 지정학 폴링 간격(분)
-        GEOPOLITICS_CONFIDENCE_MIN — 지정학 이벤트 신뢰도 최소값
+        GEOPOLITICS_CONFIDENCE_MIN — [v13.0 삭제] 미사용 → GEOPOLITICS_ENABLED만 보존
         SECTOR_ETF_ENABLED         — 섹터 ETF 자금흐름 수집 활성화 (Phase 3~)
         SHORT_INTEREST_ENABLED     — 공매도 잔고 수집 활성화 (Phase 3~)
         THEME_HISTORY_ENABLED      — 이벤트→섹터 이력 DB 누적 활성화 (Phase 3~)
@@ -344,13 +344,12 @@ EVALUATE_CONV_TIMEOUT_SEC = int(os.environ.get("EVALUATE_CONV_TIMEOUT_SEC", "120
 # v10.0 Phase 1 — 철강/비철 ETF 확장 + 지정학 이벤트 기반 설정
 # ══════════════════════════════════════════════════════════════
 
-# 미국 철강 ETF 급등 임계값 — 이 이상이면 신호2 '철강 테마' 발화
-STEEL_ETF_ALERT_THRESHOLD = float(os.environ.get("STEEL_ETF_ALERT_THRESHOLD", "3.0"))  # %
-
-# 지정학 수집 활성화 (Phase 2부터 사용, Phase 1에서는 False 유지)
+# 지정학 수집 활성화 (GEOPOLITICS_ENABLED=false 기본 — news_global_rss.py에서 참조)
 GEOPOLITICS_ENABLED       = os.environ.get("GEOPOLITICS_ENABLED", "false").lower() == "true"
-GEOPOLITICS_POLL_MIN      = int(os.environ.get("GEOPOLITICS_POLL_MIN", "30"))       # 장중 폴링 간격(분)
-GEOPOLITICS_CONFIDENCE_MIN = float(os.environ.get("GEOPOLITICS_CONFIDENCE_MIN", "0.6"))
+# [v13.0 Dead 상수 삭제됨]
+# STEEL_ETF_ALERT_THRESHOLD — _sig_steel_etf() 삭제로 미참조 → 제거
+# EVENT_SIGNAL_MIN_STRENGTH — _sig_event_impact() 삭제로 미참조 → 제거
+GEOPOLITICS_POLL_MIN      = int(os.environ.get("GEOPOLITICS_POLL_MIN", "30"))       # 장중 폴링 간격(분) — 현재 미사용, 보존
 
 # 섹터 ETF 자금흐름 수집 활성화 (Phase 3)
 SECTOR_ETF_ENABLED        = os.environ.get("SECTOR_ETF_ENABLED", "true").lower() == "true"
@@ -375,14 +374,14 @@ NAVER_DATALAB_CLIENT_ID     = (os.environ.get("NAVER_DATALAB_CLIENT_ID")
 NAVER_DATALAB_CLIENT_SECRET = (os.environ.get("NAVER_DATALAB_CLIENT_SECRET")
                                 or os.environ.get("NAVER_CLIENT_SECRET", ""))
 
-# DATALAB_ENABLED: 전용 키 있으면 자동 활성화 (명시적 false로 비활성 가능)
+# DATALAB_ENABLED: 전용 키 있으면 자동 활성화 (명시적 false로 비활성 가능, news_naver.py 참조)
 DATALAB_ENABLED = (
     bool(os.environ.get("NAVER_DATALAB_CLIENT_ID"))  # 전용 키 있으면 자동 활성
     or os.environ.get("DATALAB_ENABLED", "false").lower() == "true"
 )
 
-# DataLab 급등 감지 임계값 (최근 3일 평균 / 7일 평균 비율)
+# DataLab 급등 감지 임계값 (최근 3일 평균 / 7일 평균 비율, news_naver.py 참조)
 DATALAB_SPIKE_THRESHOLD   = float(os.environ.get("DATALAB_SPIKE_THRESHOLD", "1.5"))
 
-# 신호8 최소 강도 (이 값 이상인 기업 이벤트만 _pick_stocks()에 전달)
-EVENT_SIGNAL_MIN_STRENGTH = int(os.environ.get("EVENT_SIGNAL_MIN_STRENGTH", "3"))
+# [v13.0 Dead 상수 삭제됨]
+# EVENT_SIGNAL_MIN_STRENGTH — _sig_event_impact() 삭제로 미참조 → 제거

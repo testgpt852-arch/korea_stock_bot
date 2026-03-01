@@ -326,8 +326,16 @@ def _fetch_prices_batch(date_str: str) -> dict[str, int]:
             df = pykrx_stock.get_market_ohlcv_by_ticker(date_str, market=market)
             if df is None or df.empty:
                 continue
+            # [v13.0 버그수정] pykrx 1.2.x "Close" 반환 가능 → 유연한 컬럼 탐색
+            col_set = set(df.columns)
+            close_col = next(
+                (c for c in ["종가", "Close", "close"] if c in col_set), None
+            )
+            if not close_col:
+                logger.warning(f"[perf] {market} 종가 컬럼 없음 (실제: {list(df.columns)})")
+                continue
             for ticker in df.index:
-                close = df.loc[ticker, "종가"] if "종가" in df.columns else 0
+                close = df.loc[ticker, close_col]
                 try:
                     close = int(float(close))
                 except (ValueError, TypeError):

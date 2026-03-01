@@ -2,6 +2,11 @@
 tracking/theme_history.py
 이벤트→급등 섹터 이력 DB 누적 전담
 
+[⚠️ v13.0 고아(Orphan) 경고]
+이 파일은 현재 어디서도 호출되지 않습니다.
+_build_signals() 삭제(v13.0 Step 4)와 함께 record() 호출자가 사라졌습니다.
+또한 record()가 받는 signals 파라미터는 이제 어디서도 생성되지 않습니다.
+
 [ARCHITECTURE rule #95 — 절대 금지]
 - DB 저장·조회만 담당. 분석·발송·AI 호출 절대 금지.
 - main.py 마감봇 완료 후 자동 기록 (closing_report.py에서 호출).
