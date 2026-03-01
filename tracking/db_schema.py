@@ -302,6 +302,32 @@ def init_db() -> None:
             ON theme_accuracy(date)
         """)
 
+        # ── 8-d. RAG 패턴 DB [v13.0 Step 5 신규] ────────────────────────
+        # tracking/rag_pattern_db.py 가 사용.
+        # performance_tracker.run_batch() 직후 save() 로 INSERT.
+        # morning_analyzer._pick_final() 에서 get_similar_patterns() 로 검색.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS rag_patterns (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                date          TEXT    NOT NULL,      -- YYYYMMDD
+                signal_type   TEXT    NOT NULL,      -- "DART_수주" / "순환매" / "테마_반도체" 등
+                stock_name    TEXT,
+                stock_code    TEXT,
+                cap_tier      TEXT,                  -- "소형_300억미만" / "소형_1000억미만" / "중형"
+                was_picked    INTEGER DEFAULT 0,     -- 모닝봇 픽 여부 (SQLite BOOLEAN = INTEGER)
+                pick_rank     INTEGER,               -- 픽 순위 (1~15, NULL=미픽)
+                max_return    REAL,                  -- 당일 최고 등락률 (%)
+                hit_20pct     INTEGER DEFAULT 0,     -- 20%+ 달성
+                hit_upper     INTEGER DEFAULT 0,     -- 상한가 달성
+                pattern_memo  TEXT,                  -- AI 또는 근거 텍스트
+                created_at    TEXT    NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rag_signal_cap
+            ON rag_patterns(signal_type, cap_tier, date)
+        """)
+
         # ── 8-c. 신호 가중치 자동 조정 [v10.6 Phase 4-2 신규] ──────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS signal_weights (
@@ -342,6 +368,8 @@ def init_db() -> None:
     _migrate_v100(db_path)
     # [v10.6 Phase 4-2] theme_accuracy + signal_weights 테이블 마이그레이션 (idempotent)
     _migrate_v106(db_path)
+    # [v13.0 Step 5] rag_patterns 테이블 마이그레이션 (idempotent)
+    _migrate_v130(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -634,6 +662,44 @@ def _migrate_v106(db_path: str) -> None:
         logger.info("[db] v10.6 마이그레이션 완료 — theme_accuracy + signal_weights 테이블 확인")
     except Exception as e:
         logger.warning(f"[db] v10.6 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
+
+
+def _migrate_v130(db_path: str) -> None:
+    """
+    [v13.0 Step 5] rag_patterns 테이블 + 인덱스 생성.
+    tracking/rag_pattern_db.py 가 사용.
+    기존 DB에 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS rag_patterns (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                date          TEXT    NOT NULL,
+                signal_type   TEXT    NOT NULL,
+                stock_name    TEXT,
+                stock_code    TEXT,
+                cap_tier      TEXT,
+                was_picked    INTEGER DEFAULT 0,
+                pick_rank     INTEGER,
+                max_return    REAL,
+                hit_20pct     INTEGER DEFAULT 0,
+                hit_upper     INTEGER DEFAULT 0,
+                pattern_memo  TEXT,
+                created_at    TEXT    NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rag_signal_cap
+            ON rag_patterns(signal_type, cap_tier, date)
+        """)
+        conn.commit()
+        logger.info("[db] v13.0 마이그레이션 완료 — rag_patterns 테이블 확인")
+    except Exception as e:
+        logger.warning(f"[db] v13.0 마이그레이션 경고: {e}")
     finally:
         conn.close()
 

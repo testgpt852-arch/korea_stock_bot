@@ -95,11 +95,67 @@ def run_batch() -> dict:
     except Exception as e:
         logger.warning(f"[perf] Trailing Stop 갱신 실패 (비치명적): {e}")
 
+    # ── [v13.0 Step 6] RAG 패턴 자동 저장 ───────────────────
+    # Trailing Stop 갱신 완료 후 당일 결과를 rag_pattern_db 에 저장
+    _save_rag_patterns_after_batch(today_str)
+
     return {
         "updated":          total_updated,
         "stats":            stats,
         "trailing_updated": trailing_updated,   # [v4.2] 신규
     }
+
+
+# ── [v13.0 Step 6] RAG 패턴 자동 저장 ────────────────────────────────────
+# run_batch() 반환값을 그대로 활용해 rag_pattern_db.save() 를 후처리로 호출.
+# performance_tracker 모듈 외부에서 호출하지 말 것 (호출 규칙 §10).
+def _save_rag_patterns_after_batch(today_str: str) -> None:
+    """
+    run_batch() 완료 직후 당일 픽 결과를 rag_pattern_db 에 저장.
+
+    picks / results 는 DB에서 직접 조회:
+      - picks    : state_manager 또는 캐시에서 읽는 것이 이상적이나,
+                   v13.0 에서는 alert_history + performance_tracker 조합으로 대체.
+                   morning_analyzer 가 픽 저장 로직을 추가하면 그쪽을 우선 사용.
+      - results  : performance_tracker 테이블 당일 1d 추적 완료 행.
+    """
+    try:
+        from tracking.rag_pattern_db import save as rag_save
+
+        conn = db_schema.get_conn()
+        try:
+            c = conn.cursor()
+            # 당일 1일 추적 완료 행에서 결과 수집
+            c.execute("""
+                SELECT ah.ticker, ah.name, ah.source,
+                       pt.return_1d, pt.price_at_alert, pt.price_1d
+                FROM performance_tracker pt
+                JOIN alert_history ah ON pt.alert_id = ah.id
+                WHERE pt.alert_date = ? AND pt.done_1d = 1
+            """, (today_str,))
+            rows = c.fetchall()
+        finally:
+            conn.close()
+
+        results: list[dict] = []
+        for ticker, name, source, ret_1d, price_alert, price_1d in rows:
+            # 당일 최고 등락률 근사치 (1d return 을 당일 최고로 간주)
+            max_ret = ret_1d if ret_1d is not None else 0.0
+            results.append({
+                "종목코드":    ticker,
+                "종목명":      name,
+                "signal_type": source or "미분류",
+                "max_return":  max_ret,
+                "hit_20pct":   max_ret >= 20.0,
+                "hit_upper":   max_ret >= 29.0,
+            })
+
+        # picks 는 이 시점에 직접 접근 불가이므로 빈 리스트 → results 만 저장
+        # (morning_analyzer 가 pick 저장 로직을 추가하면 여기서 로드)
+        rag_save(date=today_str, picks=[], results=results)
+
+    except Exception as e:
+        logger.warning(f"[perf] RAG 패턴 저장 실패 (비치명적): {e}")
 
 
 def get_weekly_stats() -> dict:
