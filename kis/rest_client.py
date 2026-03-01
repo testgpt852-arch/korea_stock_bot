@@ -27,6 +27,10 @@ KIS REST API 호출 전담
             → 대형주 제외 (get_rate_ranking()과 동일 방식으로 통일)
           get_orderbook() 신규 (tr_id: FHKST01010200)
             → 매도/매수 호가 10개 + 잔량 조회 → volume_analyzer.analyze_orderbook() 전달용
+- v4.5:   get_daily_ohlcv() 신규 (tr_id: FHKST03010100)
+            → 최근 N 영업일 일봉 OHLCV — pykrx 대체 (장중 실시간)
+          get_investor_trading() 신규 (tr_id: FHKST03010200)
+            → 기관/외인 N일 순매수 — pykrx 대체 (장중 실시간)
 """
 
 import requests
@@ -422,3 +426,95 @@ def get_orderbook(ticker: str) -> dict:
     except Exception as e:
         logger.debug(f"[rest] {ticker} 호가 조회 실패: {e}")
         return {}
+
+
+def get_daily_ohlcv(ticker: str, n: int = 20) -> list[dict]:
+    """
+    [v4.5] 단일 종목 일봉 OHLCV 조회 (KIS tr_id: FHKST03010100)
+    pykrx.get_market_ohlcv_by_date() 대체 — 장중 실시간 데이터.
+
+    Returns:
+        list[dict] 최신순 최대 n개:
+            {"날짜": "YYYYMMDD", "시가": int, "고가": int, "저가": int,
+             "종가": int, "거래량": int}
+        실패 시 []
+    """
+    token = get_access_token()
+    if not token:
+        return []
+    kis_rate_limiter.acquire()
+    url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "appkey":        config.KIS_APP_KEY,
+        "appsecret":     config.KIS_APP_SECRET,
+        "tr_id":         "FHKST03010100",
+        "Content-Type":  "application/json; charset=utf-8",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD":         ticker,
+        "FID_PERIOD_DIV_CODE":    "D",   # 일봉
+        "FID_ORG_ADJ_PRC":        "0",   # 수정주가
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=5)
+        resp.raise_for_status()
+        rows = resp.json().get("output2", []) or []
+        result = []
+        for row in rows[:n]:
+            result.append({
+                "날짜":   row.get("stck_bsop_date", ""),
+                "시가":   int(row.get("stck_oprc", 0) or 0),
+                "고가":   int(row.get("stck_hgpr", 0) or 0),
+                "저가":   int(row.get("stck_lwpr", 0) or 0),
+                "종가":   int(row.get("stck_clpr", 0) or 0),
+                "거래량": int(row.get("acml_vol", 0) or 0),
+            })
+        return result
+    except Exception as e:
+        logger.debug(f"[rest] {ticker} 일봉 조회 실패: {e}")
+        return []
+
+
+def get_investor_trading(ticker: str, n: int = 5) -> dict:
+    """
+    [v4.5] 단일 종목 투자자별 매매동향 조회 (KIS tr_id: FHKST03010200)
+    pykrx.get_market_trading_value_by_date() 대체 — 장중 실시간 데이터.
+
+    Returns:
+        {"기관_순매수": int, "외인_순매수": int}  (단위: 원)
+        최근 n 영업일 합산. 실패 시 {"기관_순매수": 0, "외인_순매수": 0}
+    """
+    token = get_access_token()
+    if not token:
+        return {"기관_순매수": 0, "외인_순매수": 0}
+    kis_rate_limiter.acquire()
+    url = f"{_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "appkey":        config.KIS_APP_KEY,
+        "appsecret":     config.KIS_APP_SECRET,
+        "tr_id":         "FHKST03010200",
+        "Content-Type":  "application/json; charset=utf-8",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD":         ticker,
+        "FID_INPUT_DATE_1":       "",    # 빈 값 = 오늘부터 역산
+        "FID_INPUT_DATE_2":       "",
+        "FID_PERIOD_DIV_CODE":    "D",
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=5)
+        resp.raise_for_status()
+        rows = resp.json().get("output2", []) or []
+        inst_sum = 0
+        fore_sum = 0
+        for row in rows[:n]:
+            inst_sum += int(row.get("orgn_ntby_qty", 0) or 0)   # 기관 순매수량
+            fore_sum += int(row.get("frgn_ntby_qty", 0) or 0)   # 외인 순매수량
+        return {"기관_순매수": inst_sum, "외인_순매수": fore_sum}
+    except Exception as e:
+        logger.debug(f"[rest] {ticker} 투자자 조회 실패: {e}")
+        return {"기관_순매수": 0, "외인_순매수": 0}

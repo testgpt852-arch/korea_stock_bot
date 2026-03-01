@@ -68,13 +68,11 @@ try:
     import config as _cfg
     if _cfg.GOOGLE_AI_API_KEY:
         _CLIENT = genai.Client(api_key=_cfg.GOOGLE_AI_API_KEY)
-        _MODEL  = "gemma-3-27b-it"
+        logger.info("[trading_journal] AI 클라이언트 초기화 완료 (폴백 모델 적용)")
     else:
         _CLIENT = None
-        _MODEL  = None
 except Exception:
     _CLIENT = None
-    _MODEL  = None
 
 
 # ── 공개 API ──────────────────────────────────────────────────
@@ -463,15 +461,10 @@ def _ai_retrospective(
 }}"""
 
     try:
-        response = _CLIENT.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=_gtypes.GenerateContentConfig(
-                temperature=0.15,
-                max_output_tokens=800,
-            ),
-        )
-        data = _parse_json(response.text or "")
+        from utils.ai_client import call_ai
+        raw = call_ai(_CLIENT, prompt, max_tokens=800, temperature=0.15,
+                      caller="trading_journal")
+        data = _parse_json(raw)
         situation = data.get("situation_analysis", {})
         judgment  = data.get("judgment_evaluation", {})
         lessons   = data.get("lessons", [])

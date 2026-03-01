@@ -50,13 +50,11 @@ try:
     from google.genai import types as _gtypes
     if config.GOOGLE_AI_API_KEY:
         _CLIENT = genai.Client(api_key=config.GOOGLE_AI_API_KEY)
-        _MODEL  = "gemma-3-27b-it"
+        logger.info("[memory_compressor] AI 클라이언트 초기화 완료 (폴백 모델 적용)")
     else:
         _CLIENT = None
-        _MODEL  = None
 except Exception:
     _CLIENT = None
-    _MODEL  = None
 
 
 # ── 공개 API ──────────────────────────────────────────────────
@@ -563,15 +561,9 @@ def _ai_summarize_to_layer2(
 요약:"""
 
     try:
-        response = _CLIENT.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=_gtypes.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=100,
-            ),
-        )
-        result = (response.text or "").strip()
+        from utils.ai_client import call_ai
+        result = call_ai(_CLIENT, prompt, max_tokens=100, temperature=0.1,
+                         caller="memory_compressor").strip()
         # 마크다운·불필요한 텍스트 제거
         result = re.sub(r"^(요약:?\s*|Summary:?\s*)", "", result, flags=re.IGNORECASE)
         result = result[:100]  # 최대 100자

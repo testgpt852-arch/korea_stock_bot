@@ -469,15 +469,9 @@ def _run_evaluate_analysis(ticker: str, stock_name: str, avg_price: int) -> str:
 간결하고 실용적으로 3~5문장 이내로 작성하세요."""
 
     try:
-        response = google_client.models.generate_content(
-            model="gemma-3-27b-it",
-            contents=prompt,
-            config=_gtypes.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=400,
-            ),
-        )
-        analysis = (response.text or "분석 결과 없음").strip()
+        from utils.ai_client import call_ai
+        analysis = call_ai(google_client, prompt, max_tokens=400, temperature=0.2,
+                           caller="commands.evaluate").strip() or "분석 결과 없음"
     except Exception as e:
         analysis = f"AI 분석 실패: {str(e)[:50]}"
 
@@ -575,6 +569,15 @@ def _resolve_ticker(query: str) -> str:
         return q.zfill(6)
 
     # pykrx로 종목명 → 코드 변환 시도
+    # 종목명 → 코드 변환: pykrx 사용 (전일 확정 목록 — 가격 아님)
+    # 장중(09:00~15:30)에는 pykrx 호출 금지 규칙 적용 → 빈 문자열 반환
+    from datetime import datetime, timezone, timedelta
+    _now = datetime.now(timezone(timedelta(hours=9)))
+    _in_market = (9 <= _now.hour < 15) or (_now.hour == 15 and _now.minute < 30)
+    if _in_market:
+        logger.debug(f"[interactive] 장중 pykrx 호출 금지 — 종목명 검색 불가 ({q})")
+        return ""
+
     try:
         from pykrx import stock as pykrx_stock
         from utils.date_utils import get_today, get_prev_trading_day
@@ -618,28 +621,26 @@ def _run_report_analysis(ticker: str, query: str) -> str:
     except Exception as e:
         logger.debug(f"[report] KIS 현재가 조회 실패 ({ticker}): {e}")
 
-    # ② pykrx — 최근 20영업일 OHLCV + 수급
+    # ② KIS REST — 최근 20영업일 OHLCV + 기관/외인 5일 수급
+    # [v8.1] pykrx(15분 지연, 장중 금지) → KIS REST(실시간, 장중 가능)로 교체
     ohlcv_summary = ""
     supply_summary = ""
     try:
-        from pykrx import stock as pykrx_stock
-        from utils.date_utils import get_today, get_prev_trading_day
-        import datetime as _dt
+        from kis.rest_client import get_daily_ohlcv, get_investor_trading
 
-        today = get_today()
-        # 리포트는 장 무관 — 오늘자 기준 (장중이면 미확정 주의 표시)
-        end_date   = today.strftime("%Y%m%d")
-        start_date = (today - _dt.timedelta(days=35)).strftime("%Y%m%d")
+        rows = get_daily_ohlcv(ticker, n=20)
+        if len(rows) >= 5:
+            closes = [r["종가"] for r in rows if r["종가"] > 0]
+            highs  = [r["고가"] for r in rows if r["고가"] > 0]
+            lows   = [r["저가"] for r in rows if r["저가"] > 0]
+            vols   = [r["거래량"] for r in rows if r["거래량"] > 0]
 
-        df_ohlcv = pykrx_stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
-        if df_ohlcv is not None and len(df_ohlcv) >= 5:
-            last5 = df_ohlcv.tail(5)
-            recent_close  = int(df_ohlcv["종가"].iloc[-1])
-            prev_close    = int(df_ohlcv["종가"].iloc[-2]) if len(df_ohlcv) >= 2 else recent_close
-            high_20 = int(df_ohlcv["고가"].max())
-            low_20  = int(df_ohlcv["저가"].min())
-            avg_vol = int(df_ohlcv["거래량"].mean())
-            last_vol = int(df_ohlcv["거래량"].iloc[-1])
+            recent_close = closes[0] if closes else 0
+            prev_close   = closes[1] if len(closes) >= 2 else recent_close
+            high_20 = max(highs) if highs else 0
+            low_20  = min(lows)  if lows  else 0
+            avg_vol  = int(sum(vols) / len(vols)) if vols else 0
+            last_vol = vols[0] if vols else 0
             vol_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
             chg_rate  = (recent_close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
 
@@ -649,22 +650,20 @@ def _run_report_analysis(ticker: str, query: str) -> str:
                 f"거래량: {last_vol:,}주 (20일 평균 대비 {vol_ratio:.1f}배)"
             )
 
-        # 기관/외인 수급 (최근 5영업일)
-        df_inv = pykrx_stock.get_market_trading_value_by_date(
-            start_date, end_date, ticker
-        )
-        if df_inv is not None and len(df_inv) >= 3:
-            inst_5d = int(df_inv["기관합계"].tail(5).sum()) // 100_000_000
-            fore_5d = int(df_inv["외국인합계"].tail(5).sum()) // 100_000_000
+        inv = get_investor_trading(ticker, n=5)
+        inst_5d = inv["기관_순매수"]
+        fore_5d = inv["외인_순매수"]
+        if inst_5d or fore_5d:
             inst_sign = "+" if inst_5d >= 0 else ""
             fore_sign = "+" if fore_5d >= 0 else ""
+            # KIS 투자자 API는 수량 단위 — 대략적 표시
             supply_summary = (
-                f"기관 5일 순매수: {inst_sign}{inst_5d}억\n"
-                f"외인 5일 순매수: {fore_sign}{fore_5d}억"
+                f"기관 5일 순매수: {inst_sign}{inst_5d:,}주\n"
+                f"외인 5일 순매수: {fore_sign}{fore_5d:,}주"
             )
 
     except Exception as e:
-        logger.debug(f"[report] pykrx 조회 실패 ({ticker}): {e}")
+        logger.debug(f"[report] KIS OHLCV/투자자 조회 실패 ({ticker}): {e}")
 
     # ③ 과거 거래 일지 (같은 종목 경험 있으면 포함)
     journal_ctx = ""
@@ -723,15 +722,9 @@ def _run_report_analysis(ticker: str, query: str) -> str:
 
 간결하고 실용적으로 5개 항목 형식으로 작성하세요."""
 
-            response = client.models.generate_content(
-                model="gemma-3-27b-it",
-                contents=prompt,
-                config=_gtypes.GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=500,
-                ),
-            )
-            ai_analysis = (response.text or "").strip()
+            from utils.ai_client import call_ai
+            ai_analysis = call_ai(client, prompt, max_tokens=500, temperature=0.2,
+                                  caller="commands.report").strip()
     except Exception as e:
         logger.debug(f"[report] AI 분석 실패 ({ticker}): {e}")
         ai_analysis = "AI 분석 불가 (GOOGLE_AI_API_KEY 미설정 또는 API 오류)"

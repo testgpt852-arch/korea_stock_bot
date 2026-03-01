@@ -61,7 +61,7 @@ import config
 KST = timezone(timedelta(hours=9))
 
 # ── Gemini API 초기화 ────────────────────────────────────────
-_GEMINI_MODEL = "gemini-2.5-flash"   # §11 ⑤ 고정
+# 모델 폴백은 utils/ai_client.py AI_MODELS 순서를 따름
 
 try:
     from google import genai as _genai_mod
@@ -69,7 +69,7 @@ try:
 
     if config.GOOGLE_AI_API_KEY:
         _CLIENT = _genai_mod.Client(api_key=config.GOOGLE_AI_API_KEY)
-        logger.info(f"[morning_analyzer] Gemini ({_GEMINI_MODEL}) 초기화 완료")
+        logger.info("[morning_analyzer] Gemini 클라이언트 초기화 완료 (폴백 모델 적용)")
     else:
         _CLIENT = None
         logger.warning("[morning_analyzer] GOOGLE_AI_API_KEY 없음 — Gemini 분석 비활성")
@@ -554,18 +554,10 @@ def _map_type_to_signal(유형: str) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
-    """Gemini 2.5 Flash API 호출 (§11 ⑤ — 이 모델만)."""
-    if not _CLIENT:
-        raise RuntimeError("[morning_analyzer] Gemini 클라이언트 미초기화")
-    response = _CLIENT.models.generate_content(
-        model    = _GEMINI_MODEL,
-        contents = prompt,
-        config   = _genai_types.GenerateContentConfig(
-            temperature       = 0.2,
-            max_output_tokens = max_tokens,
-        ),
-    )
-    return response.text
+    """AI 모델 폴백 호출 (utils/ai_client.AI_MODELS 순서)."""
+    from utils.ai_client import call_ai
+    return call_ai(_CLIENT, prompt, max_tokens=max_tokens,
+                   temperature=0.2, caller="morning_analyzer")
 
 
 def _extract_json(raw: str):
