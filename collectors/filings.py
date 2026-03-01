@@ -120,25 +120,30 @@ def _fetch_dart_api(date_str: str) -> list[dict]:
 
 def _fetch_dart_web(date_str: str) -> list[dict]:
     """
-    DART 웹사이트 공시 목록 fetch (API 실패 시 백업)
-
-    ⚠️ [v13.0 주의] 이 함수는 공식 OpenAPI가 아닌 비공식 엔드포인트를 사용.
-    dart.fss.or.kr/api/search.json 은 실제 DART 웹 내부 Ajax 엔드포인트로
-    파라미터 구조·응답 형식·가용성이 opendart.fss.or.kr/api/list.json 과 다름.
-    실패 시 빈 리스트 반환이므로 비치명적이나 안정성 보장 불가.
+    [BUG-11 수정] DART 공식 OpenAPI 페이지 2 재시도 (기존 비공식 엔드포인트 교체).
+    기존: dart.fss.or.kr/api/search.json — 비공식 내부 Ajax, key 파라미터 불일치, 응답 구조 상이
+    수정: opendart.fss.or.kr/api/list.json 페이지 2 호출 (공식 OpenAPI, crtfc_key 사용)
     """
-    url = "https://dart.fss.or.kr/api/search.json"
+    url = "https://opendart.fss.or.kr/api/list.json"
     params = {
-        "key":        config.DART_API_KEY,   # ⚠️ 공식 OpenAPI의 crtfc_key와 다름
-        "ds":         date_str,
-        "de":         date_str,
+        "crtfc_key":  config.DART_API_KEY,
+        "bgn_de":     date_str,
+        "end_de":     date_str,
+        "page_no":    2,
         "page_count": 100,
     }
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    items = data.get("list", [])
-    return _filter_and_format(items, date_str)
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "000":
+            logger.warning(f"[filings] DART API 페이지2 응답 오류: {data.get('message')}")
+            return []
+        items = data.get("list", [])
+        return _filter_and_format(items, date_str)
+    except Exception as e:
+        logger.warning(f"[filings] DART API 페이지2 백업 실패: {e}")
+        return []
 
 
 # ── 필터 + 포맷 ───────────────────────────────────────────────

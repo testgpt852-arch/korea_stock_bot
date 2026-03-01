@@ -30,8 +30,42 @@ def send(text: str) -> None:
     try:
         asyncio.run(_send(text))
     except RuntimeError:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(_send(text))
+        # 이미 실행 중인 루프가 있는 경우 (asyncio.run 실패) — BUG-07 수정
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_send(text))
+        finally:
+            loop.close()
+
+
+def format_trade_closed(trade: dict) -> str:
+    """
+    [BUG-01 수정] 청산 완료 텔레그램 메시지 포맷.
+    v12.0에서 마감봇 관련 코드 삭제 시 함께 제거됐던 함수 복구.
+    main.py(135/165번 줄), realtime_alert.py(373번 줄)에서 호출.
+    """
+    name        = trade.get("name",         trade.get("종목명", ""))
+    ticker      = trade.get("ticker",       trade.get("종목코드", ""))
+    profit_rate = trade.get("profit_rate",  0.0)
+    reason      = trade.get("close_reason", "")
+    sell_price  = trade.get("sell_price",   0)
+    profit_amt  = trade.get("profit_amount", 0)
+
+    sign  = "🟢" if profit_rate >= 0 else "🔴"
+    emoji = {
+        "take_profit_1":  "✅",
+        "take_profit_2":  "🎯",
+        "stop_loss":      "🛑",
+        "trailing_stop":  "📉",
+        "force_close":    "⏰",
+        "final_close":    "🏁",
+    }.get(reason, "📌")
+
+    return (
+        f"{sign} <b>청산</b> {name}({ticker})\n"
+        f"   {emoji} {reason}  수익률 <b>{profit_rate:+.2f}%</b>\n"
+        f"   매도가 {sell_price:,}원  손익 {profit_amt:+,}원"
+    )
 
 
 async def send_async(text: str) -> None:

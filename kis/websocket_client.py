@@ -320,8 +320,8 @@ class KISWebSocketClient:
     async def _wait_for_ack(self, ticker: str, timeout: float = 3.0) -> bool:
         """구독 요청 후 ack 수신 대기"""
         try:
-            deadline = asyncio.get_event_loop().time() + timeout
-            while asyncio.get_event_loop().time() < deadline:
+            deadline = asyncio.get_running_loop().time()  # [BUG-07] deprecated fix + timeout
+            while asyncio.get_running_loop().time()  # [BUG-07] deprecated fix < deadline:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=1.0)
                 data = json.loads(raw) if isinstance(raw, str) else {}
                 if _is_ack(data, ticker):

@@ -73,10 +73,11 @@ def collect(target_date: datetime = None) -> dict:
 
     us          = _collect_us_market()
     commodities = _collect_commodities()
+    forex       = _collect_forex()                # [BUG-05 수정] 환율 수집 추가
     us["sectors"] = _collect_sectors()          # v2.1 추가
     us["summary"] = _collect_summary(date_kr)
 
-    return {"us_market": us, "commodities": commodities}
+    return {"us_market": us, "commodities": commodities, "forex": forex}  # [BUG-05] forex 포함
 
 
 def _fetch_change(tickers: list) -> str:
@@ -198,6 +199,23 @@ def _collect_commodities() -> dict:
         except ValueError:
             continue
     return filtered
+
+
+def _collect_forex() -> dict:
+    """
+    [BUG-05 신규] USD/KRW 환율 수집 (yfinance).
+    morning_analyzer._analyze_market_env()가 market_data["forex"]로 접근.
+    기존 collect()가 "forex" 키를 반환하지 않아 항상 {} → 환율 분석 불가.
+    """
+    try:
+        data = yf.Ticker("KRW=X").history(period="5d")
+        if len(data) >= 1:
+            usd_krw = round(float(data["Close"].iloc[-1]), 2)
+            logger.info(f"[market] USD/KRW 환율: {usd_krw}")
+            return {"USD/KRW": usd_krw}
+    except Exception as e:
+        logger.warning(f"[market] 환율 수집 실패: {e}")
+    return {}
 
 
 def _collect_summary(date_kr: str) -> str:

@@ -41,6 +41,7 @@ analyzers/intraday_analyzer.py
          픽근거 / 알림유형 반환 필드 추가
 """
 
+import re
 from datetime import datetime, timezone, timedelta
 from utils.logger import logger
 import config
@@ -392,11 +393,21 @@ def _check_price_trigger(
     # 손절 기준 도달
     try:
         if 손절기준:
-            손절_str = 손절기준.replace("%", "").split("원")[0].strip()
-            손절_val = float(손절_str.replace(",", ""))
-            # 비율 기준 (음수)
-            if 손절_val < 0 and change_rate <= 손절_val:
-                return True, "가격도달_손절"
+            # [BUG-08 수정] 비율(%) 기준과 가격(원) 기준 두 가지 처리
+            if "원" in 손절기준:
+                # 가격 기준: "9,500원 하향 시", "9500원" 등
+                price_str = 손절기준.split("원")[0].replace(",", "").strip()
+                nums = re.findall(r"\d+", price_str)
+                if nums:
+                    stop_price = int(nums[-1])
+                    if stop_price > 0 and curr_price <= stop_price:
+                        return True, "가격도달_손절"
+            else:
+                # 비율 기준: "-5%" 또는 "-5"
+                손절_str = 손절기준.replace("%", "").strip()
+                손절_val = float(손절_str.replace(",", ""))
+                if 손절_val < 0 and change_rate <= 손절_val:
+                    return True, "가격도달_손절"
     except (ValueError, AttributeError):
         pass
 

@@ -65,7 +65,7 @@ async def run_performance_batch():
     if not is_market_open(get_today()):
         logger.info("[main] 휴장일 — 수익률 배치 건너뜀")
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
     from tracking.performance_tracker import run_batch
     await loop.run_in_executor(None, run_batch)
 
@@ -89,7 +89,7 @@ async def run_principles_extraction():
     """
     from tracking.principles_extractor import run_weekly_extraction
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(  # [BUG-07] deprecated fix
             None, run_weekly_extraction
         )
         logger.info(
@@ -121,7 +121,7 @@ async def run_force_close():
     if not is_market_open(get_today()):
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
     from traders.position_manager import force_close_all
     import telegram.sender as telegram_bot
 
@@ -151,7 +151,7 @@ async def run_final_close():
     if not is_market_open(get_today()):
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
     from traders.position_manager import final_close_all
     import telegram.sender as telegram_bot
 
@@ -275,7 +275,8 @@ async def run_memory_compression():
     """
     from tracking.memory_compressor import run_compression
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, run_compression)
+        result = await asyncio.get_running_loop().run_in_executor(  # [BUG-07] deprecated fix
+            None, run_compression)
         logger.info(
             f"[main] 기억 압축 완료 — "
             f"Layer1→2: {result.get('compressed_l1', 0)}건, "

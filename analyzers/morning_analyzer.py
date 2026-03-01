@@ -114,7 +114,7 @@ async def analyze(cache: dict) -> dict:
         logger.error("[morning_analyzer] Gemini 클라이언트 없음 — 분석 중단")
         return result
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
 
     # ── 호출① 시장환경 판단 ──────────────────────────────────
     try:
@@ -408,6 +408,16 @@ def _pick_final(cache: dict, candidates: dict) -> dict:
 
     if isinstance(data, dict) and "picks" in data:
         picks = data["picks"]
+        # ── [BUG-03 수정] cap_tier 역매핑 ──────────────────────────
+        # Gemini 출력 JSON 스키마에 cap_tier 없음 → candidates에서 주입
+        cap_map      = {s.get("종목명",   ""): s.get("cap_tier", "미분류") for s in candidate_stocks}
+        code_cap_map = {s.get("종목코드", ""): s.get("cap_tier", "미분류") for s in candidate_stocks}
+        for p in picks:
+            p["cap_tier"] = (
+                cap_map.get(p.get("종목명",   ""))
+                or code_cap_map.get(p.get("종목코드", ""))
+                or "미분류"
+            )
         # 순위 정규화
         for i, p in enumerate(picks, 1):
             p.setdefault("순위", i)
@@ -446,7 +456,7 @@ def _save_daily_picks(picks: list[dict]) -> None:
                 p.get("순위"),
                 p.get("종목코드", ""),
                 p.get("종목명", ""),
-                p.get("유형", "미분류"),
+                _map_type_to_signal(p.get("유형", "미분류")),  # [BUG-10] 변환 후 저장
                 p.get("cap_tier", "미분류"),
                 p.get("근거", ""),
                 p.get("목표등락률", ""),
@@ -510,15 +520,22 @@ def _build_rag_context(candidate_stocks: list[dict]) -> str:
 
 
 def _infer_cap_tier_from_cap(cap: int) -> str:
-    """시가총액(원) → cap_tier 문자열 변환."""
+    """
+    [BUG-02 수정] 시가총액(원) → cap_tier 문자열 변환.
+    rag_pattern_db._infer_cap_tier() 와 명칭 완전 통일.
+    기존: 소형_극소 / 소형 / 중형이상  (rag_pattern_db와 불일치 → RAG 영구 빈 결과)
+    수정: 소형_300억미만 / 소형_1000억미만 / 소형_3000억미만 / 중형  (통일)
+    """
     if not cap or cap <= 0:
         return "미분류"
-    if cap < 30_000_000_000:          # 300억 미만
-        return "소형_극소"
-    elif cap < 300_000_000_000:        # 3000억 미만
-        return "소형"
+    if cap < 30_000_000_000:           # 300억 미만
+        return "소형_300억미만"
+    elif cap < 100_000_000_000:         # 1000억 미만
+        return "소형_1000억미만"
+    elif cap < 300_000_000_000:         # 3000억 미만
+        return "소형_3000억미만"
     else:
-        return "중형이상"
+        return "중형"
 
 
 def _map_type_to_signal(유형: str) -> str:
@@ -552,7 +569,11 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
 
 
 def _extract_json(raw: str):
-    """AI 응답에서 JSON 추출 (마크다운 펜스 제거 포함)."""
+    """
+    [BUG-09 수정] AI 응답에서 JSON 추출 (마크다운 펜스 제거 포함).
+    기존: r"\\{[^{}]+\\}" 패턴 → 중첩 {} 있으면 매칭 실패
+    수정: json.loads 실패 시 끝에서부터 한 문자씩 잘라내며 재시도 (후위 잘림 대응)
+    """
     cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
     match   = re.search(r"[\[{]", cleaned)
     if not match:
@@ -560,21 +581,19 @@ def _extract_json(raw: str):
     json_str = cleaned[match.start():]
     # 닫는 괄호 탐색
     end = json_str.rfind("]") if json_str.startswith("[") else json_str.rfind("}")
-    if end == -1:
-        raise ValueError("JSON 종료 토큰 없음")
-    json_str = json_str[:end + 1]
+    if end != -1:
+        json_str = json_str[:end + 1]
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
-        # 개별 객체 복구 시도
-        results = []
-        for m in re.finditer(r"\{[^{}]+\}", json_str):
-            try:
-                results.append(json.loads(m.group()))
-            except Exception:
+        # 후위 잘림 대응: 마지막 완전한 JSON 경계까지 잘라내며 재시도
+        for i in range(len(json_str) - 1, -1, -1):
+            if json_str[i] not in ('}', ']'):
                 continue
-        if results:
-            return results
+            try:
+                return json.loads(json_str[:i + 1])
+            except json.JSONDecodeError:
+                continue
         raise
 
 

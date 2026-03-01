@@ -339,7 +339,7 @@ async def _cmd_evaluate_price(update, context) -> int:
     )
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
         result = await loop.run_in_executor(
             None,
             _run_evaluate_analysis,
@@ -550,7 +550,7 @@ async def _cmd_report(update, context) -> None:
             parse_mode="HTML"
         )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
         result = await loop.run_in_executor(
             None, _run_report_analysis, ticker, query
         )

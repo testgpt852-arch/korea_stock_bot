@@ -226,7 +226,7 @@ async def _safe_collect(name: str, fn, *args):
     단일 수집기 실행 — 실패 시 None 반환 (비치명적).
     모든 동기 수집기를 executor에서 실행해 asyncio.gather()와 호환.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] get_event_loop() deprecated → get_running_loop()
     try:
         result = await loop.run_in_executor(None, fn, *args)
         return result
@@ -426,7 +426,8 @@ def _send_raw_data_to_telegram(cache: dict) -> None:
     if fund_top:
         for f in fund_top[:5]:
             name  = f.get("종목명", f.get("name", ""))
-            ratio = f.get("ratio", f.get("거래대금시총비율", 0))
+            # [BUG-06 수정] fund_concentration.py 반환키: "자금유입비율" → 올바른 키 우선
+            ratio = f.get("자금유입비율", f.get("ratio", f.get("거래대금시총비율", 0)))
             lines.append(f"  - {name}: {ratio:.1f}%" if ratio else f"  - {name}")
     else:
         lines.append("  - 해당 없음")

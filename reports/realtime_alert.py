@@ -103,7 +103,7 @@ async def _poll_loop() -> None:
             logger.info(f"[realtime] 폴링 사이클 #{cycle} 시작")
 
             # poll_all_markets() 내부에서 급등 종목에 한해 호가 분석 자동 수행 (v4.0)
-            results = await asyncio.get_event_loop().run_in_executor(
+            results = await asyncio.get_running_loop().run_in_executor(  # [BUG-07] deprecated fix
                 None, intraday_analyzer.poll_all_markets
             )
 
@@ -197,7 +197,7 @@ async def _ws_loop(watchlist: dict) -> None:
             if config.WS_ORDERBOOK_ENABLED and ticker in _ob_cache:
                 result = intraday_analyzer.analyze_ws_orderbook_tick(_ob_cache[ticker], result)
             elif config.ORDERBOOK_ENABLED and not config.WS_ORDERBOOK_ENABLED:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
                 from kis.rest_client import get_orderbook
                 ob_data = await loop.run_in_executor(None, lambda: get_orderbook(ticker))
                 호가분석 = intraday_analyzer.analyze_orderbook(ob_data)
@@ -270,7 +270,7 @@ async def _handle_trade_signal_numeric(analysis: dict) -> None:
         sector     = watchlist_state.get_sector(ticker)
 
         from traders import position_manager
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
         ok, reason = await loop.run_in_executor(
             None,
             lambda: position_manager.can_buy(ticker, market_env=market_env)
@@ -302,7 +302,7 @@ async def _handle_trade_signal(
     from traders import position_manager
     from kis import order_client
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
 
     try:
         buy_result = await loop.run_in_executor(
@@ -355,7 +355,7 @@ async def _check_positions() -> None:
     """포지션 익절/손절/Trailing Stop 검사 + 청산 처리 (v3.4 / v4.2 TS 추가)"""
     from traders import position_manager
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # [BUG-07] deprecated fix
     try:
         closed_list = await loop.run_in_executor(
             None, position_manager.check_exit

@@ -145,12 +145,13 @@ def _save_rag_patterns_after_batch(today_str: str) -> None:
                 })
 
             # ── results: performance_tracker 1d 추적 완료 행 ─────────
+            # [BUG-04 수정] done_1d=1은 어제 알림을 오늘 추적 완료 → tracked_date_1d=today로 필터
             c.execute("""
                 SELECT ah.ticker, ah.name, ah.source,
                        pt.return_1d, pt.price_at_alert, pt.price_1d
                 FROM performance_tracker pt
                 JOIN alert_history ah ON pt.alert_id = ah.id
-                WHERE pt.alert_date = ? AND pt.done_1d = 1
+                WHERE pt.tracked_date_1d = ? AND pt.done_1d = 1
             """, (today_str,))
             rows = c.fetchall()
         finally:
@@ -277,35 +278,32 @@ def _update_period(
 
         price_map = _fetch_prices_batch(today_str)
 
+        # [BUG-12 수정] 루프 내 commit → 배치 executemany + 단일 commit
+        done_only: list[tuple] = []       # 가격 없어서 done만 세팅
+        full_update: list[tuple] = []     # 수익률 계산 포함
+
         for (row_id, ticker, price_at_alert) in rows:
             curr = price_map.get(ticker)
-            if curr is None or curr <= 0:
-                c.execute(f"""
-                    UPDATE performance_tracker
-                    SET {done_col}=1, {date_col}=? WHERE id=?
-                """, (today_str, row_id))
-                conn.commit()
-                updated += 1
+            if curr is None or curr <= 0 or not price_at_alert or price_at_alert <= 0:
+                done_only.append((today_str, row_id))
                 continue
-
-            if not price_at_alert or price_at_alert <= 0:
-                c.execute(f"""
-                    UPDATE performance_tracker
-                    SET {done_col}=1, {date_col}=? WHERE id=?
-                """, (today_str, row_id))
-                conn.commit()
-                updated += 1
-                continue
-
             ret = round((curr - price_at_alert) / price_at_alert * 100, 2)
-            c.execute(f"""
+            full_update.append((curr, ret, today_str, row_id))
+
+        if done_only:
+            c.executemany(f"""
+                UPDATE performance_tracker
+                SET {done_col}=1, {date_col}=? WHERE id=?
+            """, done_only)
+        if full_update:
+            c.executemany(f"""
                 UPDATE performance_tracker
                 SET {price_col}=?, {return_col}=?, {done_col}=1, {date_col}=?
                 WHERE id=?
-            """, (curr, ret, today_str, row_id))
-            conn.commit()
-            updated += 1
+            """, full_update)
 
+        conn.commit()
+        updated = len(done_only) + len(full_update)
         return updated
 
     except Exception as e:
