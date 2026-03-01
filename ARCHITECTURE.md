@@ -344,7 +344,8 @@ MORNING_PICK_MAX          = 15     # 최종 픽 최대 15종목 (구: 5)
 
 **아침봇**
 - `morning_analyzer` Gemini 호출 3개 함수로만 제한 (`_analyze_market_env` / `_analyze_materials` / `_pick_final`)
-- `morning_analyzer` 에서 텔레그램 발송·DB 기록·KIS 직접 호출 금지
+- `morning_analyzer` 에서 텔레그램 발송·KIS 직접 호출 금지
+  단, `daily_picks` 테이블 INSERT는 예외 허용 (`_save_daily_picks()` 한정, RAG 연결용)
 - 하드코딩 섹터 매핑(`US_SECTOR_KR_INDUSTRY` 등) 재도입 금지 — AI가 직접 판단
 
 **장중봇**

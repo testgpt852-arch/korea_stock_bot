@@ -51,10 +51,10 @@ def collect(target_date: datetime = None) -> list[dict]:
         "종목명":     str,
         "종목코드":   str,
         "공시종류":   str,
-        "핵심내용":   str,
+        "핵심내용":   str,       # 공시 제목 원문 (report_nm)
         "공시시각":   str,
         "신뢰도":     str,       # "원본" or "검색"
-        "내부자여부": bool,
+        "내부자여부": bool,      # 주요주주 공시 여부
         "규모":       str,       # v2.1: "25.3%" / "150억" / "N/A"
         "본문요약":   str,       # v13.0: 핵심 수치 추출 텍스트 (없으면 "")
         "rcept_no":   str,       # v13.0: DART 본문 API 연결용 접수번호

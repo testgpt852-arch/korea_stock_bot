@@ -604,13 +604,9 @@ def force_close_all() -> list[dict]:
     except Exception:
         pass
 
-    try:
-        from analyzers.ai_analyzer import analyze_selective_close
-        close_verdict = analyze_selective_close(positions_with_pnl, market_env)
-    except Exception as e:
-        logger.warning(f"[position] 선택적청산 AI 실패 → 전량 청산: {e}")
-        # AI 실패 시 기존 동작: 전량 청산
-        close_verdict = {p["ticker"]: "청산" for p in positions_with_pnl}
+    # [v13.0] ai_analyzer 삭제됨 — 선택적청산 AI 제거, 전량 청산으로 고정
+    logger.info("[position] v13.0: 선택적청산 AI 제거 → 전량 청산")
+    close_verdict = {p["ticker"]: "청산" for p in positions_with_pnl}
 
     # ── 청산 실행 ───────────────────────────────────────────────
     closed = []

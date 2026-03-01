@@ -141,7 +141,20 @@ def _collect_sectors() -> dict:
             logger.warning(f"[market] 섹터 {ticker} 실패: {e}")
             result[sector_name] = {"change": "N/A", "신뢰도": "N/A"}
 
-    return result
+    # [v13.0] ±2%+ 필터 적용 — 기준 미달 섹터 제거
+    min_pct = getattr(config, "US_SECTOR_SIGNAL_MIN", 2.0)
+    filtered = {}
+    for name, data in result.items():
+        change = data.get("change", "N/A")
+        if change == "N/A":
+            continue
+        try:
+            pct = float(change.replace("%", "").replace("+", ""))
+            if abs(pct) >= min_pct:
+                filtered[name] = data
+        except ValueError:
+            continue
+    return filtered
 
 
 def _collect_commodities() -> dict:
@@ -171,7 +184,20 @@ def _collect_commodities() -> dict:
             logger.warning(f"[market] {key} 실패: {e}")
             result[key] = dict(empty)
 
-    return result
+    # [v13.0] ±1.5%+ 필터 적용 — 기준 미달 원자재 제거
+    min_pct = getattr(config, "COMMODITY_SIGNAL_MIN", 1.5)
+    filtered = {}
+    for key, data in result.items():
+        change = data.get("change", "N/A")
+        if change == "N/A":
+            continue
+        try:
+            pct = float(change.replace("%", "").replace("+", ""))
+            if abs(pct) >= min_pct:
+                filtered[key] = data
+        except ValueError:
+            continue
+    return filtered
 
 
 def _collect_summary(date_kr: str) -> str:
