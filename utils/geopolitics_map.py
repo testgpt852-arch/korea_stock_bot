@@ -16,7 +16,7 @@ utils/geopolitics_map.py
 GEOPOLITICS_SECTOR_MAP: dict[str, dict]
   key   = 이벤트 패턴 (소문자 키워드 문자열)
   value = {
-    "sectors":          list[str],  # 영향받는 국내 섹터명 (config.US_SECTOR_KR_INDUSTRY key 우선)
+    "sectors":          list[str],  # 영향받는 국내 섹터명 (업종 키워드 문자열)
     "impact":           str,        # "+" 상승 / "-" 하락 / "mixed" 혼재
     "confidence_base":  float,      # 기본 신뢰도 (0~1), AI 분석으로 보정됨
     "description":      str,        # 이벤트→섹터 연결 근거 (설명용)

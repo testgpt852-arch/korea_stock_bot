@@ -113,11 +113,9 @@ def _save_rag_patterns_after_batch(today_str: str) -> None:
     """
     run_batch() 완료 직후 당일 픽 결과를 rag_pattern_db 에 저장.
 
-    picks / results 는 DB에서 직접 조회:
-      - picks    : state_manager 또는 캐시에서 읽는 것이 이상적이나,
-                   v13.0 에서는 alert_history + performance_tracker 조합으로 대체.
-                   morning_analyzer 가 픽 저장 로직을 추가하면 그쪽을 우선 사용.
-      - results  : performance_tracker 테이블 당일 1d 추적 완료 행.
+    [v13.0 개선]
+    picks  : daily_picks 테이블에서 당일 픽 직접 조회 (morning_analyzer가 INSERT)
+    results: performance_tracker 테이블 당일 1d 추적 완료 행.
     """
     try:
         from tracking.rag_pattern_db import save as rag_save
@@ -125,7 +123,28 @@ def _save_rag_patterns_after_batch(today_str: str) -> None:
         conn = db_schema.get_conn()
         try:
             c = conn.cursor()
-            # 당일 1일 추적 완료 행에서 결과 수집
+
+            # ── picks: daily_picks 테이블에서 당일 픽 조회 ──────────
+            c.execute("""
+                SELECT rank, stock_code, stock_name, signal_type, cap_tier, reason
+                FROM daily_picks
+                WHERE date = ?
+                ORDER BY rank
+            """, (today_str,))
+            pick_rows = c.fetchall()
+
+            picks: list[dict] = []
+            for rank, code, name, signal_type, cap_tier, reason in pick_rows:
+                picks.append({
+                    "순위":        rank,
+                    "종목코드":    code,
+                    "종목명":      name,
+                    "signal_type": signal_type or "미분류",
+                    "cap_tier":    cap_tier or "미분류",
+                    "근거":        reason or "",
+                })
+
+            # ── results: performance_tracker 1d 추적 완료 행 ─────────
             c.execute("""
                 SELECT ah.ticker, ah.name, ah.source,
                        pt.return_1d, pt.price_at_alert, pt.price_1d
@@ -139,7 +158,6 @@ def _save_rag_patterns_after_batch(today_str: str) -> None:
 
         results: list[dict] = []
         for ticker, name, source, ret_1d, price_alert, price_1d in rows:
-            # 당일 최고 등락률 근사치 (1d return 을 당일 최고로 간주)
             max_ret = ret_1d if ret_1d is not None else 0.0
             results.append({
                 "종목코드":    ticker,
@@ -150,9 +168,10 @@ def _save_rag_patterns_after_batch(today_str: str) -> None:
                 "hit_upper":   max_ret >= 29.0,
             })
 
-        # picks 는 이 시점에 직접 접근 불가이므로 빈 리스트 → results 만 저장
-        # (morning_analyzer 가 pick 저장 로직을 추가하면 여기서 로드)
-        rag_save(date=today_str, picks=[], results=results)
+        logger.info(
+            f"[perf] RAG 저장 — picks:{len(picks)}건 results:{len(results)}건"
+        )
+        rag_save(date=today_str, picks=picks, results=results)
 
     except Exception as e:
         logger.warning(f"[perf] RAG 패턴 저장 실패 (비치명적): {e}")

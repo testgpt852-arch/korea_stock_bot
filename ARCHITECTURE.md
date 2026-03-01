@@ -14,22 +14,28 @@
          → 필터링된 원시 데이터 캐시 저장
          → 텔레그램 원시 데이터 요약 발송  ← [v13.0] Gemini 장애 대비
 
-[08:30] morning_analyzer.analyze()          ← morning_report.py 에서만 호출
-         ┌─ _analyze_market_env()           ← Gemini 호출 ① 시장환경 판단
+[08:30] morning_report.run(cache=dc)        ← main.py → await run(cache=dc) 단일 호출
+         ↓
+         morning_analyzer.analyze(cache)    ← analyze(cache: dict) 단일 인수
+         ┌─ run_in_executor(_analyze_market_env)  ← Gemini 호출 ① (비동기 처리)
          │   입력: 미국 섹터ETF(±2%+) + 원자재 + 환율
          │   출력: 리스크온/오프 + 주도테마후보
          │
-         ├─ _analyze_materials()            ← Gemini 호출 ② 재료 검증
+         ├─ run_in_executor(_analyze_materials)   ← Gemini 호출 ② (비동기 처리)
          │   입력: DART본문 + 뉴스 + 가격 + 호출①결과
-         │   출력: 후보 20종목 이내 + 재료강도
+         │   출력: 후보 20종목 이내 + 재료강도 + cap_tier
          │
-         └─ _pick_final()                   ← Gemini 호출 ③ 최종 픽
+         └─ run_in_executor(_pick_final)          ← Gemini 호출 ③ (비동기 처리)
              입력: 자금집중 + 공매도 + RAG패턴 + 호출②결과
              출력: picks 15종목 [근거/목표가/손절가/테마여부/매수우선순위]
                           ↓
-           morning_report.py → intraday_analyzer.set_watchlist(picks)
-                                       ↓
-                         WebSocket/REST 15종목 감시 시작
+             daily_picks 테이블 INSERT     ← [v13.0] DB 저장 (RAG 연결용)
+                          ↓
+           morning_report.py 텔레그램 발송 (시장환경 + 픽 15종목 포맷)
+                          ↓
+           intraday_analyzer.set_watchlist(picks)
+                          ↓
+                 WebSocket/REST 15종목 감시 시작
 
 [09:00~15:30] intraday_analyzer.py          ← AI 없음, 숫자 조건만
          모닝봇 픽 15종목만 REST 개별 조회 감시:
@@ -41,7 +47,8 @@
 [14:50] run_force_close()
 [15:20] run_final_close()
 [15:45] performance_tracker.run_batch()     ← trailing stop 갱신
-         → rag_pattern_db.save()            ← [v13.0] RAG 패턴 자동 저장
+         → daily_picks SELECT              ← [v13.0] DB에서 당일 픽 조회
+         → rag_pattern_db.save()           ← [v13.0] RAG 패턴 자동 저장
 
 [일요일 03:00] run_principles_extraction()
 [일요일 03:30] run_memory_compression()
@@ -54,6 +61,7 @@
 ```
 korea_stock_bot/
 ├── main.py                        스케줄러 진입점 (로직 없음)
+│                                    [v13.0] run_morning_bot(): await run(cache=dc) 단일 호출
 ├── config.py                      전역 상수·환경변수 단일 관리
 │
 ├── collectors/
@@ -66,6 +74,7 @@ korea_stock_bot/
 │   ├── news_newsapi.py            NewsAPI 글로벌뉴스
 │   ├── news_global_rss.py         해외RSS + 지정학 통합
 │   ├── price_domestic.py          국내 주가 — 시총 3000억 이하 필터 + 15%+ 급등기준
+│   │                                [v13.0] 병렬폴백 시 시총=0 종목 upper/top_gainers 제외
 │   ├── event_calendar.py          기업 이벤트 캘린더
 │   ├── sector_etf.py              섹터 ETF 거래량 (거래량 500%+ 필터)
 │   ├── short_interest.py          공매도 잔고 (상위 20종목)
@@ -75,13 +84,22 @@ korea_stock_bot/
 │
 ├── analyzers/
 │   ├── morning_analyzer.py        ★ 아침봇 통합분석 — Gemini 3단계 구조
-│   │                                [v13.0] _analyze_market_env/_analyze_materials/_pick_final
+│   │                                [v13.0] analyze(cache: dict) 단일 인수
+│   │                                        run_in_executor로 Gemini 호출 비동기 처리
+│   │                                        _analyze_materials() 반환값에 cap_tier 추가
+│   │                                        _pick_final() 완료 후 daily_picks INSERT
+│   │                                        _save_daily_picks() / _infer_cap_tier_from_cap() 추가
 │   └── intraday_analyzer.py       ★ 장중봇 — 픽 15종목 전담 감시
-│                                    [v13.0] set_watchlist(picks) + 전 종목 스캔 제거
+│                                    [v13.0] set_watchlist()에 _ws_alerted_tickers.clear() 추가
 │
 ├── reports/
 │   ├── morning_report.py          08:30 아침봇
-│   │                                [v13.0] analyze() 후 intraday_analyzer.set_watchlist() 호출
+│   │                                [v13.0 전면 재작성]
+│   │                                  run(cache: dict) 단일 인수
+│   │                                  morning_analyzer.analyze(cache) 단일 호출
+│   │                                  market_env/candidates/picks 구조로 추출
+│   │                                  _format_market_env() / _format_picks() 신규
+│   │                                  signal_result/oracle_result 등 v12 참조 전부 제거
 │   ├── realtime_alert.py          장중 실시간 알림
 │   └── weekly_report.py           주간 보고서
 │
@@ -92,29 +110,32 @@ korea_stock_bot/
 │
 ├── kis/
 │   ├── auth.py
-│   ├── rest_client.py             rate_limiter 내부 호출 전담
+│   ├── rest_client.py
 │   ├── websocket_client.py
 │   └── order_client.py
 │
 ├── traders/
-│   └── position_manager.py        포지션 관리·청산 (전 함수 동기)
+│   └── position_manager.py
 │
 ├── tracking/
 │   ├── db_schema.py               기동 시 1회 초기화
-│   ├── trading_journal.py         거래일지 (alert_recorder 흡수)
-│   ├── accuracy_tracker.py        예측 정확도 기록
+│   │                                [v13.0] daily_picks 테이블 추가 + _migrate_v130_picks()
+│   ├── trading_journal.py
+│   ├── accuracy_tracker.py
 │   ├── performance_tracker.py     수익률 계산 + trailing stop
-│   │                                [v13.0] run_batch() 후 rag_pattern_db.save() 호출
+│   │                                [v13.0] _save_rag_patterns_after_batch():
+│   │                                        daily_picks SELECT → rag_save(picks=실제픽)
 │   ├── rag_pattern_db.py          [v13.0 신규] 신호→픽→결과 패턴 저장 + 유사패턴 검색
-│   ├── principles_extractor.py    매매원칙 추출
-│   ├── memory_compressor.py       기억 3계층 압축
-│   ├── theme_history.py           테마 이력 DB
-│   └── ai_context.py              DB 조회 + 컨텍스트 문자열 반환 (동기전용)
+│   ├── principles_extractor.py
+│   ├── memory_compressor.py
+│   ├── theme_history.py
+│   └── ai_context.py
 │
 └── utils/
     ├── logger.py
     ├── date_utils.py
-    ├── watchlist_state.py         WebSocket 워치리스트 + 시장환경 + 섹터맵 공유 상태
+    ├── watchlist_state.py
+    ├── geopolitics_map.py         [v13.0] US_SECTOR_KR_INDUSTRY 잔존 주석 제거
     └── rate_limiter.py
 ```
 

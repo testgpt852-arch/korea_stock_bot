@@ -102,6 +102,8 @@ async def analyze(cache: dict) -> dict:
             "picks":       list,   # 호출③ — 최종 픽 15종목
         }
     """
+    import asyncio
+
     result: dict = {
         "market_env": {},
         "candidates": {"후보종목": [], "제외근거": ""},
@@ -112,9 +114,13 @@ async def analyze(cache: dict) -> dict:
         logger.error("[morning_analyzer] Gemini 클라이언트 없음 — 분석 중단")
         return result
 
+    loop = asyncio.get_event_loop()
+
     # ── 호출① 시장환경 판단 ──────────────────────────────────
     try:
-        market_env = _analyze_market_env(cache.get("market_data", {}))
+        market_env = await loop.run_in_executor(
+            None, _analyze_market_env, cache.get("market_data", {})
+        )
         result["market_env"] = market_env
         logger.info(
             f"[morning_analyzer] ①시장환경: {market_env.get('환경','?')} "
@@ -126,7 +132,9 @@ async def analyze(cache: dict) -> dict:
 
     # ── 호출② 재료 검증 + 후보 압축 ────────────────────────
     try:
-        candidates = _analyze_materials(cache, result["market_env"])
+        candidates = await loop.run_in_executor(
+            None, _analyze_materials, cache, result["market_env"]
+        )
         result["candidates"] = candidates
         n_cand = len(candidates.get("후보종목", []))
         logger.info(f"[morning_analyzer] ②후보종목 {n_cand}개 선별 완료")
@@ -136,7 +144,9 @@ async def analyze(cache: dict) -> dict:
 
     # ── 호출③ 최종 픽 15종목 (RAG 포함) ────────────────────
     try:
-        picks_result = _pick_final(cache, result["candidates"])
+        picks_result = await loop.run_in_executor(
+            None, _pick_final, cache, result["candidates"]
+        )
         result["picks"] = picks_result.get("picks", [])
         logger.info(f"[morning_analyzer] ③최종 픽 {len(result['picks'])}종목 완료")
     except Exception as e:
@@ -294,6 +304,18 @@ def _analyze_materials(cache: dict, market_env: dict) -> dict:
     data = _extract_json(raw)
 
     if isinstance(data, dict) and "후보종목" in data:
+        # ── cap_tier 주입 (price_data 시가총액 기반) ─────────
+        price_data = cache.get("price_data") or {}
+        by_code: dict = price_data.get("by_code", {}) if isinstance(price_data, dict) else {}
+        by_name: dict = price_data.get("by_name", {}) if isinstance(price_data, dict) else {}
+
+        for stock in data.get("후보종목", []):
+            code = stock.get("종목코드", "")
+            name = stock.get("종목명", "")
+            entry = by_code.get(code) or by_name.get(name) or {}
+            cap = entry.get("시가총액", 0) or 0
+            stock["cap_tier"] = _infer_cap_tier_from_cap(cap)
+
         return data
 
     logger.warning(f"[morning_analyzer] ②재료검증 JSON 파싱 실패, 원문: {raw[:120]}")
@@ -385,7 +407,12 @@ def _pick_final(cache: dict, candidates: dict) -> dict:
         # 순위 정규화
         for i, p in enumerate(picks, 1):
             p.setdefault("순위", i)
-        return {"picks": picks[:15]}
+        final_picks = picks[:15]
+
+        # ── daily_picks DB 저장 ────────────────────────────
+        _save_daily_picks(final_picks)
+
+        return {"picks": final_picks}
 
     logger.warning(f"[morning_analyzer] ③최종픽 JSON 파싱 실패, 원문: {raw[:120]}")
     return {"picks": []}
@@ -394,6 +421,51 @@ def _pick_final(cache: dict, candidates: dict) -> dict:
 # ══════════════════════════════════════════════════════════════
 # RAG 헬퍼
 # ══════════════════════════════════════════════════════════════
+
+def _save_daily_picks(picks: list[dict]) -> None:
+    """
+    [v13.0] _pick_final() 완료 직후 daily_picks 테이블에 당일 픽 저장.
+    performance_tracker._save_rag_patterns_after_batch() 에서 이 데이터를 읽어 rag_save() 호출.
+
+    §11 규칙: 이 함수는 _pick_final() 내부에서만 호출.
+    """
+    if not picks:
+        return
+    try:
+        import tracking.db_schema as db_schema
+        today_str = datetime.now(KST).strftime("%Y%m%d")
+        created_at = datetime.now(KST).isoformat()
+        rows = []
+        for p in picks:
+            rows.append((
+                today_str,
+                p.get("순위"),
+                p.get("종목코드", ""),
+                p.get("종목명", ""),
+                p.get("유형", "미분류"),
+                p.get("cap_tier", "미분류"),
+                p.get("근거", ""),
+                p.get("목표등락률", ""),
+                p.get("손절기준", ""),
+                created_at,
+            ))
+        conn = db_schema.get_conn()
+        try:
+            c = conn.cursor()
+            # 당일 기존 픽 삭제 후 재삽입 (08:30 재실행 대비)
+            c.execute("DELETE FROM daily_picks WHERE date = ?", (today_str,))
+            c.executemany("""
+                INSERT INTO daily_picks
+                    (date, rank, stock_code, stock_name, signal_type, cap_tier,
+                     reason, target_rate, stop_loss, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.commit()
+            logger.info(f"[morning_analyzer] daily_picks 저장 완료 — {len(rows)}건")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[morning_analyzer] daily_picks 저장 실패 (비치명적): {e}")
 
 def _build_rag_context(candidate_stocks: list[dict]) -> str:
     """
@@ -431,6 +503,18 @@ def _build_rag_context(candidate_stocks: list[dict]) -> str:
             rag_lines.append(text)
 
     return "\n\n".join(rag_lines)
+
+
+def _infer_cap_tier_from_cap(cap: int) -> str:
+    """시가총액(원) → cap_tier 문자열 변환."""
+    if not cap or cap <= 0:
+        return "미분류"
+    if cap < 30_000_000_000:          # 300억 미만
+        return "소형_극소"
+    elif cap < 300_000_000_000:        # 3000억 미만
+        return "소형"
+    else:
+        return "중형이상"
 
 
 def _map_type_to_signal(유형: str) -> str:

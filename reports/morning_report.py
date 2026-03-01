@@ -2,57 +2,47 @@
 reports/morning_report.py
 아침봇 보고서 조립 전담 (08:30 / 07:30 실행)
 
-[v12.0 Step 6 — 대폭 단순화]
-morning_analyzer.analyze() 하나만 호출하도록 리팩토링.
-
-기존: ai_analyzer, geopolitics_analyzer, theme_analyzer, oracle_analyzer,
-      sector_flow_analyzer, event_impact_analyzer 개별 호출
-변경: morning_analyzer.analyze() 단일 호출 → 모든 분석 통합 수행
+[v13.0 전면 재작성 — REDESIGN_v13.md §5]
 
 [실행 흐름]
-① data_collector / 개별 수집기 → 데이터 수집
-② morning_analyzer.analyze()  → 신호1~8 + AI분석 + 테마 + 쪽집게 통합
-③ watchlist_state              → 시장환경 결정 + 워치리스트 저장
-④ telegram_bot                 → 보고서 조립·발송
-⑤ accuracy_tracker             → 예측 기록 (비치명적)
+① data_collector.get_cache() → cache dict 수신
+② morning_analyzer.analyze(cache) → 3단계 Gemini 분석
+   반환: {"market_env": dict, "candidates": dict, "picks": list}
+③ picks 15종목 텔레그램 발송 (신규 포맷)
+④ intraday_analyzer.set_watchlist(picks) → 장중봇 감시 등록
+⑤ WebSocket 워치리스트 + 섹터맵 저장
+
+[v13.0 변경사항]
+- run() 시그니처: cache: dict 단일 인수
+- morning_analyzer.analyze(cache) 단일 호출
+- v12 키(signals, oracle_result, ai_dart_results 등) 참조 전부 제거
+- picks 15종목 전용 텔레그램 메시지 신규 작성
 
 [수정이력]
 - v1.0: 기본 구조
-- v12.0 Step 6: morning_analyzer 통합 — 개별 analyzer 직접 의존성 제거
+- v12.0 Step 6: morning_analyzer 통합
+- v13.0: v13 3단계 구조로 전면 재작성 (cache 단일 인수)
 """
 
 from utils.logger import logger
 from utils.date_utils import get_today, get_prev_trading_day, fmt_kr
-import collectors.filings        as dart_collector
-import collectors.market_global  as market_collector
-import collectors.news_naver     as news_naver
-import collectors.news_newsapi   as news_newsapi
-import collectors.price_domestic as price_collector
-import analyzers.morning_analyzer  as morning_analyzer   # v12.0: 통합 모듈
-import analyzers.intraday_analyzer as intraday_analyzer  # v13.0: set_watchlist 연결
+import analyzers.morning_analyzer  as morning_analyzer
+import analyzers.intraday_analyzer as intraday_analyzer
 import telegram.sender             as telegram_bot
 import utils.watchlist_state       as watchlist_state
 import config
 
 
-async def run(
-    geopolitics_raw:           list = None,   # news_global_rss 수집 결과
-    event_cache:               list = None,   # event_calendar 결과
-    sector_etf_data:           list = None,   # sector_etf 결과
-    short_data:                list = None,   # short_interest 결과
-    # [v12.0 Step 7] data_collector 사전 수집 결과 (있으면 중복 수집 생략)
-    closing_strength_result:   list = None,   # 마감강도 데이터
-    volume_surge_result:       list = None,   # 거래량급증 데이터
-    fund_concentration_result: list = None,   # 자금집중 데이터
-) -> None:
-    """아침봇 메인 실행 함수 (AsyncIOScheduler에서 호출)
-
-    [v12.0 Step 7] data_collector 통합:
-    - data_collector.get_cache()가 있으면 수집 단계 skip → 분석만 수행
-    - 없으면 기존대로 직접 수집 (fallback)
-    - closing_strength_result / volume_surge_result / fund_concentration_result:
-      data_collector가 06:00에 수집한 마감강도/거래량급증/자금집중 데이터 (있으면 재사용)
+async def run(cache: dict = None) -> None:
     """
+    아침봇 메인 실행 함수 (main.py 가 이것만 호출).
+
+    Args:
+        cache: data_collector.get_cache() 반환값 (dict).
+               캐시 없거나 비어있으면 내부에서 직접 수집 fallback.
+    """
+    cache = cache or {}
+
     today = get_today()
     prev  = get_prev_trading_day(today)
     today_str = fmt_kr(today)
@@ -61,205 +51,80 @@ async def run(
     logger.info(f"[morning] 아침봇 시작 — {today_str} (기준: {prev_str})")
 
     try:
-        # ── ① 데이터 수집 (data_collector 캐시 우선, fallback 직접 수집) ──
-        from collectors.data_collector import get_cache, is_fresh
-        _dc = get_cache() if is_fresh(max_age_minutes=180) else {}
+        # ── ① 캐시 없으면 직접 수집 fallback ────────────────
+        if not cache:
+            logger.info("[morning] 캐시 없음 — 직접 수집 fallback 시작")
+            cache = await _collect_fallback(prev, today)
 
-        if _dc:
-            logger.info("[morning] data_collector 캐시 사용 ✅ (직접 수집 생략)")
-            dart_data   = _dc.get("dart_data")   or dart_collector.collect(prev)
-            market_data = _dc.get("market_data") or market_collector.collect(prev)
-            _naver      = _dc.get("news_naver")  or {}
-            _newsapi    = _dc.get("news_newsapi") or {}
-        else:
-            logger.info("[morning] data_collector 캐시 없음 — 직접 수집 fallback")
-            dart_data   = dart_collector.collect(prev)
-            market_data = market_collector.collect(prev)
-            _naver   = news_naver.collect(today)
-            _newsapi = news_newsapi.collect(today)
+        price_data = cache.get("price_data")
 
-        news_data = {
-            "reports":        _naver.get("reports", [])     + _newsapi.get("reports", []),
-            "policy_news":    _naver.get("policy_news", []) + _newsapi.get("policy_news", []),
-            "datalab_trends": _naver.get("datalab_trends", []),
-        }
-
-        # ── ② 전날 가격 데이터 (캐시 우선) ─────────────────
-        price_data = _dc.get("price_data") if _dc else None
-        if price_data is None and prev:
-            logger.info("[morning] 전날 가격 데이터 수집 중...")
-            try:
-                price_data = price_collector.collect_daily(prev)
-                logger.info(
-                    f"[morning] 가격 수집 완료 — "
-                    f"상한가:{len(price_data.get('upper_limit',[]))}개 "
-                    f"급등:{len(price_data.get('top_gainers',[]))}개 "
-                    f"기관/외인:{len(price_data.get('institutional',[]))}종목"
-                )
-            except Exception as e:
-                logger.warning(f"[morning] 가격 수집 실패 ({e}) — 순환매 지도 생략")
-        elif price_data:
-            logger.info(
-                f"[morning] 가격 데이터 캐시 사용 — "
-                f"상한가:{len(price_data.get('upper_limit',[]))}개 "
-                f"급등:{len(price_data.get('top_gainers',[]))}개"
-            )
-
-        # ── ③ 시장 환경 조기 결정 (종목픽 호출 전 선행) ────────
+        # ── ② 시장 환경 조기 결정 ────────────────────────────
         if price_data:
             _early_env = watchlist_state.determine_and_set_market_env(price_data)
             logger.info(f"[morning] 시장 환경 결정: {_early_env or '(미지정)'}")
 
-        # ── ④ morning_analyzer.analyze() — 통합 분석 ──────────
-        # [v12.0] 모든 분석 로직을 morning_analyzer에 위임
-        # geopolitics_analyzer, theme_analyzer, oracle_analyzer,
-        # sector_flow_analyzer, event_impact_analyzer 직접 호출 제거
-        logger.info("[morning] 통합 분석 중 (morning_analyzer)...")
+        # ── ③ morning_analyzer.analyze(cache) — 3단계 Gemini ─
+        logger.info("[morning] 3단계 Gemini 분석 시작...")
+        morning_result = await morning_analyzer.analyze(cache)
 
-        # 기업 이벤트 캐시 처리
-        _event_input: list | None = None
-        if config.EVENT_CALENDAR_ENABLED:
-            if event_cache:
-                logger.info(f"[morning] 이벤트 캐시 사용 — {len(event_cache)}건")
-                _event_input = event_cache
-            else:
-                try:
-                    import collectors.event_calendar as ev_cal
-                    _event_input = ev_cal.collect(today)
-                    logger.info(f"[morning] 이벤트 캘린더 수집 — {len(_event_input)}건")
-                except Exception as e:
-                    logger.warning(f"[morning] 이벤트 수집 실패: {e}")
-
-        morning_result = await morning_analyzer.analyze(
-            dart_data                  = dart_data,
-            market_data                = market_data,
-            news_data                  = news_data,
-            price_data                 = price_data,
-            geopolitics_raw            = geopolitics_raw,
-            event_calendar             = _event_input,
-            sector_etf_data            = sector_etf_data,
-            short_data                 = short_data,
-            # [v12.0 Step 7] data_collector 사전 수집 마감강도/거래량급증/자금집중
-            closing_strength_result    = closing_strength_result,
-            volume_surge_result        = volume_surge_result,
-            fund_concentration_result  = fund_concentration_result,
-            # [v12.0 Step 8] data_collector._build_signals() 결과 전달 (signal_analyzer 흡수)
-            prebuilt_signals           = _dc.get("signals")         if _dc else None,
-            prebuilt_market_summary    = _dc.get("market_summary")  if _dc else None,
-            prebuilt_commodities       = _dc.get("commodities")     if _dc else None,
-            prebuilt_volatility        = _dc.get("volatility")      if _dc else None,
-            prebuilt_report_picks      = _dc.get("report_picks")    if _dc else None,
-            prebuilt_policy_summary    = _dc.get("policy_summary")  if _dc else None,
-            prebuilt_sector_scores     = _dc.get("sector_scores")   if _dc else None,
-            prebuilt_event_scores      = _dc.get("event_scores")    if _dc else None,
-        )
-
-        # 결과 추출
-        signal_result = {
-            "signals":        morning_result.get("signals",        []),
-            "market_summary": morning_result.get("market_summary", {}),
-            "commodities":    morning_result.get("commodities",    {}),
-            "volatility":     morning_result.get("volatility",     ""),
-            "report_picks":   morning_result.get("report_picks",   []),
-            "policy_summary": morning_result.get("policy_summary", []),
-            "sector_scores":  morning_result.get("sector_scores",  {}),
-            "event_scores":   morning_result.get("event_scores",   {}),
-        }
-        ai_dart_results  = morning_result.get("ai_dart_results",      [])
-        theme_result     = morning_result.get("theme_result",         {"theme_map": []})
-        oracle_result    = morning_result.get("oracle_result",        None)
-        geopolitics_data = morning_result.get("geopolitics_analyzed", [])
-
-        # [v13.0] picks 추출 → intraday_analyzer.set_watchlist() 연결
-        # morning_analyzer._pick_final() 반환값 picks 리스트 (최대 15종목).
-        # morning_analyzer 개편 전이면 빈 리스트.
-        _picks_for_intraday: list[dict] = morning_result.get("picks", [])
+        market_env = morning_result.get("market_env", {})
+        candidates = morning_result.get("candidates", {})
+        picks      = morning_result.get("picks", [])
 
         logger.info(
-            f"[morning] 통합 분석 완료 — "
-            f"신호:{len(signal_result['signals'])}개 "
-            f"공시AI:{len(ai_dart_results)}건 "
-            f"테마:{len(theme_result.get('theme_map',[]))}개 "
-            f"쪽집게:{len(oracle_result.get('picks',[]) if oracle_result else [])}개"
+            f"[morning] 분석 완료 — "
+            f"환경:{market_env.get('환경','?')} "
+            f"후보:{len(candidates.get('후보종목', []))}개 "
+            f"픽:{len(picks)}종목"
         )
 
-        # ── ⑤ 보고서 조립 ─────────────────────────────────────
-        report = {
-            "today_str":          today_str,
-            "prev_str":           prev_str,
-            "signals":            signal_result["signals"],
-            "market_summary":     signal_result["market_summary"],
-            "commodities":        signal_result["commodities"],
-            "volatility":         signal_result["volatility"],
-            "report_picks":       signal_result["report_picks"],
-            "policy_summary":     signal_result["policy_summary"],
-            "theme_map":          theme_result["theme_map"],
-            "ai_dart_results":    ai_dart_results,
-            "prev_kospi":         price_data.get("kospi",  {}) if price_data else {},
-            "prev_kosdaq":        price_data.get("kosdaq", {}) if price_data else {},
-            "prev_institutional": price_data.get("institutional", []) if price_data else [],
-            "oracle":             oracle_result,
-        }
+        # ── ④ 텔레그램 발송 ──────────────────────────────────
 
-        # ── ⑥ 텔레그램 발송 (쪽집게 → 핵심 요약 → 상세) ──────
-        logger.info("[morning] 텔레그램 발송 중...")
+        # 4-a. 시장환경 요약 메시지
+        env_msg = _format_market_env(market_env, today_str, prev_str, price_data)
+        await telegram_bot.send_async(env_msg)
 
-        if oracle_result and oracle_result.get("has_data"):
-            oracle_msg = telegram_bot.format_pick_stocks_section(oracle_result)
-            if oracle_msg:
-                await telegram_bot.send_async(oracle_msg)
-
-        summary_msg = telegram_bot.format_morning_summary(report)
-        await telegram_bot.send_async(summary_msg)
-
-        if config.FULL_REPORT_FORMAT:
-            message = telegram_bot.format_morning_report_full(
-                report, geopolitics_data=geopolitics_data
-            )
+        # 4-b. picks 15종목 발송 (핵심)
+        if picks:
+            picks_msg = _format_picks(picks, market_env)
+            await telegram_bot.send_async(picks_msg)
         else:
-            message = telegram_bot.format_morning_report(
-                report, geopolitics_data=geopolitics_data
+            await telegram_bot.send_async(
+                f"⚠️ [{today_str}] 아침봇 픽 없음\n"
+                f"시장환경: {market_env.get('환경', '불명')}\n"
+                f"후보: {len(candidates.get('후보종목', []))}개 → 조건 미달"
             )
-        await telegram_bot.send_async(message)
 
-        # ── ⑦ [v13.0] intraday_analyzer 픽 워치리스트 등록 ──────
-        # morning_analyzer._pick_final() 결과 picks 15종목을 장중봇 감시 대상으로 등록.
-        # 발송 직후 호출 — realtime_alert 가 09:00에 poll_all_markets() 시작 전에 완료돼야 함.
+        # 4-c. 후보 제외근거 로깅 (디버그)
+        excluded = candidates.get("제외근거", "")
+        if excluded:
+            logger.info(f"[morning] 제외근거: {excluded}")
+
+        # ── ⑤ intraday 픽 워치리스트 등록 ───────────────────
         try:
-            if _picks_for_intraday:
-                intraday_analyzer.set_watchlist(_picks_for_intraday)
+            if picks:
+                intraday_analyzer.set_watchlist(picks)
                 logger.info(
-                    f"[morning] intraday 픽 워치리스트 등록 — {len(_picks_for_intraday)}종목"
+                    f"[morning] intraday 픽 워치리스트 등록 — {len(picks)}종목"
                 )
             else:
                 logger.info("[morning] picks 없음 — intraday 워치리스트 미등록")
-        except Exception as _intra_e:
-            logger.warning(f"[morning] intraday set_watchlist 실패 (비치명적): {_intra_e}")
+        except Exception as e:
+            logger.warning(f"[morning] intraday set_watchlist 실패 (비치명적): {e}")
 
-        # ── ⑧ 예측 기록 ──────────────────────────────────────
-        try:
-            from tracking import accuracy_tracker
-            accuracy_tracker.record_prediction(
-                date_str       = today_str,
-                oracle_result  = oracle_result,
-                signal_sources = signal_result.get("signals", []),
-            )
-        except Exception as _acc_e:
-            logger.warning(f"[morning] 예측 기록 실패 (비치명적): {_acc_e}")
-
-        # ── ⑨ WebSocket 워치리스트 저장 ──────────────────────
-        ws_watchlist = _build_ws_watchlist(price_data, signal_result)
+        # ── ⑥ WebSocket 워치리스트 저장 ─────────────────────
+        ws_watchlist = _build_ws_watchlist(price_data)
         watchlist_state.set_watchlist(ws_watchlist)
-        logger.info(f"[morning] 워치리스트 저장 — {len(ws_watchlist)}종목")
+        logger.info(f"[morning] WebSocket 워치리스트 — {len(ws_watchlist)}종목")
 
-        # ── ⑩ 시장 환경 최종 확인 ────────────────────────────
-        market_env = watchlist_state.get_market_env() or ""
-        logger.info(f"[morning] 시장 환경 최종: {market_env or '(미지정)'}")
-
-        # ── ⑪ 섹터 맵 저장 ────────────────────────────────────
+        # ── ⑦ 섹터 맵 저장 ──────────────────────────────────
         sector_map = _build_sector_map(price_data)
         watchlist_state.set_sector_map(sector_map)
-        logger.info(f"[morning] 섹터 맵 저장 — {len(sector_map)}종목")
+        logger.info(f"[morning] 섹터 맵 — {len(sector_map)}종목")
+
+        # ── ⑧ 시장 환경 최종 확인 ───────────────────────────
+        market_env_state = watchlist_state.get_market_env() or ""
+        logger.info(f"[morning] 시장 환경 최종: {market_env_state or '(미지정)'}")
 
         logger.info("[morning] 아침봇 완료 ✅")
 
@@ -271,13 +136,169 @@ async def run(
             pass
 
 
-# ── 내부 헬퍼 ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 텔레그램 포맷 함수
+# ══════════════════════════════════════════════════════════════
 
-def _build_ws_watchlist(
-    price_data:    dict | None,
-    signal_result: dict,
-) -> dict[str, dict]:
-    """WebSocket 구독용 워치리스트 생성 (우선순위: 상한가>급등>기관>신호)."""
+def _format_market_env(
+    market_env: dict,
+    today_str: str,
+    prev_str: str,
+    price_data: dict | None,
+) -> str:
+    """시장환경 요약 텔레그램 메시지 생성."""
+    환경  = market_env.get("환경", "불명")
+    테마  = market_env.get("주도테마후보", [])
+    영향  = market_env.get("한국시장영향", "")
+
+    환경_이모지 = {"리스크온": "🟢", "리스크오프": "🔴", "중립": "🟡"}.get(환경, "⚪")
+
+    lines = [
+        f"📅 [{today_str}] 아침봇 — 시장환경 분석",
+        "",
+        f"{환경_이모지} 시장환경: {환경}",
+    ]
+
+    if 영향:
+        lines.append(f"📌 {영향}")
+
+    if 테마:
+        lines.append(f"🎯 주도테마 후보: {' / '.join(테마[:5])}")
+
+    # 전날 지수
+    if price_data:
+        kospi  = price_data.get("kospi",  {})
+        kosdaq = price_data.get("kosdaq", {})
+        if kospi.get("change_rate") is not None:
+            lines.append(
+                f"\n📊 전날({prev_str}) 지수\n"
+                f"  KOSPI  {kospi.get('close', 0):,.0f} ({kospi.get('change_rate', 0):+.2f}%)\n"
+                f"  KOSDAQ {kosdaq.get('close', 0):,.0f} ({kosdaq.get('change_rate', 0):+.2f}%)"
+            )
+
+    return "\n".join(lines)
+
+
+def _format_picks(picks: list[dict], market_env: dict) -> str:
+    """
+    최종 픽 15종목 텔레그램 메시지 생성.
+
+    포함 정보: 순위 / 종목명 / 유형 / 근거 / 목표등락률 / 손절기준 / 매수시점
+    """
+    환경 = market_env.get("환경", "중립")
+    환경_이모지 = {"리스크온": "🟢", "리스크오프": "🔴", "중립": "🟡"}.get(환경, "⚪")
+
+    유형_이모지 = {
+        "공시":    "📋",
+        "테마":    "🎯",
+        "순환매":  "🔄",
+        "숏스퀴즈": "💥",
+    }
+
+    lines = [
+        f"🏆 아침봇 최종 픽 {len(picks)}종목 [{환경_이모지} {환경}]",
+        "─" * 28,
+    ]
+
+    for pick in picks:
+        순위    = pick.get("순위", "?")
+        종목명  = pick.get("종목명", "")
+        종목코드 = pick.get("종목코드", "")
+        근거    = pick.get("근거", "")
+        목표    = pick.get("목표등락률", "")
+        손절    = pick.get("손절기준", "")
+        매수    = pick.get("매수시점", "")
+        유형    = pick.get("유형", "")
+        테마    = pick.get("테마여부", False)
+
+        이모지   = 유형_이모지.get(유형, "📌")
+        테마표시 = " 🏷️테마" if 테마 else ""
+        코드표시 = f"({종목코드})" if 종목코드 else ""
+
+        lines.append(f"\n{순위}위 {이모지} {종목명}{코드표시}{테마표시}")
+        if 근거:
+            lines.append(f"   📝 {근거}")
+        if 목표 or 손절:
+            parts = []
+            if 목표:
+                parts.append(f"목표 {목표}")
+            if 손절:
+                parts.append(f"손절 {손절}")
+            lines.append(f"   🎯 {' | '.join(parts)}")
+        if 매수:
+            lines.append(f"   ⏰ {매수}")
+
+    lines.append(f"\n{'─' * 28}")
+    lines.append("⚠️ 본 픽은 참고용입니다. 투자 판단은 본인 책임.")
+
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════
+# fallback 수집 (캐시 없을 때)
+# ══════════════════════════════════════════════════════════════
+
+async def _collect_fallback(prev, today) -> dict:
+    """
+    data_collector 캐시가 없을 때 최소한의 데이터를 직접 수집해 cache dict 반환.
+    """
+    import collectors.filings        as dart_collector
+    import collectors.market_global  as market_collector
+    import collectors.news_naver     as news_naver
+    import collectors.price_domestic as price_collector
+
+    dart_data   = []
+    market_data = {}
+    naver_data  = {}
+    price_data  = None
+
+    try:
+        dart_data = dart_collector.collect(prev)
+    except Exception as e:
+        logger.warning(f"[morning] fallback DART 수집 실패: {e}")
+
+    try:
+        market_data = market_collector.collect(prev)
+    except Exception as e:
+        logger.warning(f"[morning] fallback market 수집 실패: {e}")
+
+    try:
+        naver_data = news_naver.collect(today)
+    except Exception as e:
+        logger.warning(f"[morning] fallback 뉴스 수집 실패: {e}")
+
+    try:
+        if prev:
+            price_data = price_collector.collect_daily(prev)
+    except Exception as e:
+        logger.warning(f"[morning] fallback 가격 수집 실패: {e}")
+
+    return {
+        "dart_data":                 dart_data,
+        "market_data":               market_data,
+        "news_naver":                naver_data,
+        "news_newsapi":              {},
+        "news_global_rss":           [],
+        "price_data":                price_data,
+        "sector_etf_data":           [],
+        "short_data":                [],
+        "event_calendar":            [],
+        "closing_strength_result":   [],
+        "volume_surge_result":       [],
+        "fund_concentration_result": [],
+        "success_flags":             {},
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# 내부 헬퍼
+# ══════════════════════════════════════════════════════════════
+
+def _build_ws_watchlist(price_data: dict | None) -> dict[str, dict]:
+    """
+    WebSocket 구독용 워치리스트 생성 (상한가 > 급등 > 기관 순 우선순위).
+    v13.0: signal 기반 등록 제거 (AI picks가 intraday_analyzer로 별도 전달).
+    """
     if not price_data:
         logger.warning("[morning] price_data 없음 — WebSocket 워치리스트 비어있음")
         return {}
@@ -303,25 +324,22 @@ def _build_ws_watchlist(
         add(s["종목명"], 2)
     for s in price_data.get("institutional", [])[:10]:
         add(s.get("종목명", ""), 3)
-    for signal in signal_result.get("signals", []):
-        for 종목명 in signal.get("관련종목", [])[:3]:
-            add(종목명, 4)
 
     sorted_items = sorted(watchlist.items(), key=lambda x: x[1]["우선순위"])
     result = dict(sorted_items[:config.WS_WATCHLIST_MAX])
 
-    p = {1: 0, 2: 0, 3: 0, 4: 0}
+    p = {1: 0, 2: 0, 3: 0}
     for v in result.values():
         p[v["우선순위"]] = p.get(v["우선순위"], 0) + 1
     logger.info(
-        f"[morning] 워치리스트 — "
-        f"상한가:{p[1]} 급등:{p[2]} 기관:{p[3]} 신호:{p[4]} 합계:{len(result)}"
+        f"[morning] WebSocket 워치리스트 — "
+        f"상한가:{p[1]} 급등:{p[2]} 기관:{p[3]} 합계:{len(result)}"
     )
     return result
 
 
 def _build_sector_map(price_data: dict | None) -> dict[str, str]:
-    """price_data[\"by_sector\"] → {종목코드: 섹터명} 역방향 맵."""
+    """price_data["by_sector"] → {종목코드: 섹터명} 역방향 맵."""
     if not price_data:
         return {}
     by_sector = price_data.get("by_sector", {})

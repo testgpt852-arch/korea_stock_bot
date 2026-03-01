@@ -82,12 +82,15 @@ def collect_daily(target_date: datetime = None) -> dict:
 
     result["upper_limit"] = sorted(
         [v for v in all_stocks.values()
-         if v["등락률"] >= 29.0 and v.get("시가총액", cap_max + 1) <= cap_max],
+         if v["등락률"] >= 29.0
+         and v.get("시가총액", 0) > 0                          # v13.0: 시총=0(폴백) 제외
+         and v.get("시가총액", cap_max + 1) <= cap_max],
         key=lambda x: x["등락률"], reverse=True
     )
     result["top_gainers"] = sorted(
         [v for v in all_stocks.values()
          if gainer_min <= v["등락률"] < 29.0
+         and v.get("시가총액", 0) > 0                          # v13.0: 시총=0(폴백) 제외
          and v.get("시가총액", cap_max + 1) <= cap_max],
         key=lambda x: x["등락률"], reverse=True
     )[:20]
@@ -259,6 +262,10 @@ def _fetch_market_stocks(date_str: str, market: str, target_date: datetime = Non
         )
 
     # ─ 2차: 병렬 개별 조회 폴백 ──────────────────────────────
+    logger.warning(
+        f"[price] {market} 병렬 폴백 활성 — 시가총액=0으로 수집됨 "
+        f"(upper_limit/top_gainers 필터 해당 종목 제외됨)"
+    )
     logger.info(f"[price] {market} 병렬 개별 조회 시작 (pykrx 1.2.x 호환 모드)")
     return _fetch_market_stocks_parallel(date_str, market, target_date)
 

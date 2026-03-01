@@ -95,11 +95,12 @@ def set_watchlist(picks: list[dict]) -> None:
         유일한 호출자 = morning_report.py
         다른 모듈 직접 호출 금지
     """
-    global _watchlist_picks, _prev_snapshot, _confirm_count, _price_alerted
-    _watchlist_picks = picks or []
-    _prev_snapshot   = {}
-    _confirm_count   = {}
-    _price_alerted   = set()
+    global _watchlist_picks, _prev_snapshot, _confirm_count, _price_alerted, _ws_alerted_tickers
+    _watchlist_picks     = picks or []
+    _prev_snapshot       = {}
+    _confirm_count       = {}
+    _price_alerted       = set()
+    _ws_alerted_tickers.clear()   # [v13.0] 재등록 시 이전 WS 알림 상태 초기화
     codes = [p.get("종목코드", "?") for p in _watchlist_picks]
     logger.info(
         f"[intraday] set_watchlist 완료 — {len(_watchlist_picks)}종목 등록: {codes}"

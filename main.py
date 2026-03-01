@@ -53,24 +53,13 @@ async def run_morning_bot():
     from reports.morning_report import run
     from collectors.data_collector import get_cache, is_fresh
 
-    # [v12.0 Step 7] data_collector 캐시 활용
-    # 06:00 data_collector.run() 완료 후 캐시 신선도 확인
+    # [v13.0] data_collector 캐시 활용 — cache dict 하나를 그대로 전달
     dc = get_cache()
     if not is_fresh(max_age_minutes=180):
         logger.warning("[main] data_collector 캐시 없음 또는 오래됨 — 아침봇이 직접 수집")
         dc = {}
 
-    await run(
-        geopolitics_raw  = dc.get("news_global_rss",           []),
-        event_cache      = dc.get("event_calendar",             []),
-        sector_etf_data  = dc.get("sector_etf_data",           []) or None,
-        short_data       = dc.get("short_data",                 []) or None,
-        # [v12.0 Step 7] 마감강도·거래량급증·자금집중을 morning에도 전달
-        # (data_collector가 06:00에 수집한 전날 데이터 재활용)
-        closing_strength_result   = dc.get("closing_strength_result",   []) or None,
-        volume_surge_result       = dc.get("volume_surge_result",       []) or None,
-        fund_concentration_result = dc.get("fund_concentration_result", []) or None,
-    )
+    await run(cache=dc)
 
 
 
@@ -323,7 +312,6 @@ async def run_data_collector():
         cache = await dc_run()
         logger.info(
             f"[main] data_collector 완료 — "
-            f"총점:{cache.get('score_summary',{}).get('total_score',0)} | "
             f"성공:{sum(cache.get('success_flags',{}).values())}/"
             f"{len(cache.get('success_flags',{}))}"
         )

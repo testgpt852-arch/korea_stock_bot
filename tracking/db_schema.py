@@ -328,6 +328,29 @@ def init_db() -> None:
             ON rag_patterns(signal_type, cap_tier, date)
         """)
 
+        # ── 8-e. 당일 픽 저장 [v13.0 Step 4 신규] ──────────────────────
+        # morning_analyzer._pick_final() 완료 직후 INSERT.
+        # performance_tracker._save_rag_patterns_after_batch() 에서 SELECT 후 rag_save() 호출.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS daily_picks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT    NOT NULL,    -- YYYYMMDD
+                rank        INTEGER NOT NULL,    -- 픽 순위 (1~15)
+                stock_code  TEXT    NOT NULL,    -- 종목코드
+                stock_name  TEXT,               -- 종목명
+                signal_type TEXT,               -- 신호 유형 (유형 필드 기반)
+                cap_tier    TEXT,               -- 시총 구간
+                reason      TEXT,               -- 근거 (근거 필드)
+                target_rate TEXT,               -- 목표등락률
+                stop_loss   TEXT,               -- 손절기준
+                created_at  TEXT    NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_daily_picks_date
+            ON daily_picks(date)
+        """)
+
         # ── 8-c. 신호 가중치 자동 조정 [v10.6 Phase 4-2 신규] ──────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS signal_weights (
@@ -370,6 +393,8 @@ def init_db() -> None:
     _migrate_v106(db_path)
     # [v13.0 Step 5] rag_patterns 테이블 마이그레이션 (idempotent)
     _migrate_v130(db_path)
+    # [v13.0 Step 4] daily_picks 테이블 마이그레이션 (idempotent)
+    _migrate_v130_picks(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -718,3 +743,39 @@ def get_conn() -> sqlite3.Connection:
             conn.close()
     """
     return sqlite3.connect(config.DB_PATH)
+
+
+def _migrate_v130_picks(db_path: str) -> None:
+    """
+    [v13.0 Step 4] daily_picks 테이블 + 인덱스 생성.
+    morning_analyzer._pick_final() 이 사용.
+    기존 DB에 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS daily_picks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT    NOT NULL,
+                rank        INTEGER NOT NULL,
+                stock_code  TEXT    NOT NULL,
+                stock_name  TEXT,
+                signal_type TEXT,
+                cap_tier    TEXT,
+                reason      TEXT,
+                target_rate TEXT,
+                stop_loss   TEXT,
+                created_at  TEXT    NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_daily_picks_date
+            ON daily_picks(date)
+        """)
+        conn.commit()
+        logger.info("[db] v13.0 마이그레이션 완료 — daily_picks 테이블 확인")
+    except Exception as e:
+        logger.warning(f"[db] v13.0 daily_picks 마이그레이션 경고: {e}")
+    finally:
+        conn.close()
