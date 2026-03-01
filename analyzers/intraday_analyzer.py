@@ -1,133 +1,161 @@
 """
 analyzers/intraday_analyzer.py
-장중 급등 감지 전담 — KIS REST 실시간 기반 (AI 없음, 숫자 조건만)
+장중봇 — 모닝봇 픽 15종목 전담 감시 (AI 없음, 숫자 조건만)
 
-[v12.0 개편]
-- volume_analyzer.py → intraday_analyzer.py 개명
-- AI 판단(진짜급등/작전주의심) 완전 제거
-- 숫자 조건 필터만으로 동작 (등락률·거래량 기준)
+[v13.0 개편 — REDESIGN_v13.md §6]
+- poll_all_markets() 전 종목 KIS REST 스캔 로직 완전 제거
+- set_watchlist(picks) 신규: morning_report.py 에서 픽 15종목 등록
+- poll_all_markets() 재구현: 픽 15종목만 REST 개별 조회 감시
+  ① 호가 잔량 변화 (매수벽 쌓이는지)
+  ② 체결강도 (등락률 모멘텀)
+  ③ 모닝봇 근거 기준 가격대 도달 알림
+  ④ 이상 거래량 (픽 종목 내에서만)
+- _detect_gap_up() 제거 (전 종목 스캔 로직 일부였음)
+- analyze_orderbook() / analyze_ws_tick() / analyze_ws_orderbook_tick() 보존
 
 반환값 규격 (ARCHITECTURE.md 계약):
 {
     "종목코드": str, "종목명": str, "등락률": float, "직전대비": float,
     "거래량배율": float, "순간강도": float, "조건충족": bool,
     "감지시각": str, "감지소스": str,
-    "호가분석": dict | None,   # v4.0 신규 (REST 호가 분석 결과)
+    "호가분석": dict | None,
+    "픽근거": str | None,   # [v13.0 신규] 모닝봇 근거 텍스트
+    "알림유형": str | None,  # [v13.0 신규] "가격도달_목표"|"가격도달_손절"|"매수벽"|"급등모멘텀"
 }
 
 호가분석 dict 규격:
 {
-    "매수매도비율": float,   # 총매수잔량 / 총매도잔량 (≥1.0이면 매수우세)
-    "상위3집중도":  float,   # 상위3호가 잔량 / 전체잔량 (낮을수록 벽이 두꺼움)
-    "호가강도":     str,     # "강세" | "중립" | "약세"
+    "매수매도비율": float,
+    "상위3집중도":  float,
+    "호가강도":     str,    # "강세" | "중립" | "약세"
     "매수잔량":     int,
     "매도잔량":     int,
 }
 
 [수정이력]
-- v1.3: CONFIRM_CANDLES 미사용 버그 수정
-- v2.8: [핵심 변경] 누적 기준 → 델타(1분 변화량) 기준으로 전환
-- v2.9: 등락률 순위 API 병행 조회 추가
-- v3.2: [Phase 2 / T2] 갭 상승 모멘텀 감지 추가
-- v3.7: 노이즈 필터 3종 추가
-- v3.8: 초기 급등 포착 & 뒷북 방지 개선
-- v4.0: [호가 분석 통합]
-        analyze_orderbook() 신규 — KIS 호가잔량 비율로 매수/매도 강도 분석
-        poll_all_markets() / analyze_ws_tick() 에 호가 분석 결과 통합
-        REST 급등 감지 → get_orderbook() 즉시 호출 → 알림에 호가 강도 추가
-        WebSocket 체결 급등 감지 → REST 호가 조회 → 동일 분석 적용
-- v4.1: [소스 단일화] poll_all_markets() 에서 get_volume_ranking() 제거
-        → 코스피/코스닥 급등률 순위(get_rate_ranking)만 사용
-        이유: 거래량 순위는 삼성전자·현대차 등 시총 대형주가 항상 상위에 포함되어
-             실질적인 급등 신호가 아닌 노이즈 알림 발생
-        감지소스 "volume" 배지 deprecated → 장중 REST 감지는 전부 "rate"
-- v9.0: [신규진입 감지 버그수정 / P0·P1]
-        poll_all_markets(): prev 없는 신규진입 종목 first-entry 감지 추가
-          - 기존: if not prev: continue → delta_rate=0 → 100% 스킵 (알림 0건 핵심 원인)
-          - 수정: FIRST_ENTRY_MIN_RATE(4%) + MIN_VOL_RATIO_ACML 단독 기준으로 포착
-          - 직전대비 = change_rate (미진입→현재 전체 등락률이 가속도)
-        config: PRICE_DELTA_MIN 1.0→0.5 (기존 종목 가속도 기준도 현실화)
-        config: GAP_UP_MIN 2.5→1.5 (임계값 5%→3%, 3~5% 신규진입 사각지대 해소)
-        _detect_gap_up(): MIN_VOL_RATIO_ACML 필터 추가 (GAP_UP_MIN 완화 노이즈 방지)
-        config: FIRST_ENTRY_MIN_RATE = 4.0 신규 (신규진입 단독 임계값)
+- v1.0 ~ v9.0: 전 종목 KIS REST 스캔 기반
+- v13.0: [REDESIGN_v13.md §6] 픽 15종목 전담 감시로 전면 전환
+         poll_all_markets() 전 종목 스캔 제거 → 픽 15종목 REST 개별 조회
+         set_watchlist(picks) 신규 추가
+         _detect_gap_up() 제거 (전 종목 스캔 의존)
+         픽근거 / 알림유형 반환 필드 추가
 """
 
 from datetime import datetime, timezone, timedelta
 from utils.logger import logger
 import config
 
-_KST = timezone(timedelta(hours=9))  # [v4.1] Railway UTC 서버 KST 보정
+_KST = timezone(timedelta(hours=9))
+
 
 def _now_kst() -> str:
-    """KST(한국 표준시) 현재 시각 → HH:MM:SS 문자열"""
+    """KST 현재 시각 → HH:MM:SS 문자열"""
     return datetime.now(_KST).strftime("%H:%M:%S")
 
+
 # ── 모듈 레벨 상태 ────────────────────────────────────────────
+
+# [v13.0] 모닝봇 픽 15종목 워치리스트
+# morning_report.py → set_watchlist() 호출 시 등록됨
+_watchlist_picks: list[dict] = []
+
+# REST 폴링 직전 스냅샷 {종목코드: {"등락률": float, "거래량": int}}
 _prev_snapshot:      dict[str, dict] = {}
 _confirm_count:      dict[str, int]  = {}
 _ws_alerted_tickers: set[str]        = set()
 
+# 가격 도달 알림 중복 방지 (당일 종목별 1회)
+_price_alerted: set[str] = set()
 
-# ── 호가 분석 (v4.0 신규) ─────────────────────────────────────
+
+# ── [v13.0] 워치리스트 등록 ──────────────────────────────────
+
+def set_watchlist(picks: list[dict]) -> None:
+    """
+    [v13.0 신규] 모닝봇 픽 15종목을 REST/WebSocket 감시 대상으로 등록.
+
+    morning_report.py 에서 morning_analyzer.analyze() 완료·발송 직후 호출.
+    이 함수 호출 이후부터 poll_all_markets() 가 픽 종목만 감시함.
+
+    Args:
+        picks: morning_analyzer.analyze() 반환값["picks"] 리스트
+               각 항목 예시:
+               {
+                 "순위": 1,
+                 "종목코드": "123456",
+                 "종목명": "예시기업",
+                 "근거": "DART 수주 320억(자기자본 28%)",
+                 "목표등락률": "20%",
+                 "손절기준": "-5%",
+                 "테마여부": True,
+                 "매수시점": "09:00~09:30 분봉 확인 후"
+               }
+
+    호출 규칙 (REDESIGN_v13.md §10):
+        유일한 호출자 = morning_report.py
+        다른 모듈 직접 호출 금지
+    """
+    global _watchlist_picks, _prev_snapshot, _confirm_count, _price_alerted
+    _watchlist_picks = picks or []
+    _prev_snapshot   = {}
+    _confirm_count   = {}
+    _price_alerted   = set()
+    codes = [p.get("종목코드", "?") for p in _watchlist_picks]
+    logger.info(
+        f"[intraday] set_watchlist 완료 — {len(_watchlist_picks)}종목 등록: {codes}"
+    )
+
+
+def get_watchlist() -> list[dict]:
+    """등록된 픽 워치리스트 복사본 반환 (읽기 전용)."""
+    return _watchlist_picks.copy()
+
+
+# ── 호가 분석 ─────────────────────────────────────────────────
 
 def analyze_orderbook(orderbook: dict) -> dict | None:
     """
-    [v4.0 신규] KIS 호가잔량 분석 → 매수/매도 강도 판단
+    KIS 호가잔량 분석 → 매수/매도 강도 판단.
 
     입력: rest_client.get_orderbook() 또는 websocket_client._parse_orderbook() 반환값
-    출력:
-    {
-        "매수매도비율": float,  총매수잔량 / 총매도잔량
-        "상위3집중도":  float,  bids[0~2] 잔량합 / 총매수잔량
-        "호가강도":     str,    "강세" | "중립" | "약세"
-        "매수잔량":     int,
-        "매도잔량":     int,
-    }
+    출력: {"매수매도비율": float, "상위3집중도": float, "호가강도": str,
+           "매수잔량": int, "매도잔량": int}
 
-    [판단 기준]
-    강세: 매수매도비율 >= ORDERBOOK_BID_ASK_GOOD(2.0)
-          또는 매수매도비율 >= ORDERBOOK_BID_ASK_MIN(1.3) AND 상위3집중도 낮음(매도벽 얕음)
-    약세: 매수매도비율 < 0.8 (매도 우세)
-    중립: 그 외
+    판단 기준:
+    - 강세: 매수매도비율 >= ORDERBOOK_BID_ASK_GOOD(2.0)
+            또는 >= ORDERBOOK_BID_ASK_MIN(1.3) AND 매도벽 상위 집중
+    - 약세: 매수매도비율 < 0.8
+    - 중립: 그 외
     """
     if not orderbook:
         return None
 
     total_bid = orderbook.get("총매수잔량", 0)
     total_ask = orderbook.get("총매도잔량", 0)
-
     if total_ask <= 0:
         return None
 
     bid_ask_ratio = total_bid / total_ask
 
-    # 상위 3 매수호가 집중도 (얕은 매도벽 = 돌파 쉬움)
     bids = orderbook.get("매수호가", [])
-    top3_bid_vol = sum(b["잔량"] for b in bids[:3]) if bids else 0
-    top3_ratio   = (top3_bid_vol / total_bid) if total_bid > 0 else 0.0
-
-    # 매도벽 얕음: 상위3 매도호가 집중도가 낮으면 분산 → 뚫기 어려움
-    # 상위3 매도 집중도 계산
     asks = orderbook.get("매도호가", [])
-    top3_ask_vol  = sum(a["잔량"] for a in asks[:3]) if asks else 0
+    top3_ask_vol   = sum(a["잔량"] for a in asks[:3]) if asks else 0
     top3_ask_ratio = (top3_ask_vol / total_ask) if total_ask > 0 else 0.0
 
-    # 호가 강도 판정
     if bid_ask_ratio >= config.ORDERBOOK_BID_ASK_GOOD:
-        강도 = "강세"   # 매수 압도적 우세
+        강도 = "강세"
     elif (bid_ask_ratio >= config.ORDERBOOK_BID_ASK_MIN and
           top3_ask_ratio >= config.ORDERBOOK_TOP3_RATIO_MIN):
-        강도 = "강세"   # 매수 우세 + 매도벽이 상위에 집중(돌파 가능)
+        강도 = "강세"
     elif bid_ask_ratio < 0.8:
-        강도 = "약세"   # 매도 우세 → 급등 지속 어려움
+        강도 = "약세"
     else:
         강도 = "중립"
 
     logger.debug(
-        f"[orderbook] 호가분석: 매수매도비율={bid_ask_ratio:.2f} "
-        f"상위3집중도(매도)={top3_ask_ratio:.2f} → {강도}"
+        f"[orderbook] 매수매도비율={bid_ask_ratio:.2f} "
+        f"매도상위3집중도={top3_ask_ratio:.2f} → {강도}"
     )
-
     return {
         "매수매도비율": round(bid_ask_ratio, 2),
         "상위3집중도":  round(top3_ask_ratio, 2),
@@ -137,291 +165,261 @@ def analyze_orderbook(orderbook: dict) -> dict | None:
     }
 
 
-# ── REST 폴링 전 종목 분석 ──────────────────────────────────
+# ── [v13.0] REST 폴링 — 픽 15종목만 ──────────────────────────
 
 def poll_all_markets() -> list[dict]:
     """
-    KIS REST 등락률 순위 API로 코스피·코스닥 조회 후
-    직전 poll 대비 1분간 변화량(델타)으로 급등 조건 판단.
+    [v13.0] 모닝봇 픽 15종목 REST 개별 조회 → 감시 조건 판단.
 
-    [v4.1 소스 단일화] get_volume_ranking() 제거 — get_rate_ranking()만 사용
-    이유: 거래량 순위는 삼성전자·현대차 등 시총 대형주가 항상 상위에 포함되어
-         실질적 급등 신호가 아닌 노이즈 알림이 발생함.
-         등락률 순위는 코스피 중형+소형, 코스닥 전체(스팩·ETF 제외) 기준이므로
-         대형주 필터가 이미 적용되어 있음.
+    [기존 동작 — 완전 제거]
+    - get_rate_ranking() 전 종목 스캔
+    - 코스피/코스닥 전체 등락률 순위 폴링
+    - _detect_gap_up() 전 종목 갭 상승 감지
 
-    [v4.0] 조건 충족 종목: get_orderbook() 즉시 호출 → 호가 분석 결과 포함
-    소~중형주 필터는 rest_client.get_rate_ranking()에서 처리
+    [v13.0 신규 동작]
+    픽 15종목만 get_stock_price() 개별 조회 후 아래 조건 감시:
+    ① 가격 도달: 목표등락률 90% 이상 또는 손절 기준 도달 → "가격도달_목표/손절" 알림
+    ② 급등 모멘텀: Δ등락률 >= PRICE_DELTA_MIN AND 체결강도 >= VOLUME_DELTA_MIN
+                   CONFIRM_CANDLES회 연속 → "급등모멘텀" 알림
+    ③ 매수벽: 호가 조회 후 "강세" 판정 → "매수벽" 알림
 
-    [v3.8 필터 체인 순서]
-    1. 누적 등락률 < MIN_CHANGE_RATE(3%) → 스킵
-    2. 누적 등락률 > MAX_CATCH_RATE(12%) → 스킵 (뒷북 방지)
-    3. 장중 거래대금 < MIN_TRADE_AMOUNT(30억) → 스킵
-    4. 전일거래량 < MIN_PREV_VOL(5만) → 스킵
-    5. 누적RVOL < MIN_VOL_RATIO_ACML(30%) → 스킵
-    6. 누적 등락률 가속도(Δ등락률) ≥ PRICE_DELTA_MIN AND 순간강도 ≥ VOLUME_DELTA_MIN → 카운터 증가
-       [v8.2] Δ등락률 = curr["등락률"] - prev["등락률"] (가속도 기준, 구: 절대 가격 변화)
-    7. CONFIRM_CANDLES회 연속 → 알림 발송 + 카운터 초기화
-    8. [v4.0] 알림 대상 종목 → REST 호가 조회 → analyze_orderbook() 주입
+    워치리스트가 비어 있으면(set_watchlist 미호출) 빈 리스트 반환.
+
+    Returns:
+        list[dict] — 조건 충족 알림 목록 (상단 반환값 규격 참조)
     """
     global _prev_snapshot
-    from kis.rest_client import get_rate_ranking, get_orderbook
 
-    current_snapshot: dict[str, dict] = {}
-    alerted:          list[dict]      = []
+    if not _watchlist_picks:
+        logger.debug("[intraday] 워치리스트 없음 — poll 생략")
+        return []
+
+    from kis.rest_client import get_stock_price, get_orderbook
+
+    alerted:          list[dict]       = []
+    current_snapshot: dict[str, dict]  = {}
     is_warmup = not _prev_snapshot
 
-    for market_code in ["J", "Q"]:
-        market_name = "코스피" if market_code == "J" else "코스닥"
+    for pick in _watchlist_picks:
+        ticker    = pick.get("종목코드", "")
+        pick_name = pick.get("종목명", ticker)
+        근거       = pick.get("근거", "")
+        목표등락률  = pick.get("목표등락률", "")
+        손절기준   = pick.get("손절기준", "")
 
-        # [v4.1] 등락률 순위만 사용 — 거래량 순위 제거 (대형주 노이즈 차단)
-        rate_rows = get_rate_ranking(market_code)
-        rows = [{**row, "_source": "rate"} for row in rate_rows]
-
-        if not rows:
-            logger.debug(f"[volume] {market_name} 순위 없음")
+        if not ticker or len(ticker) != 6:
             continue
-        logger.info(
-            f"[volume] {market_name} 등락률 순위: {len(rows)}종목 (소~중형 필터 적용)"
-        )
 
-        for row in rows:
-            ticker = row["종목코드"]
-            current_snapshot[ticker] = row
+        try:
+            row = get_stock_price(ticker)
+        except Exception as e:
+            logger.warning(f"[intraday] {pick_name}({ticker}) 조회 실패: {e}")
+            continue
 
-            if is_warmup:
+        if not row:
+            continue
+
+        curr_price  = row.get("현재가", 0)
+        change_rate = row.get("등락률", 0.0)
+        acml_vol    = row.get("거래량", 0)
+
+        if curr_price <= 0:
+            continue
+
+        current_snapshot[ticker] = {
+            "현재가": curr_price,
+            "등락률": change_rate,
+            "거래량": acml_vol,
+        }
+
+        if is_warmup:
+            continue
+
+        prev = _prev_snapshot.get(ticker, {})
+
+        # ── ① 가격 도달 알림 (당일 종목별 1회) ───────────────
+        if ticker not in _price_alerted:
+            triggered, 알림유형 = _check_price_trigger(
+                ticker, curr_price, change_rate, 목표등락률, 손절기준
+            )
+            if triggered:
+                _price_alerted.add(ticker)
+                호가분석 = None
+                if config.ORDERBOOK_ENABLED:
+                    try:
+                        호가분석 = analyze_orderbook(get_orderbook(ticker))
+                    except Exception:
+                        pass
+                alerted.append(_build_alert(
+                    ticker, pick_name, curr_price, change_rate,
+                    prev, acml_vol, 호가분석, 근거, 알림유형,
+                ))
+                logger.info(
+                    f"[intraday] {알림유형} — {pick_name} "
+                    f"{change_rate:+.1f}% / 현재가={curr_price:,}원"
+                )
                 continue
 
-            prev = _prev_snapshot.get(ticker)
-
-            # ── 공통 전처리 (prev 유무 무관) ──────────────────────────
-            curr_price   = row["현재가"]
-            change_rate  = row["등락률"]
-            prdy_vol     = row["전일거래량"]
-            acml_vol     = row["누적거래량"]
-
-            if change_rate < config.MIN_CHANGE_RATE:
-                continue
-            if change_rate > config.MAX_CATCH_RATE:
-                continue
-
-            trade_amount = acml_vol * curr_price
-            if trade_amount < config.MIN_TRADE_AMOUNT:
-                continue
-
-            if prdy_vol < config.MIN_PREV_VOL:
-                continue
-
-            acml_rvol = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
-            if acml_rvol < config.MIN_VOL_RATIO_ACML:
-                continue
-
-            # ── [v9.0 신규진입 감지 버그수정] ─────────────────────────
-            # 이전 버그: prev 없으면 delta_rate=0 → PRICE_DELTA_MIN 미충족 → 무조건 continue
-            # 원인: 등락률 순위에 처음 등장한 종목(= 방금 급등 시작)은 직전 스냅샷이 없음
-            # 수정: prev 없는 종목은 FIRST_ENTRY_MIN_RATE + MIN_VOL_RATIO_ACML 단독 기준 적용
-            #       (delta_rate = change_rate — 미진입(0%)→현재값까지의 등락률 전체가 가속도)
-            if not prev:
-                if change_rate >= config.FIRST_ENTRY_MIN_RATE:
-                    _confirm_count[ticker] = _confirm_count.get(ticker, 0) + 1
-                    if _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES:
-                        _confirm_count[ticker] = 0
-                        순간강도 = round((acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0, 1)
-                        호가분석 = None
-                        if config.ORDERBOOK_ENABLED:
-                            ob_data = get_orderbook(ticker)
-                            호가분석 = analyze_orderbook(ob_data)
-                            if 호가분석:
-                                logger.info(
-                                    f"[volume] {row['종목명']} 호가강도={호가분석['호가강도']} "
-                                    f"매수매도비율={호가분석['매수매도비율']:.2f}"
-                                )
-                        alerted.append({
-                            "종목코드":   ticker,
-                            "종목명":     row["종목명"],
-                            "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
-                            "등락률":     change_rate,
-                            "직전대비":   round(change_rate, 2),  # prev=0(미진입) → 전체 등락률이 가속도
-                            "거래량배율": round(acml_rvol / 100, 2),
-                            "순간강도":   순간강도,
-                            "조건충족":   True,
-                            "감지시각":   _now_kst(),
-                            "감지소스":   row.get("_source", "rate"),
-                            "호가분석":   호가분석,
-                        })
-                        logger.info(
-                            f"[volume] 신규진입 감지: {row['종목명']} "
-                            f"+{change_rate:.1f}% (순위 첫 등장, RVOL {acml_rvol:.0f}%)"
-                        )
-                else:
-                    _confirm_count[ticker] = 0
-                continue
-
-            # ── 기존 종목: 누적 등락률 가속도(델타) 기준 감지 ─────────
-            prev_price = prev["현재가"]
-            if prev_price <= 0:
-                continue
-
-            # [v8.2] Δ등락률(가속도) = curr["등락률"] - prev["등락률"]
-            # 예: 4.2%→5.3% → Δ=+1.1% — 모멘텀이 붙는 순간을 정확히 측정
-            delta_rate = row["등락률"] - prev.get("등락률", row["등락률"])
-            delta_vol  = max(0, acml_vol - prev["누적거래량"])
-            순간강도    = (delta_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
+        # ── ② 급등 모멘텀 ────────────────────────────────────
+        if prev:
+            delta_rate = change_rate - prev.get("등락률", change_rate)
+            prev_vol   = max(prev.get("거래량", 1), 1)
+            delta_vol  = max(0, acml_vol - prev_vol)
+            순간강도    = (delta_vol / prev_vol * 100)
 
             single_ok = (
                 delta_rate >= config.PRICE_DELTA_MIN and
                 순간강도   >= config.VOLUME_DELTA_MIN
             )
-
             _confirm_count[ticker] = (
                 _confirm_count.get(ticker, 0) + 1 if single_ok else 0
             )
 
             if _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES:
                 _confirm_count[ticker] = 0
-
-                # [v4.0] 호가 분석 — 조건 충족 종목에 한해 REST 1회 호출
                 호가분석 = None
                 if config.ORDERBOOK_ENABLED:
-                    ob_data = get_orderbook(ticker)
-                    호가분석 = analyze_orderbook(ob_data)
-                    if 호가분석:
+                    try:
+                        호가분석 = analyze_orderbook(get_orderbook(ticker))
+                    except Exception:
+                        pass
+                alert = _build_alert(
+                    ticker, pick_name, curr_price, change_rate,
+                    prev, acml_vol, 호가분석, 근거, "급등모멘텀",
+                )
+                alert["직전대비"] = round(delta_rate, 2)
+                alert["순간강도"] = round(순간강도, 1)
+                alert["거래량배율"] = round(acml_vol / prev_vol, 2)
+                alerted.append(alert)
+                logger.info(
+                    f"[intraday] 급등모멘텀 — {pick_name} "
+                    f"Δ등락률={delta_rate:+.2f}% 순간강도={순간강도:.1f}%"
+                )
+                continue
+
+        # ── ③ 매수벽 감지 (등락률 양수인 종목 한정) ──────────
+        if config.ORDERBOOK_ENABLED and change_rate >= config.MIN_CHANGE_RATE:
+            # 분 단위 중복 방지: 같은 분에 이미 매수벽 알림 발송했으면 스킵
+            ob_key = f"{ticker}_ob_{_now_kst()[:5]}"
+            if ob_key not in _price_alerted:
+                try:
+                    ob = get_orderbook(ticker)
+                    호가분석 = analyze_orderbook(ob)
+                    if 호가분석 and 호가분석["호가강도"] == "강세":
+                        _price_alerted.add(ob_key)
+                        alerted.append(_build_alert(
+                            ticker, pick_name, curr_price, change_rate,
+                            prev, acml_vol, 호가분석, 근거, "매수벽",
+                        ))
                         logger.info(
-                            f"[volume] {row['종목명']} 호가강도={호가분석['호가강도']} "
+                            f"[intraday] 매수벽 — {pick_name} "
                             f"매수매도비율={호가분석['매수매도비율']:.2f}"
                         )
-
-                alerted.append({
-                    "종목코드":   ticker,
-                    "종목명":     row["종목명"],
-                    "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
-                    "등락률":     change_rate,
-                    "직전대비":   round(delta_rate, 2),
-                    "거래량배율": round(acml_rvol / 100, 2),
-                    "순간강도":   round(순간강도, 1),
-                    "조건충족":   True,
-                    "감지시각":   _now_kst(),
-                    "감지소스":   row.get("_source", "volume"),
-                    "호가분석":   호가분석,    # v4.0 신규
-                })
-
-    # ── [T2] 갭 상승 모멘텀 감지 (v3.2) ─────────────────────────
-    gap_alerted = _detect_gap_up(current_snapshot, alerted)
-    alerted.extend(gap_alerted)
+                except Exception as e:
+                    logger.debug(f"[intraday] {pick_name} 호가 조회 실패: {e}")
 
     _prev_snapshot = current_snapshot
 
-    if len(alerted) > config.MAX_ALERTS_PER_CYCLE:
-        alerted.sort(key=lambda x: x["직전대비"], reverse=True)
-        suppressed = len(alerted) - config.MAX_ALERTS_PER_CYCLE
-        alerted = alerted[:config.MAX_ALERTS_PER_CYCLE]
-        logger.info(
-            f"[volume] 사이클 최대 알림 수 초과 — 순간가속도 상위 {config.MAX_ALERTS_PER_CYCLE}개만 발송 "
-            f"({suppressed}개 억제)"
-        )
-
     if is_warmup:
         logger.info(
-            f"[volume] 워밍업 완료 — {len(current_snapshot)}종목 스냅샷 저장 "
-            f"/ 다음 사이클부터 실시간 감지 시작"
+            f"[intraday] 워밍업 완료 — 픽 {len(_watchlist_picks)}종목 "
+            f"스냅샷 저장 / 다음 사이클부터 감시 시작"
         )
     if alerted:
-        logger.info(f"[volume] 조건충족 {len(alerted)}종목 (갭상승포함)")
+        logger.info(f"[intraday] 픽 감시 알림 {len(alerted)}건")
 
     return alerted
 
 
-# ── T2 갭 상승 모멘텀 내부 헬퍼 (v3.2 신규) ────────────────────
+def _build_alert(
+    ticker:     str,
+    pick_name:  str,
+    curr_price: int,
+    change_rate: float,
+    prev:       dict,
+    acml_vol:   int,
+    호가분석:    dict | None,
+    근거:        str,
+    알림유형:    str,
+) -> dict:
+    """알림 dict 공통 생성 헬퍼"""
+    prev_rate = prev.get("등락률", change_rate)
+    return {
+        "종목코드":   ticker,
+        "종목명":     pick_name,
+        "현재가":     curr_price,
+        "등락률":     change_rate,
+        "직전대비":   round(change_rate - prev_rate, 2),
+        "거래량배율": 0.0,
+        "순간강도":   0.0,
+        "조건충족":   True,
+        "감지시각":   _now_kst(),
+        "감지소스":   "watchlist",
+        "호가분석":   호가분석,
+        "픽근거":     근거,
+        "알림유형":   알림유형,
+    }
 
-_gap_alerted: set[str] = set()
 
-
-def _detect_gap_up(snapshot: dict[str, dict], already_alerted: list[dict]) -> list[dict]:
+def _check_price_trigger(
+    ticker:     str,
+    curr_price: int,
+    change_rate: float,
+    목표등락률:  str,
+    손절기준:   str,
+) -> tuple[bool, str]:
     """
-    [T2] 갭 상승 모멘텀 감지
-    - change_rate >= GAP_UP_MIN × 2 (v9.0: GAP_UP_MIN=1.5 → 임계값 3.0% = MIN_CHANGE_RATE)
-    - [v3.8] change_rate ≤ MAX_CATCH_RATE
-    - [v4.0] 호가 분석 포함 (ORDERBOOK_ENABLED=True 시)
-    - [v9.0] MIN_VOL_RATIO_ACML 필터 추가 — GAP_UP_MIN 완화에 따른 거래량 無 급등 노이즈 차단
+    [v13.0 내부 헬퍼] 모닝봇 근거 기준 가격 도달 조건 판단.
+
+    Returns:
+        (triggered: bool, 알림유형: str)
+        알림유형: "가격도달_목표" | "가격도달_손절" | ""
     """
-    from kis.rest_client import get_orderbook
+    # 상한가 도달 (29.5%+)
+    if change_rate >= 29.5:
+        return True, "가격도달_목표"
 
-    already_codes = {a["종목코드"] for a in already_alerted}
-    results = []
+    # 목표 등락률 90% 이상 도달
+    try:
+        if 목표등락률 and "상한가" not in 목표등락률:
+            target_pct = float(목표등락률.replace("%", "").strip())
+            if target_pct > 0 and change_rate >= target_pct * 0.9:
+                return True, "가격도달_목표"
+    except (ValueError, AttributeError):
+        pass
 
-    for ticker, row in snapshot.items():
-        if ticker in already_codes or ticker in _gap_alerted:
-            continue
+    # 손절 기준 도달
+    try:
+        if 손절기준:
+            손절_str = 손절기준.replace("%", "").split("원")[0].strip()
+            손절_val = float(손절_str.replace(",", ""))
+            # 비율 기준 (음수)
+            if 손절_val < 0 and change_rate <= 손절_val:
+                return True, "가격도달_손절"
+    except (ValueError, AttributeError):
+        pass
 
-        curr_price  = row.get("현재가", 0)
-        change_rate = row.get("등락률", 0.0)
-
-        if curr_price <= 0 or change_rate <= 0:
-            continue
-        if change_rate < config.GAP_UP_MIN * 2:
-            continue
-        if change_rate < config.MIN_CHANGE_RATE:
-            continue
-        if change_rate > config.MAX_CATCH_RATE:
-            continue
-
-        prdy_vol = row.get("전일거래량", 1)
-        if prdy_vol < config.MIN_PREV_VOL:
-            continue
-
-        trade_amount = row.get("누적거래량", 0) * curr_price
-        if trade_amount < config.MIN_TRADE_AMOUNT:
-            continue
-
-        # [v9.0 신규] 누적 RVOL 필터 — GAP_UP_MIN 완화(2.5→1.5)로 임계값이 낮아졌으므로
-        # 거래량 없이 갭업한 종목(세력 부재 갭)을 차단하기 위해 동일 RVOL 기준 적용
-        acml_vol  = row.get("누적거래량", 0)
-        acml_rvol = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
-        if acml_rvol < config.MIN_VOL_RATIO_ACML:
-            continue
-
-        _gap_alerted.add(ticker)
-        rvol_display = acml_rvol / 100  # x 단위로 변환
-
-        # [v4.0] 호가 분석
-        호가분석 = None
-        if config.ORDERBOOK_ENABLED:
-            ob_data = get_orderbook(ticker)
-            호가분석 = analyze_orderbook(ob_data)
-
-        results.append({
-            "종목코드":   ticker,
-            "종목명":     row.get("종목명", ticker),
-            "현재가":     curr_price,           # [v10.7 버그픽스] AI target/stop 계산용
-            "등락률":     change_rate,
-            "직전대비":   0.0,
-            "거래량배율": round(rvol_display, 2),
-            "순간강도":   0.0,
-            "조건충족":   True,
-            "감지시각":   _now_kst(),
-            "감지소스":   "gap_up",
-            "호가분석":   호가분석,    # v4.0 신규
-        })
-        logger.info(
-            f"[volume] T2 갭상승 감지: {row.get('종목명', ticker)} "
-            f"+{change_rate:.1f}% (갭업추정, RVOL {rvol_display:.1f}x)"
-        )
-
-    return results
+    return False, ""
 
 
-# ── WebSocket 체결 틱 기반 분석 (v3.1 신규 — 방법 B) ──────────
+# ── WebSocket 체결 틱 기반 분석 ───────────────────────────────
 
 def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
     """
-    KIS WebSocket 실시간 체결 틱 → 급등 조건 판단 (v3.1)
+    KIS WebSocket 실시간 체결 틱 → 픽 종목 급등 조건 판단.
 
-    [v4.0] 호가 분석은 REST 호출이 필요하므로 여기서 직접 수행하지 않음.
-    realtime_alert._ws_loop()의 on_tick() 콜백에서 호가 분석을 추가로 수행.
-    → 이 함수의 반환값에 "호가분석": None 포함, realtime_alert에서 채움.
+    [v13.0] 픽 워치리스트에 포함된 종목만 처리 (그 외 None 반환).
+    realtime_alert._ws_loop() on_tick() 콜백에서 호출.
+    호가분석은 realtime_alert 에서 REST 조회 후 채움.
     """
-    rate = tick.get("등락률", 0.0)
+    ticker = tick.get("종목코드", "")
 
+    # 픽 워치리스트 외 종목 무시
+    pick_codes = {p.get("종목코드", "") for p in _watchlist_picks}
+    if ticker not in pick_codes:
+        return None
+
+    rate = tick.get("등락률", 0.0)
     if rate < config.PRICE_CHANGE_MIN:
         return None
     if rate > config.MAX_CATCH_RATE:
@@ -430,10 +428,11 @@ def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
     acml_vol  = tick.get("누적거래량", 0)
     acml_rvol = (acml_vol / prdy_vol) if prdy_vol > 0 else 0.0
 
-    ticker = tick.get("종목코드", "")
     체결시각 = tick.get("체결시각", "")
     if len(체결시각) == 6:
         체결시각 = f"{체결시각[:2]}:{체결시각[2:4]}:{체결시각[4:]}"
+
+    pick_info = next((p for p in _watchlist_picks if p.get("종목코드") == ticker), {})
 
     return {
         "종목코드":   ticker,
@@ -445,30 +444,25 @@ def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
         "조건충족":   True,
         "감지시각":   체결시각 or _now_kst(),
         "감지소스":   "websocket",
-        "호가분석":   None,   # v4.0: realtime_alert.on_tick()에서 REST 호가 조회 후 채움
+        "호가분석":   None,   # realtime_alert.on_tick() 에서 채움
+        "픽근거":     pick_info.get("근거", ""),
+        "알림유형":   "급등모멘텀",
     }
 
 
 def analyze_ws_orderbook_tick(ob: dict, existing_result: dict) -> dict:
     """
-    [v4.0 신규] WebSocket 실시간 호가 틱 → 기존 분석 결과에 호가분석 보강
-
-    WS_ORDERBOOK_ENABLED=true 시 realtime_alert._ws_loop()의 on_orderbook() 에서 호출.
-    WebSocket 호가 틱을 REST get_orderbook() 반환값 형식으로 변환 후 analyze_orderbook() 통과.
+    [v4.0 보존] WebSocket 실시간 호가 틱 → 기존 분석 결과에 호가분석 보강.
 
     ob: websocket_client._parse_orderbook() 반환값
-    existing_result: analyze_ws_tick() 반환값 (호가분석=None인 상태)
-    → 호가분석 채워서 새 dict 반환
+    existing_result: analyze_ws_tick() 반환값 (호가분석=None 상태)
     """
     if not ob:
         return existing_result
-
-    # WebSocket 호가 틱은 REST 호가 포맷과 동일하게 변환됨
-    호가분석 = analyze_orderbook(ob)
-    return {**existing_result, "호가분석": 호가분석}
+    return {**existing_result, "호가분석": analyze_orderbook(ob)}
 
 
-# ── 레거시 보존 (향후 확장용) ────────────────────────────────
+# ── 레거시 보존 ───────────────────────────────────────────────
 
 def analyze(tick: dict) -> dict:
     """KIS WebSocket 틱 → 급등 조건 판단 (향후 WebSocket 재활성화용 보존)"""
@@ -476,20 +470,17 @@ def analyze(tick: dict) -> dict:
     rate     = tick.get("등락률",   0.0)
     prdy_vol = tick.get("전일거래량", 0)
     acml_vol = tick.get("누적거래량", 0)
-
     volume_ratio = (acml_vol / prdy_vol * 100) if prdy_vol > 0 else 0.0
 
     single_ok = (
         rate         >= config.PRICE_DELTA_MIN and
         volume_ratio >= config.VOLUME_DELTA_MIN
     )
-
-    if single_ok:
-        _confirm_count[ticker] = _confirm_count.get(ticker, 0) + 1
-    else:
-        _confirm_count[ticker] = 0
-
+    _confirm_count[ticker] = (
+        _confirm_count.get(ticker, 0) + 1 if single_ok else 0
+    )
     confirmed = _confirm_count.get(ticker, 0) >= config.CONFIRM_CANDLES
+    pick_info = next((p for p in _watchlist_picks if p.get("종목코드") == ticker), {})
 
     return {
         "종목코드":   ticker,
@@ -502,14 +493,17 @@ def analyze(tick: dict) -> dict:
         "감지시각":   _now_kst(),
         "감지소스":   "volume",
         "호가분석":   None,
+        "픽근거":     pick_info.get("근거", ""),
+        "알림유형":   None,
     }
 
 
 def reset() -> None:
     """장 마감(15:30) 후 상태 전체 초기화"""
-    global _prev_snapshot
-    _prev_snapshot = {}
+    global _watchlist_picks, _prev_snapshot
+    _watchlist_picks = []
+    _prev_snapshot   = {}
     _confirm_count.clear()
     _ws_alerted_tickers.clear()
-    _gap_alerted.clear()
-    logger.info("[volume] 스냅샷·확인카운터·WS상태·갭상승상태 초기화 완료")
+    _price_alerted.clear()
+    logger.info("[intraday] 워치리스트·스냅샷·카운터·WS상태 초기화 완료")

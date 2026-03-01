@@ -28,9 +28,10 @@ import collectors.market_global  as market_collector
 import collectors.news_naver     as news_naver
 import collectors.news_newsapi   as news_newsapi
 import collectors.price_domestic as price_collector
-import analyzers.morning_analyzer as morning_analyzer   # v12.0: 통합 모듈
-import telegram.sender            as telegram_bot
-import utils.watchlist_state      as watchlist_state
+import analyzers.morning_analyzer  as morning_analyzer   # v12.0: 통합 모듈
+import analyzers.intraday_analyzer as intraday_analyzer  # v13.0: set_watchlist 연결
+import telegram.sender             as telegram_bot
+import utils.watchlist_state       as watchlist_state
 import config
 
 
@@ -155,19 +156,24 @@ async def run(
 
         # 결과 추출
         signal_result = {
-            "signals":        morning_result["signals"],
-            "market_summary": morning_result["market_summary"],
-            "commodities":    morning_result["commodities"],
-            "volatility":     morning_result["volatility"],
-            "report_picks":   morning_result["report_picks"],
-            "policy_summary": morning_result["policy_summary"],
-            "sector_scores":  morning_result["sector_scores"],
-            "event_scores":   morning_result["event_scores"],
+            "signals":        morning_result.get("signals",        []),
+            "market_summary": morning_result.get("market_summary", {}),
+            "commodities":    morning_result.get("commodities",    {}),
+            "volatility":     morning_result.get("volatility",     ""),
+            "report_picks":   morning_result.get("report_picks",   []),
+            "policy_summary": morning_result.get("policy_summary", []),
+            "sector_scores":  morning_result.get("sector_scores",  {}),
+            "event_scores":   morning_result.get("event_scores",   {}),
         }
-        ai_dart_results  = morning_result["ai_dart_results"]
-        theme_result     = morning_result["theme_result"]
-        oracle_result    = morning_result["oracle_result"]
-        geopolitics_data = morning_result["geopolitics_analyzed"]
+        ai_dart_results  = morning_result.get("ai_dart_results",      [])
+        theme_result     = morning_result.get("theme_result",         {"theme_map": []})
+        oracle_result    = morning_result.get("oracle_result",        None)
+        geopolitics_data = morning_result.get("geopolitics_analyzed", [])
+
+        # [v13.0] picks 추출 → intraday_analyzer.set_watchlist() 연결
+        # morning_analyzer._pick_final() 반환값 picks 리스트 (최대 15종목).
+        # morning_analyzer 개편 전이면 빈 리스트.
+        _picks_for_intraday: list[dict] = morning_result.get("picks", [])
 
         logger.info(
             f"[morning] 통합 분석 완료 — "
@@ -216,7 +222,21 @@ async def run(
             )
         await telegram_bot.send_async(message)
 
-        # ── ⑦ 예측 기록 ──────────────────────────────────────
+        # ── ⑦ [v13.0] intraday_analyzer 픽 워치리스트 등록 ──────
+        # morning_analyzer._pick_final() 결과 picks 15종목을 장중봇 감시 대상으로 등록.
+        # 발송 직후 호출 — realtime_alert 가 09:00에 poll_all_markets() 시작 전에 완료돼야 함.
+        try:
+            if _picks_for_intraday:
+                intraday_analyzer.set_watchlist(_picks_for_intraday)
+                logger.info(
+                    f"[morning] intraday 픽 워치리스트 등록 — {len(_picks_for_intraday)}종목"
+                )
+            else:
+                logger.info("[morning] picks 없음 — intraday 워치리스트 미등록")
+        except Exception as _intra_e:
+            logger.warning(f"[morning] intraday set_watchlist 실패 (비치명적): {_intra_e}")
+
+        # ── ⑧ 예측 기록 ──────────────────────────────────────
         try:
             from tracking import accuracy_tracker
             accuracy_tracker.record_prediction(
@@ -227,16 +247,16 @@ async def run(
         except Exception as _acc_e:
             logger.warning(f"[morning] 예측 기록 실패 (비치명적): {_acc_e}")
 
-        # ── ⑧ WebSocket 워치리스트 저장 ──────────────────────
+        # ── ⑨ WebSocket 워치리스트 저장 ──────────────────────
         ws_watchlist = _build_ws_watchlist(price_data, signal_result)
         watchlist_state.set_watchlist(ws_watchlist)
         logger.info(f"[morning] 워치리스트 저장 — {len(ws_watchlist)}종목")
 
-        # ── ⑨ 시장 환경 최종 확인 ────────────────────────────
+        # ── ⑩ 시장 환경 최종 확인 ────────────────────────────
         market_env = watchlist_state.get_market_env() or ""
         logger.info(f"[morning] 시장 환경 최종: {market_env or '(미지정)'}")
 
-        # ── ⑩ 섹터 맵 저장 ────────────────────────────────────
+        # ── ⑪ 섹터 맵 저장 ────────────────────────────────────
         sector_map = _build_sector_map(price_data)
         watchlist_state.set_sector_map(sector_map)
         logger.info(f"[morning] 섹터 맵 저장 — {len(sector_map)}종목")
