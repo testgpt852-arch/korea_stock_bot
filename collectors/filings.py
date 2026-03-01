@@ -2,7 +2,7 @@
 collectors/filings.py
 DART 공시 수집 전담
 - 전날 마감 후 공시 수집
-- 키워드 필터링 (수주, 배당, 자사주, 특허, 내부자거래 등)
+- 키워드 필터링 (수주, 배당, 자사주, 특허, 내부자거래, 소송, 임상 등)
 - 규모 필터링 — DART 상세 API 호출로 본문 수치 직접 파싱 (방법A)
 - 중복 공시 제거
 - 반환값만 사용 — 분석 로직 없음
@@ -15,14 +15,27 @@ DART 공시 수집 전담
   - DART API 하루 한도 1,000회 — 최대 15건 × 2회 = 30회 추가 (여유 충분)
   - 건당 0.3초 대기 → 최대 추가 소요 15초
 
+[방법B — v13.0 신규: DART document API 본문 수집]
+  list.json의 rcept_no 활용
+  GET https://opendart.fss.or.kr/api/document.json?crtfc_key=...&rcept_no=...
+  응답: zip → 압축 해제 → XML/HTML 파싱 → 핵심 수치 추출
+  추출 대상: 계약금액, 매출대비비율, 소송금액, 승패여부, 청구금액
+
 [수정이력]
 - v1.0: 기본 구조
 - v2.1: 방법A 규모 필터 추가
         corp_code 수집 (list.json → 상세 API 연결용)
         반환값에 "규모" 필드 추가
+- v13.0: DART_KEYWORDS 확장 (소송/임상/FDA/무상증자 등 10개 신규)
+         임계값 상향 (DART_CONTRACT_MIN_RATIO 10→20, MIN_BILLION 50→100, DIVIDEND 3→5)
+         DART document API 본문 수집 추가 (_fetch_document_summary)
+         반환값에 "본문요약", "rcept_no" 필드 추가
 """
 
+import io
+import re
 import time
+import zipfile
 import requests
 from datetime import datetime
 import config
@@ -43,6 +56,8 @@ def collect(target_date: datetime = None) -> list[dict]:
         "신뢰도":     str,       # "원본" or "검색"
         "내부자여부": bool,
         "규모":       str,       # v2.1: "25.3%" / "150억" / "N/A"
+        "본문요약":   str,       # v13.0: 핵심 수치 추출 텍스트 (없으면 "")
+        "rcept_no":   str,       # v13.0: DART 본문 API 연결용 접수번호
     }
     """
     if target_date is None:
@@ -133,7 +148,7 @@ def _filter_and_format(items: list, date_str: str) -> list[dict]:
         report_nm  = item.get("report_nm", "")
         stock_code = item.get("stock_code", "")
 
-        # 키워드 필터
+        # 키워드 필터 (v13.0: config.DART_KEYWORDS 확장됨)
         matched = next(
             (kw for kw in config.DART_KEYWORDS if kw in report_nm), None
         )
@@ -155,6 +170,7 @@ def _filter_and_format(items: list, date_str: str) -> list[dict]:
         report_nm  = item.get("report_nm", "")
         corp_code  = item.get("corp_code",  "")   # list.json에 포함됨
         stock_code = item.get("stock_code", "")
+        rcept_no   = item.get("rcept_no",   "")   # v13.0: 본문 API 연결용
         is_insider = "주요주주" in report_nm
 
         # 공시 시각 파싱
@@ -180,6 +196,11 @@ def _filter_and_format(items: list, date_str: str) -> list[dict]:
             )
             continue
 
+        # v13.0: DART document API 본문 요약 수집
+        body_summary = ""
+        if rcept_no:
+            body_summary = _fetch_document_summary(rcept_no, report_nm)
+
         results.append({
             "종목명":     item.get("corp_name", ""),
             "종목코드":   stock_code,
@@ -189,10 +210,209 @@ def _filter_and_format(items: list, date_str: str) -> list[dict]:
             "신뢰도":     "원본",
             "내부자여부": is_insider,
             "규모":       size_str,
+            "본문요약":   body_summary,   # v13.0 신규
+            "rcept_no":   rcept_no,       # v13.0 신규
         })
 
     logger.info(f"[dart] 규모 필터 후 최종 {len(results)}건")
     return results
+
+
+# ── v13.0: DART document API 본문 수집 ───────────────────────
+
+def _fetch_document_summary(rcept_no: str, report_nm: str) -> str:
+    """
+    DART document API (document.json) 호출 → zip 압축 해제 → 핵심 수치 추출
+
+    파라미터:
+      rcept_no  : list.json 응답의 rcept_no 필드 (접수번호)
+      report_nm : 공시 보고서명 (추출 전략 분기용)
+
+    반환: 핵심 수치 텍스트 (실패 시 "")
+      예: "계약금액 320억, 자기자본대비 25.8%"
+          "승소, 청구금액 85억"
+          "임상 3상, FDA"
+
+    DART API 스펙:
+      GET https://opendart.fss.or.kr/api/document.json
+      파라미터: crtfc_key, rcept_no
+      응답: application/zip → 압축 해제 → XML/HTML 파일 포함
+    """
+    if not rcept_no or not config.DART_API_KEY:
+        return ""
+
+    try:
+        url = "https://opendart.fss.or.kr/api/document.json"
+        params = {
+            "crtfc_key": config.DART_API_KEY,
+            "rcept_no":  rcept_no,
+        }
+        resp = requests.get(url, params=params, timeout=15)
+
+        if resp.status_code != 200:
+            logger.debug(f"[dart] document API HTTP {resp.status_code}: {rcept_no}")
+            return ""
+
+        # Content-Type json → DART 에러 응답
+        content_type = resp.headers.get("Content-Type", "")
+        if "json" in content_type:
+            try:
+                err = resp.json()
+                logger.debug(
+                    f"[dart] document API 오류: {err.get('message')} "
+                    f"(rcept_no={rcept_no})"
+                )
+            except Exception:
+                pass
+            return ""
+
+        # zip 압축 해제 → 텍스트 추출
+        raw_text = _extract_zip_text(resp.content)
+        if not raw_text:
+            return ""
+
+        return _parse_document_text(raw_text, report_nm)
+
+    except Exception as e:
+        logger.debug(f"[dart] document API 실패 ({rcept_no}): {e}")
+        return ""
+
+    finally:
+        time.sleep(0.3)   # DART API 과부하 방지
+
+
+def _extract_zip_text(zip_bytes: bytes) -> str:
+    """
+    zip 바이너리 → 텍스트 추출
+    DART zip 내 파일: .xml 또는 .htm / .html
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for name in zf.namelist():
+                if name.lower().endswith((".xml", ".htm", ".html")):
+                    raw = zf.read(name)
+                    for enc in ("utf-8", "euc-kr", "cp949"):
+                        try:
+                            return raw.decode(enc)
+                        except UnicodeDecodeError:
+                            continue
+    except zipfile.BadZipFile:
+        logger.debug("[dart] BadZipFile — document API 응답이 zip이 아님")
+    except Exception as e:
+        logger.debug(f"[dart] zip 압축 해제 실패: {e}")
+    return ""
+
+
+def _parse_document_text(text: str, report_nm: str) -> str:
+    """
+    공시 본문 텍스트에서 핵심 수치 추출 (HTML/XML 태그 제거 후 파싱)
+
+    공시 유형별 추출 전략:
+    - 계약/수주/MOU : 계약금액, 매출·자기자본대비비율
+    - 소송/판결/중재: 승패여부, 청구금액
+    - 임상/허가/FDA : 임상 단계, 허가기관, 적응증
+    - 배당결정       : 시가배당률, 배당금
+    - 무상/유상증자  : 신주 수, 증자비율
+    - 기타           : 억원 단위 금액 추출
+    """
+    # HTML/XML 태그·엔티티 제거
+    clean = re.sub(r"<[^>]+>", " ", text)
+    clean = re.sub(r"&[a-zA-Z]+;", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = clean[:8000]   # 처리 속도 보장용 제한
+
+    extracted = []
+
+    # ─ 계약/수주/MOU ──────────────────────────────────────────
+    if any(kw in report_nm for kw in ["단일판매공급계약", "수주", "MOU"]):
+        m = re.search(r"계약\s*금액\s*[:\s]*([\d,]+)\s*(원|백만원|억원?)?", clean)
+        if m:
+            val_str = m.group(1).replace(",", "")
+            unit    = m.group(2) or "원"
+            try:
+                val = int(val_str)
+                if "백만" in unit:
+                    val_억 = val / 100
+                elif "억" in unit:
+                    val_억 = val
+                else:
+                    val_억 = val / 100_000_000
+                extracted.append(f"계약금액 {val_억:.0f}억")
+            except ValueError:
+                extracted.append(f"계약금액 {m.group(1)}{m.group(2) or ''}")
+
+        m2 = re.search(r"(매출|자기자본)\s*대비\s*[:\s]*([\d.]+)\s*%", clean)
+        if m2:
+            extracted.append(f"{m2.group(1)}대비 {m2.group(2)}%")
+
+    # ─ 소송/판결/중재/화해 ────────────────────────────────────
+    elif any(kw in report_nm for kw in ["소송", "판결", "중재", "화해"]):
+        if re.search(r"(승소|인용|승리|원고\s*승)", clean):
+            extracted.append("승소")
+        elif re.search(r"(패소|기각|패배|원고\s*패)", clean):
+            extracted.append("패소")
+        elif "화해" in clean or "조정" in clean:
+            extracted.append("화해/조정")
+
+        m = re.search(r"청구\s*금액\s*[:\s]*([\d,]+)\s*(원|백만원|억원?)?", clean)
+        if m:
+            val_str = m.group(1).replace(",", "")
+            unit    = m.group(2) or "원"
+            try:
+                val = int(val_str)
+                if "백만" in unit:
+                    val_억 = val / 100
+                elif "억" in unit:
+                    val_억 = val
+                else:
+                    val_억 = val / 100_000_000
+                extracted.append(f"청구금액 {val_억:.0f}억")
+            except ValueError:
+                extracted.append(f"청구금액 {m.group(1)}{m.group(2) or ''}")
+
+    # ─ 임상/허가/FDA/식약처 ──────────────────────────────────
+    elif any(kw in report_nm for kw in ["임상", "허가", "FDA", "식약처"]):
+        m = re.search(r"임상\s*([1-3]|I{1,3})\s*상", clean)
+        if m:
+            extracted.append(f"임상 {m.group(1)}상")
+
+        for agency in ["FDA", "식약처", "EMA"]:
+            if agency in clean:
+                extracted.append(agency)
+                break
+
+        m2 = re.search(r"적응증\s*[:\s]*([가-힣a-zA-Z\s]{2,20})", clean)
+        if m2:
+            extracted.append(f"적응증: {m2.group(1).strip()}")
+
+    # ─ 배당결정 ──────────────────────────────────────────────
+    elif "배당" in report_nm:
+        m = re.search(r"시가\s*배당률\s*[:\s]*([\d.]+)\s*%", clean)
+        if m:
+            extracted.append(f"시가배당률 {m.group(1)}%")
+        m2 = re.search(r"배당\s*금\s*[:\s]*([\d,]+)\s*(원|억원?)?", clean)
+        if m2:
+            extracted.append(f"배당금 {m2.group(1)}{m2.group(2) or '원'}")
+
+    # ─ 무상증자/유상증자 ─────────────────────────────────────
+    elif any(kw in report_nm for kw in ["무상증자", "유상증자"]):
+        m = re.search(r"신주\s*발행\s*주식\s*수\s*[:\s]*([\d,]+)\s*주?", clean)
+        if m:
+            extracted.append(f"신주 {m.group(1)}주")
+        m2 = re.search(r"(증자\s*비율|무상\s*비율)\s*[:\s]*([\d.]+)\s*%?", clean)
+        if m2:
+            extracted.append(f"증자비율 {m2.group(2)}%")
+
+    # ─ 기타 ──────────────────────────────────────────────────
+    else:
+        amounts = re.findall(r"([\d,]+)\s*억\s*원?", clean[:2000])
+        if amounts:
+            extracted.append(f"{amounts[0]}억원")
+
+    if not extracted:
+        return ""
+
+    return ", ".join(extracted)
 
 
 # ── 규모 상세조회 (방법A 핵심) ────────────────────────────────
@@ -213,7 +433,7 @@ def _fetch_and_filter_size(
     if "배당결정" in report_nm:
         return _fetch_dividend_size(corp_code, date_str)
 
-    # 자사주, MOU, 특허, 판결, 주요주주 → 규모 필터 없이 통과
+    # 자사주, MOU, 특허, 판결, 주요주주, 소송, 임상 등 → 규모 필터 없이 통과
     return ("N/A", True)
 
 
@@ -246,7 +466,6 @@ def _fetch_contract_size(corp_code: str, date_str: str) -> tuple[str, bool]:
             return ("N/A", True)
 
         row = items[0]
-        # 첫 실행 시 실제 필드명 확인용 (안정화 후 제거 가능)
         logger.debug(f"[dart] piicDecsn 필드목록: {list(row.keys())}")
 
         # 자기자본대비 비율 우선

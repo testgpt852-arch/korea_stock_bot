@@ -194,8 +194,16 @@ CLOSING_STRENGTH_TOP_N = 7
 VOLUME_FLAT_CHANGE_MAX = 5.0
 VOLUME_FLAT_SURGE_MIN  = 50.0
 VOLUME_FLAT_TOP_N      = 7
-FUND_INFLOW_CAP_MIN    = 100_000_000_000  # 최소 시가총액 (1000억원)
-FUND_INFLOW_TOP_N      = 7
+FUND_INFLOW_CAP_MIN    = 30_000_000_000   # v13.0: 1000억 → 300억 (소형주 포함)
+FUND_INFLOW_TOP_N      = 20               # v13.0: 7 → 20
+
+# ── v13.0 신규 상수 ────────────────────────────────────────────
+COMMODITY_SIGNAL_MIN   = 1.5              # 원자재 ±1.5%+ 필터
+PRICE_CAP_MAX          = 300_000_000_000  # 시총 3000억 이하 (소형주 집중)
+PRICE_GAINER_MIN_RATE  = 15.0             # 급등 기준 15%+ (기존 7%)
+VOLUME_SURGE_MIN_RATIO = 5.0              # 거래량 급증 500%+
+SHORT_TOP_N            = 20              # 공매도 상위 N종목
+MORNING_PICK_MAX       = 15              # 아침봇 최대 픽 (기존 5 → 15)
 
 # ── Phase 3: SQLite DB 경로 (v3.3 신규) ─────────────────────
 DB_PATH = os.environ.get("DB_PATH", "/data/bot_db.sqlite")
@@ -249,6 +257,7 @@ CHART_DAYS = int(os.environ.get("CHART_DAYS", "30"))
 
 # ── DART 공시 필터 키워드 ────────────────────────────────────
 DART_KEYWORDS = [
+    # 기존
     "수주",
     "배당결정",
     "자사주취득결정",
@@ -257,12 +266,23 @@ DART_KEYWORDS = [
     "특허",
     "판결",
     "주요주주",
+    # 신규 추가 (v13.0)
+    "무상증자",
+    "유상증자",
+    "최대주주변경",
+    "임상",
+    "허가",
+    "FDA",
+    "식약처",
+    "소송",
+    "중재",
+    "화해",
 ]
 
 # ── DART 규모 필터 ───────────────────────────────────────────
-DART_DIVIDEND_MIN_RATE    = 3
-DART_CONTRACT_MIN_RATIO   = 10
-DART_CONTRACT_MIN_BILLION = 50
+DART_DIVIDEND_MIN_RATE    = 5     # v13.0: 3 → 5
+DART_CONTRACT_MIN_RATIO   = 20   # v13.0: 10 → 20
+DART_CONTRACT_MIN_BILLION = 100  # v13.0: 50 → 100
 
 # ── 수급 데이터 조회 기간 ────────────────────────────────────
 INSTITUTION_DAYS = 5
@@ -283,31 +303,15 @@ US_SECTOR_TICKERS = {
     "SLX":  "철강",            # VanEck Steel ETF
 }
 
-US_SECTOR_KR_INDUSTRY = {
-    "기술/반도체":    ["반도체", "IT하드웨어", "전자장비"],
-    "에너지/정유":    ["에너지", "정유"],
-    "소재/화학":      ["화학", "정밀화학"],
-    "산업재/방산":    ["항공", "방산", "기계"],
-    "바이오/헬스케어":["제약", "바이오", "의료"],
-    "금융":           ["은행", "증권", "보험"],
-    # v10.0 Phase 1 추가
-    "철강/비철금속":  ["철강", "금속", "비철"],
-    "철강":           ["철강", "금속"],
-}
 
-COMMODITY_KR_INDUSTRY = {
-    "copper":    ["전기/전선", "전선", "전기장비"],
-    "silver":    ["귀금속", "비철금속", "태양광"],
-    "gas":       ["가스", "에너지"],
-    # v10.0 Phase 1 추가
-    "steel":     ["철강", "금속"],          # TIO=F 철광석 선물
-    "aluminum":  ["비철금속", "알루미늄", "항공"],  # ALI=F 알루미늄
-}
+US_SECTOR_SIGNAL_MIN = 2.0   # v13.0: 1.0 → 2.0 (더 강한 미국 섹터 신호만 필터)
 
-SECTOR_TOP_N         = 5
-US_SECTOR_SIGNAL_MIN = 1.0
-
-# ── v6.0: 잠재 이슈 해결 & Prism 개선 흡수 ─────────────────────
+# ══════════════════════════════════════════════════════════════
+# v13.0: US_SECTOR_KR_INDUSTRY, COMMODITY_KR_INDUSTRY 전면 삭제
+# REDESIGN_v13 §2 삭제 대상 / §11 절대 불변 규칙 — 하드코딩 섹터 매핑 금지
+# 미국 섹터 등락률·원자재 수치는 원문 그대로 AI(Gemini)에 전달
+# data_collector._build_signals() 제거와 동시에 폐기
+# ══════════════════════════════════════════════════════════════
 
 # [이슈④] TRADING_MODE=REAL 전환 안전장치
 # REAL 전환 감지 시 텔레그램 확인 메시지 발송 후 딜레이 적용

@@ -8,6 +8,9 @@ collectors/price_domestic.py
 - v2.3: 업종 분류 수집 추가, by_sector 반환 추가
 - v2.5: 등락률 직접 계산으로 전환, 20일 범위 확장
 - v11.0: [pykrx 1.2.x 호환 전면 개선]
+- v13.0: 시총 필터 추가 (PRICE_CAP_MAX 3000억 이하)
+         top_gainers 기준 7% → 15% (config.PRICE_GAINER_MIN_RATE)
+         반환값 entry에 "시가총액" 필드 추가
         pykrx 1.2.x에서 내부 KRX API 응답 처리 변경으로 다수 함수 KeyError 발생
         모든 주요 함수에 폴백 전략 추가:
           _fetch_index:      ETF 프록시 폴백 (KODEX200 / KODEX코스닥150)
@@ -36,7 +39,7 @@ def collect_daily(target_date: datetime = None) -> dict:
         "kospi":        dict,   {"close": float, "change_rate": float}
         "kosdaq":       dict,
         "upper_limit":  list,   상한가 종목
-        "top_gainers":  list,   급등(7%이상) 상위 20개
+        "top_gainers":  list,   급등(15%이상, 시총 3000억 이하) 상위 20개   # v13.0
         "top_losers":   list,   급락(-7%이하) 상위 10개
         "institutional":list,   기관/외인 순매수 상위
         "short_selling":list,   공매도 상위
@@ -73,12 +76,19 @@ def collect_daily(target_date: datetime = None) -> dict:
     all_stocks = _fetch_all_stocks(date_str, target_date)
     result["by_code"]     = all_stocks
     result["by_name"]     = {v["종목명"]: v for v in all_stocks.values() if v["종목명"]}
+    # v13.0: 시총 3000억 이하 필터 + top_gainers 15%+ 기준 상향
+    cap_max = getattr(config, "PRICE_CAP_MAX", 300_000_000_000)
+    gainer_min = getattr(config, "PRICE_GAINER_MIN_RATE", 15.0)
+
     result["upper_limit"] = sorted(
-        [v for v in all_stocks.values() if v["등락률"] >= 29.0],
+        [v for v in all_stocks.values()
+         if v["등락률"] >= 29.0 and v.get("시가총액", cap_max + 1) <= cap_max],
         key=lambda x: x["등락률"], reverse=True
     )
     result["top_gainers"] = sorted(
-        [v for v in all_stocks.values() if 7.0 <= v["등락률"] < 29.0],
+        [v for v in all_stocks.values()
+         if gainer_min <= v["등락률"] < 29.0
+         and v.get("시가총액", cap_max + 1) <= cap_max],
         key=lambda x: x["등락률"], reverse=True
     )[:20]
     result["top_losers"]  = sorted(
@@ -261,6 +271,7 @@ def _parse_ohlcv_all_tickers(df, market: str) -> dict:
     close_col  = _find_col(df.columns, ["종가",  "Close",  "close"])
     change_col = _find_col(df.columns, ["등락률", "Change", "change"])
     vol_col    = _find_col(df.columns, ["거래량", "Volume", "volume"])
+    cap_col    = _find_col(df.columns, ["시가총액", "Marcap", "marcap", "MarketCap"])  # v13.0
 
     if not close_col:
         logger.warning(f"[price] {market} 종가 컬럼 없음 (실제: {list(df.columns)})")
@@ -273,6 +284,7 @@ def _parse_ohlcv_all_tickers(df, market: str) -> dict:
             close  = float(row[close_col])
             vol    = int(row[vol_col])      if vol_col    else 0
             change = float(row[change_col]) if change_col else 0.0
+            cap    = int(row[cap_col])      if cap_col    else 0    # v13.0
             name   = pykrx_stock.get_market_ticker_name(ticker)
             result[ticker] = {
                 "종목코드": ticker,
@@ -280,6 +292,7 @@ def _parse_ohlcv_all_tickers(df, market: str) -> dict:
                 "등락률":   change,
                 "거래량":   vol,
                 "종가":     close,
+                "시가총액": cap,   # v13.0 신규
                 "시장":     market,
                 "업종명":   "",
             }
@@ -338,6 +351,8 @@ def _fetch_market_stocks_parallel(
                 chg_col     = _find_col(df.columns, ["등락률", "Change", "change"])
                 change_rate = float(df.iloc[-1][chg_col]) if chg_col else 0.0
 
+            # v13.0: 병렬 조회에서는 시가총액 개별 API 부재 → 0 기본값
+            # (일괄 조회 시 cap_col이 있으면 채워짐)
             name = pykrx_stock.get_market_ticker_name(ticker)
             return ticker, {
                 "종목코드": ticker,
@@ -345,6 +360,7 @@ def _fetch_market_stocks_parallel(
                 "등락률":   change_rate,
                 "거래량":   vol,
                 "종가":     close,
+                "시가총액": 0,   # v13.0 신규 (병렬 폴백은 0 기본값)
                 "시장":     market,
                 "업종명":   "",
             }
