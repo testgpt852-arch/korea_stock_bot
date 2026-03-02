@@ -398,6 +398,8 @@ def init_db() -> None:
     _migrate_v130(db_path)
     # [v13.0 Step 4] daily_picks 테이블 마이그레이션 (idempotent)
     _migrate_v130_picks(db_path)
+    # [v13.1] positions.pick_type 컬럼 추가 (단타/스윙 청산 분기)
+    _migrate_v131(db_path)
 
 
 def _migrate_v42(db_path: str) -> None:
@@ -446,39 +448,7 @@ def _migrate_v43(db_path: str) -> None:
     try:
         c = conn.cursor()
 
-        # trading_journal 테이블 (없으면 생성)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS trading_journal (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                trading_id          INTEGER REFERENCES trading_history(id),
-                ticker              TEXT    NOT NULL,
-                name                TEXT,
-                buy_time            TEXT,
-                sell_time           TEXT,
-                buy_price           INTEGER,
-                sell_price          INTEGER,
-                profit_rate         REAL,
-                trigger_source      TEXT,
-                close_reason        TEXT,
-                market_env          TEXT,
-                situation_analysis  TEXT    DEFAULT '{}',
-                judgment_evaluation TEXT    DEFAULT '{}',
-                lessons             TEXT    DEFAULT '[]',
-                pattern_tags        TEXT    DEFAULT '[]',
-                one_line_summary    TEXT,
-                created_at          TEXT    NOT NULL
-            )
-        """)
-
-        # 인덱스
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_journal_ticker
-            ON trading_journal(ticker, created_at)
-        """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_journal_pattern
-            ON trading_journal(pattern_tags)
-        """)
+        # trading_journal CREATE TABLE → init_db 에서 최신 DDL로 생성 (중복 제거)
 
         # trading_principles.is_active 컬럼 추가 (기존 DB 호환)
         c.execute("PRAGMA table_info(trading_principles)")
@@ -568,24 +538,7 @@ def _migrate_v70(db_path: str) -> None:
     try:
         c = conn.cursor()
 
-        # kospi_index_stats 테이블 (없으면 생성)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS kospi_index_stats (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_date      TEXT    NOT NULL,
-                kospi_level     INTEGER NOT NULL,
-                kospi_range     TEXT    NOT NULL,
-                win_count       INTEGER DEFAULT 0,
-                total_count     INTEGER DEFAULT 0,
-                win_rate        REAL    DEFAULT 0.0,
-                avg_profit_rate REAL    DEFAULT 0.0,
-                last_updated    TEXT
-            )
-        """)
-        c.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_kospi_range
-            ON kospi_index_stats(kospi_range)
-        """)
+        # kospi_index_stats CREATE TABLE → init_db 에서 최신 DDL로 생성 (중복 제거)
 
         # [v7.0] trading_history.buy_market_context 컬럼 추가
         # update_index_stats()가 이 컬럼으로 KOSPI 레벨을 파싱해 구간별 승률 집계
@@ -645,91 +598,18 @@ def _migrate_v100(db_path: str) -> None:
 
 def _migrate_v106(db_path: str) -> None:
     """
-    [v10.6 Phase 4-2] theme_accuracy + signal_weights 테이블 생성.
-    accuracy_tracker.py 가 사용. init_db() 에서 이미 CREATE IF NOT EXISTS 처리하지만
-    기존 DB에 없는 경우를 위한 idempotent 마이그레이션.
+    [v10.6] theme_accuracy + signal_weights 테이블 생성.
+    → init_db() 에서 최신 DDL로 이미 생성 (중복 제거).
     """
-    conn = sqlite3.connect(db_path)
-    try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS theme_accuracy (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                date             TEXT    NOT NULL UNIQUE,
-                predicted_themes TEXT    DEFAULT '[]',
-                predicted_picks  TEXT    DEFAULT '[]',
-                actual_themes    TEXT,
-                actual_picks     TEXT,
-                match_count      INTEGER DEFAULT 0,
-                total_predicted  INTEGER DEFAULT 0,
-                accuracy_rate    REAL,
-                signal_sources   TEXT    DEFAULT '[]',
-                created_at       TEXT    NOT NULL,
-                updated_at       TEXT
-            )
-        """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_accuracy_date
-            ON theme_accuracy(date)
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS signal_weights (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_type  TEXT    NOT NULL UNIQUE,
-                weight       REAL    DEFAULT 1.0,
-                sample_count INTEGER DEFAULT 0,
-                win_rate     REAL    DEFAULT 0.0,
-                last_updated TEXT
-            )
-        """)
-        c.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_weights_type
-            ON signal_weights(signal_type)
-        """)
-        conn.commit()
-        logger.info("[db] v10.6 마이그레이션 완료 — theme_accuracy + signal_weights 테이블 확인")
-    except Exception as e:
-        logger.warning(f"[db] v10.6 마이그레이션 경고: {e}")
-    finally:
-        conn.close()
+    pass  # init_db에서 처리
 
 
 def _migrate_v130(db_path: str) -> None:
     """
-    [v13.0 Step 5] rag_patterns 테이블 + 인덱스 생성.
-    tracking/rag_pattern_db.py 가 사용.
-    기존 DB에 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    [v13.0] rag_patterns 테이블 생성.
+    → init_db() 에서 최신 DDL로 이미 생성 (중복 제거).
     """
-    conn = sqlite3.connect(db_path)
-    try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS rag_patterns (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                date          TEXT    NOT NULL,
-                signal_type   TEXT    NOT NULL,
-                stock_name    TEXT,
-                stock_code    TEXT,
-                cap_tier      TEXT,
-                was_picked    INTEGER DEFAULT 0,
-                pick_rank     INTEGER,
-                max_return    REAL,
-                hit_20pct     INTEGER DEFAULT 0,
-                hit_upper     INTEGER DEFAULT 0,
-                pattern_memo  TEXT,
-                created_at    TEXT    NOT NULL
-            )
-        """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_rag_signal_cap
-            ON rag_patterns(signal_type, cap_tier, date)
-        """)
-        conn.commit()
-        logger.info("[db] v13.0 마이그레이션 완료 — rag_patterns 테이블 확인")
-    except Exception as e:
-        logger.warning(f"[db] v13.0 마이그레이션 경고: {e}")
-    finally:
-        conn.close()
+    pass  # init_db에서 처리
 
 
 def get_conn() -> sqlite3.Connection:
@@ -750,35 +630,30 @@ def get_conn() -> sqlite3.Connection:
 
 def _migrate_v130_picks(db_path: str) -> None:
     """
-    [v13.0 Step 4] daily_picks 테이블 + 인덱스 생성.
-    morning_analyzer._pick_final() 이 사용.
-    기존 DB에 없으면 생성 (idempotent — 여러 번 실행해도 안전).
+    [v13.0] daily_picks 테이블 생성.
+    → init_db() 에서 최신 DDL로 이미 생성 (중복 제거).
+    """
+    pass  # init_db에서 처리
+
+
+def _migrate_v131(db_path: str) -> None:
+    """
+    [v13.1] positions 테이블에 pick_type 컬럼 추가.
+    단타(공시/테마) vs 스윙(순환매/숏스퀴즈) 청산 분기용.
+    이미 존재하면 건너뜀 (idempotent).
     """
     conn = sqlite3.connect(db_path)
     try:
         c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS daily_picks (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                date        TEXT    NOT NULL,
-                rank        INTEGER NOT NULL,
-                stock_code  TEXT    NOT NULL,
-                stock_name  TEXT,
-                signal_type TEXT,
-                cap_tier    TEXT,
-                reason      TEXT,
-                target_rate TEXT,
-                stop_loss   TEXT,
-                created_at  TEXT    NOT NULL
-            )
-        """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_daily_picks_date
-            ON daily_picks(date)
-        """)
-        conn.commit()
-        logger.info("[db] v13.0 마이그레이션 완료 — daily_picks 테이블 확인")
+        c.execute("PRAGMA table_info(positions)")
+        existing_cols = {row[1] for row in c.fetchall()}
+        if "pick_type" not in existing_cols:
+            c.execute("ALTER TABLE positions ADD COLUMN pick_type TEXT DEFAULT '단타'")
+            conn.commit()
+            logger.info("[db] v13.1 마이그레이션 완료 — positions.pick_type 추가")
+        else:
+            logger.info("[db] v13.1 마이그레이션 — positions.pick_type 이미 존재")
     except Exception as e:
-        logger.warning(f"[db] v13.0 daily_picks 마이그레이션 경고: {e}")
+        logger.warning(f"[db] v13.1 마이그레이션 경고: {e}")
     finally:
         conn.close()

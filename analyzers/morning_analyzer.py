@@ -41,7 +41,8 @@ analyzers/morning_analyzer.py
   ② 텔레그램 발송 금지
   ③ DB 직접 기록 금지
   ④ KIS 직접 호출 금지
-  ⑤ AI 모델: gemini-2.5-flash 만 (다른 모델 절대 금지)
+  ⑤ AI 모델: utils/ai_client.AI_MODELS 폴백 순서 준수
+             (gemini-3-flash-preview → gemini-2.5-flash → gemini-2.5-flash-lite → gemma-3-27b-it)
   ⑥ SDK: google-genai 만 (google-generativeai 금지)
 
 [변경 이력]
