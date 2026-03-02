@@ -43,7 +43,7 @@ _realtime_started = False
 
 
 async def run_morning_bot():
-    """07:30 / 08:30 아침봇"""
+    """07:30 아침봇"""
     if not is_market_open(get_today()):
         logger.info("[main] 휴장일 — 아침봇 건너뜀")
         return
@@ -335,8 +335,7 @@ async def main():
     scheduler.add_job(run_data_collector, "cron", hour=6, minute=0, id="data_collector")
     logger.info("[main] data_collector 스케줄 등록 — 06:00 (병렬 수집)")
 
-    scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot_1")
-    scheduler.add_job(run_morning_bot, "cron", hour=8,  minute=30, id="morning_bot_2")
+    scheduler.add_job(run_morning_bot, "cron", hour=7,  minute=30, id="morning_bot")
 
     # 장중봇 시작/종료
     scheduler.add_job(start_realtime_bot, "cron", hour=9,  minute=0,  id="rt_start")
@@ -372,7 +371,7 @@ async def main():
     scheduler.start()
     logger.info("스케줄 등록 완료")
     logger.info("  data_collector: 매일 06:00 (병렬 수집 — Step 7)")
-    logger.info("  아침봇: 매일 07:30 / 08:30")
+    logger.info("  아침봇: 매일 07:30 (단일 실행)")
     logger.info("  장중봇: 매일 09:00~15:30 (KIS REST 폴링)")
     logger.info("  수익률배치: 매일 15:45 (장 마감 직후)")
     logger.info("  주간리포트: 매주 월요일 08:45")

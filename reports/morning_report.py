@@ -112,10 +112,10 @@ async def run(cache: dict = None) -> None:
         except Exception as e:
             logger.warning(f"[morning] intraday set_watchlist 실패 (비치명적): {e}")
 
-        # ── ⑥ WebSocket 워치리스트 저장 ─────────────────────
-        ws_watchlist = _build_ws_watchlist(price_data)
+        # ── ⑥ WebSocket 워치리스트 저장 — 픽 종목만 구독 ────
+        ws_watchlist = _build_ws_watchlist_from_picks(picks, price_data)
         watchlist_state.set_watchlist(ws_watchlist)
-        logger.info(f"[morning] WebSocket 워치리스트 — {len(ws_watchlist)}종목")
+        logger.info(f"[morning] WebSocket 워치리스트 — 픽 {len(ws_watchlist)}종목")
 
         # ── ⑦ 섹터 맵 저장 ──────────────────────────────────
         sector_map = _build_sector_map(price_data)
@@ -294,48 +294,24 @@ async def _collect_fallback(prev, today) -> dict:
 # 내부 헬퍼
 # ══════════════════════════════════════════════════════════════
 
-def _build_ws_watchlist(price_data: dict | None) -> dict[str, dict]:
+def _build_ws_watchlist_from_picks(picks: list[dict], price_data: dict | None) -> dict[str, dict]:
     """
-    WebSocket 구독용 워치리스트 생성 (상한가 > 급등 > 기관 순 우선순위).
-    v13.0: signal 기반 등록 제거 (AI picks가 intraday_analyzer로 별도 전달).
+    픽 종목만 WebSocket 구독 대상으로 등록.
+    전일거래량은 price_data에서 조회 (없으면 1 기본값).
     """
-    if not price_data:
-        logger.warning("[morning] price_data 없음 — WebSocket 워치리스트 비어있음")
-        return {}
-
-    by_name: dict[str, dict] = price_data.get("by_name", {})
+    by_code: dict[str, dict] = (price_data or {}).get("by_code", {})
     watchlist: dict[str, dict] = {}
-
-    def add(종목명: str, priority: int) -> None:
-        info = by_name.get(종목명, {})
-        code = info.get("종목코드", "")
+    for pick in picks:
+        code = pick.get("종목코드", "")
         if not code or len(code) != 6:
-            return
-        if code not in watchlist:
-            watchlist[code] = {
-                "종목명":     종목명,
-                "전일거래량": max(info.get("거래량", 0), 1),
-                "우선순위":   priority,
-            }
-
-    for s in price_data.get("upper_limit", []):
-        add(s["종목명"], 1)
-    for s in price_data.get("top_gainers", [])[:20]:
-        add(s["종목명"], 2)
-    for s in price_data.get("institutional", [])[:10]:
-        add(s.get("종목명", ""), 3)
-
-    sorted_items = sorted(watchlist.items(), key=lambda x: x[1]["우선순위"])
-    result = dict(sorted_items[:config.WS_WATCHLIST_MAX])
-
-    p = {1: 0, 2: 0, 3: 0}
-    for v in result.values():
-        p[v["우선순위"]] = p.get(v["우선순위"], 0) + 1
-    logger.info(
-        f"[morning] WebSocket 워치리스트 — "
-        f"상한가:{p[1]} 급등:{p[2]} 기관:{p[3]} 합계:{len(result)}"
-    )
-    return result
+            continue
+        watchlist[code] = {
+            "종목명":     pick.get("종목명", ""),
+            "전일거래량": max(by_code.get(code, {}).get("거래량", 1), 1),
+            "우선순위":   1,
+            "유형":       pick.get("유형", ""),  # 단타/스윙 청산 분기용
+        }
+    return watchlist
 
 
 def _build_sector_map(price_data: dict | None) -> dict[str, str]:

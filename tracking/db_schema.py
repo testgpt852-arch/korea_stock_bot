@@ -152,7 +152,8 @@ def init_db() -> None:
                 peak_price      INTEGER DEFAULT 0,  -- [v4.2] 진입 후 최고가 (Trailing Stop 기준)
                 stop_loss       REAL,               -- [v4.2] 현재 손절가 (원, AI 제공 or 기본값)
                 market_env      TEXT DEFAULT '',    -- [v4.2] 진입 시 시장 환경
-                sector          TEXT DEFAULT ''     -- [v4.4] 진입 종목 섹터 (섹터 분산 체크용)
+                sector          TEXT DEFAULT '',    -- [v4.4] 진입 종목 섹터 (섹터 분산 체크용)
+                pick_type       TEXT DEFAULT '단타' -- [v13.1] 픽 유형: '단타'(공시/테마) / '스윙'(순환매/숏스퀴즈)
             )
         """)
 

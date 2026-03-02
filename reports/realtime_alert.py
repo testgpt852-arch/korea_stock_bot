@@ -279,8 +279,13 @@ async def _handle_trade_signal_numeric(analysis: dict) -> None:
             logger.info(f"[realtime] 자동매매 진입 불가 — {name}: {reason}")
             return
 
+        # [v13.1] 픽 유형 → pick_type 매핑 (단타/스윙 청산 분기)
+        _DAYTRADING = {"공시", "테마"}
+        pick_유형 = analysis.get("유형", "")
+        pick_type = "단타" if pick_유형 in _DAYTRADING else "스윙"
+
         asyncio.create_task(
-            _handle_trade_signal(ticker, name, source, None, market_env, sector)
+            _handle_trade_signal(ticker, name, source, None, market_env, sector, pick_type)
         )
 
     except Exception as e:
@@ -289,9 +294,10 @@ async def _handle_trade_signal_numeric(analysis: dict) -> None:
 
 async def _handle_trade_signal(
     ticker: str, name: str, source: str,
-    stop_loss_price: int | None = None,   # [v4.2] AI 제공 손절가
-    market_env: str = "",                  # [v4.2] 시장 환경
-    sector: str = "",                      # [v4.4] 종목 섹터
+    stop_loss_price: int | None = None,
+    market_env: str = "",
+    sector: str = "",
+    pick_type: str = "단타",               # [v13.1] 단타/스윙 청산 분기용
 ) -> None:
     """
     매수 체결 → DB 기록 → 텔레그램 알림 (v3.4)
@@ -328,6 +334,7 @@ async def _handle_trade_signal(
                 stop_loss_price=stop_loss_price,
                 market_env=market_env,
                 sector=sector,
+                pick_type=pick_type,       # [v13.1]
             )
         )
 

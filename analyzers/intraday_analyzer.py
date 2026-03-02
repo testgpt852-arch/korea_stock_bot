@@ -208,6 +208,7 @@ def poll_all_markets() -> list[dict]:
         근거       = pick.get("근거", "")
         목표등락률  = pick.get("목표등락률", "")
         손절기준   = pick.get("손절기준", "")
+        유형       = pick.get("유형", "")
 
         if not ticker or len(ticker) != 6:
             continue
@@ -254,7 +255,7 @@ def poll_all_markets() -> list[dict]:
                         pass
                 alerted.append(_build_alert(
                     ticker, pick_name, curr_price, change_rate,
-                    prev, acml_vol, 호가분석, 근거, 알림유형,
+                    prev, acml_vol, 호가분석, 근거, 알림유형, 유형,
                 ))
                 logger.info(
                     f"[intraday] {알림유형} — {pick_name} "
@@ -287,7 +288,7 @@ def poll_all_markets() -> list[dict]:
                         pass
                 alert = _build_alert(
                     ticker, pick_name, curr_price, change_rate,
-                    prev, acml_vol, 호가분석, 근거, "급등모멘텀",
+                    prev, acml_vol, 호가분석, 근거, "급등모멘텀", 유형,
                 )
                 alert["직전대비"] = round(delta_rate, 2)
                 alert["순간강도"] = round(순간강도, 1)
@@ -311,7 +312,7 @@ def poll_all_markets() -> list[dict]:
                         _price_alerted.add(ob_key)
                         alerted.append(_build_alert(
                             ticker, pick_name, curr_price, change_rate,
-                            prev, acml_vol, 호가분석, 근거, "매수벽",
+                            prev, acml_vol, 호가분석, 근거, "매수벽", 유형,
                         ))
                         logger.info(
                             f"[intraday] 매수벽 — {pick_name} "
@@ -343,6 +344,7 @@ def _build_alert(
     호가분석:    dict | None,
     근거:        str,
     알림유형:    str,
+    유형:        str = "",
 ) -> dict:
     """알림 dict 공통 생성 헬퍼"""
     prev_rate = prev.get("등락률", change_rate)
@@ -360,6 +362,7 @@ def _build_alert(
         "호가분석":   호가분석,
         "픽근거":     근거,
         "알림유형":   알림유형,
+        "유형":       유형,   # 단타/스윙 청산 분기용
     }
 
 
@@ -459,6 +462,7 @@ def analyze_ws_tick(tick: dict, prdy_vol: int) -> dict | None:
         "호가분석":   None,   # realtime_alert.on_tick() 에서 채움
         "픽근거":     pick_info.get("근거", ""),
         "알림유형":   "급등모멘텀",
+        "유형":       pick_info.get("유형", ""),   # 단타/스윙 청산 분기용
     }
 
 

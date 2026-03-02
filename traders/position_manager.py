@@ -219,6 +219,7 @@ def open_position(
     stop_loss_price: int | None = None,
     market_env: str = "",
     sector: str = "",
+    pick_type: str = "단타",
 ) -> int | None:
     """
     포지션 개설 — DB 기록 (매수 체결 후 호출).
@@ -284,12 +285,12 @@ def open_position(
 
         # positions 테이블에 오픈 포지션 등록
         # [v4.2] peak_price=buy_price (초기값), stop_loss, market_env 추가
-        # [v4.4] sector 추가
+        # [v4.4] sector / [v13.1] pick_type 추가
         c.execute("""
             INSERT INTO positions
                 (trading_id, ticker, name, buy_time, buy_price, qty,
-                 trigger_source, mode, peak_price, stop_loss, market_env, sector)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 trigger_source, mode, peak_price, stop_loss, market_env, sector, pick_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trading_id, ticker, name, buy_time, buy_price, qty,
             trigger_source, config.TRADING_MODE,
@@ -297,6 +298,7 @@ def open_position(
             sl_price,    # stop_loss
             market_env,
             sector,      # [v4.4]
+            pick_type,   # [v13.1] 단타 / 스윙
         ))
         pos_id = c.lastrowid
 
@@ -570,7 +572,8 @@ def force_close_all() -> list[dict]:
     try:
         c = conn.cursor()
         c.execute("""
-            SELECT id, trading_id, ticker, name, buy_price, qty, trigger_source
+            SELECT id, trading_id, ticker, name, buy_price, qty, trigger_source,
+                   COALESCE(pick_type, '단타') as pick_type
             FROM positions WHERE mode = ?
         """, (config.TRADING_MODE,))
         rows = c.fetchall()
@@ -584,13 +587,27 @@ def force_close_all() -> list[dict]:
         logger.info("[position] 강제 청산 대상 없음")
         return []
 
-    logger.info(f"[position] 선택적 강제청산 분석 시작 — {len(rows)}종목")
+    # [v13.1] 스윙 종목은 당일 강제청산 제외 — 익일 아침봇 재평가
+    daytrading_rows = [r for r in rows if r[7] == "단타"]
+    swing_rows      = [r for r in rows if r[7] == "스윙"]
+    if swing_rows:
+        logger.info(
+            f"[position] 스윙 종목 {len(swing_rows)}개 강제청산 제외 "
+            f"({', '.join(r[3] for r in swing_rows)}) — 익일 아침봇 재평가"
+        )
+    rows = daytrading_rows
+
+    if not rows:
+        logger.info("[position] 단타 강제 청산 대상 없음 (스윙만 보유)")
+        return []
+
+    logger.info(f"[position] 단타 강제청산 시작 — {len(rows)}종목")
 
     # ── 현재가 조회 + 수익률 계산 ──────────────────────────────
     from kis import order_client as oc
     positions_with_pnl: list[dict] = []
     for row in rows:
-        pos_id, trading_id, ticker, name, buy_price, qty, source = row
+        pos_id, trading_id, ticker, name, buy_price, qty, source, _pt = row
         try:
             cur = oc.get_current_price(ticker).get("현재가", buy_price)
         except Exception:
