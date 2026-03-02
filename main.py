@@ -17,7 +17,7 @@ main.py
          수익률배치 18:45 → 15:45 (장 마감 직후)로 이동
 - v3.4:  Phase 4 — 자동매매 강제청산 스케줄 추가
          14:50 run_force_close() — 미청산 포지션 전부 시장가 매도
-         AUTO_TRADE_ENABLED=false 시 스케줄 등록 자체를 건너뜀
+         AUTO_TRADE_ENABLED=false 시 함수 내부에서 즉시 return (스케줄은 항상 등록)
 - v6.0:  [이슈④] TRADING_MODE=REAL 전환 안전장치 — 시작 시 감지 + 텔레그램 확인 + 5분 딜레이
          [5번/P1] 기억 압축 배치 — 매주 일요일 03:30 스케줄 추가
 - v10.0: [Phase 2] 지정학 뉴스 수집 배치 추가
@@ -51,8 +51,9 @@ async def run_morning_bot():
     from collectors.data_collector import get_cache, is_fresh
 
     # [v13.0] data_collector 캐시 활용 — cache dict 하나를 그대로 전달
-    dc = get_cache()
-    if not is_fresh(max_age_minutes=180):
+    if is_fresh(max_age_minutes=180):
+        dc = get_cache()
+    else:
         logger.warning("[main] data_collector 캐시 없음 또는 오래됨 — 아침봇이 직접 수집")
         dc = {}
 
@@ -72,9 +73,6 @@ async def run_performance_batch():
 
 async def run_weekly_report():
     """매주 월요일 아침봇 직후 주간 성과 리포트 (Phase 3, v3.3)"""
-    now = datetime.now(KST)
-    if now.weekday() != 0:   # 0 = 월요일
-        return               # 월요일 아니면 조용히 패스
     if not is_market_open(get_today()):
         logger.info("[main] 휴장일 — 주간 리포트 건너뜀")
         return
@@ -302,7 +300,7 @@ async def run_data_collector():
     기존 run_geopolitics_collect() + run_event_calendar_collect() 대체.
 
     수집 결과는 data_collector._cache에 저장.
-    아침봇(08:30)은 data_collector.get_cache()로 캐시를 읽어 사용.
+    아침봇(07:30)은 data_collector.get_cache()로 캐시를 읽어 사용.
     수집 실패 시 비치명적 — 아침봇이 직접 재수집 fallback.
     """
     try:
