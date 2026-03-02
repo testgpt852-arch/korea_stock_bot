@@ -145,8 +145,9 @@ def can_buy(ticker: str, ai_result: dict | None = None,
     # ── [v4.4] 동적 POSITION_MAX ────────────────────────────
     effective_max = get_effective_position_max(market_env)
 
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
 
         # ① 이미 보유 중인지 확인
@@ -210,7 +211,8 @@ def can_buy(ticker: str, ai_result: dict | None = None,
         logger.warning(f"[position] can_buy 검사 오류 ({ticker}): {e}")
         return False, f"검사 오류: {e}"
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def open_position(
@@ -261,8 +263,9 @@ def open_position(
         sl_price = round(buy_price * (1 + config.STOP_LOSS / 100))
         sl_source = f"기본({config.STOP_LOSS}%)"
 
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
 
         # [v7.0] 매수 당시 KOSPI 레벨 기록 (kospi_index_stats 집계용)
@@ -315,7 +318,8 @@ def open_position(
         logger.error(f"[position] 포지션 개설 실패 ({ticker}): {e}")
         return None
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def check_exit() -> list[dict]:
@@ -328,8 +332,9 @@ def check_exit() -> list[dict]:
     Returns:
         청산된 포지션 정보 리스트 (텔레그램 발송용)
     """
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
         # [v4.2] peak_price, stop_loss, market_env 추가 SELECT
         c.execute("""
@@ -342,7 +347,8 @@ def check_exit() -> list[dict]:
         logger.warning(f"[position] check_exit 조회 실패: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     if not rows:
         return []
@@ -378,8 +384,9 @@ def update_trailing_stops() -> int:
     """
     from kis import order_client
 
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
         c.execute("""
             SELECT id, ticker, name, buy_price, peak_price, stop_loss, market_env
@@ -390,7 +397,8 @@ def update_trailing_stops() -> int:
         logger.warning(f"[position] update_trailing_stops 조회 실패: {e}")
         return 0
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     if not rows:
         return 0
@@ -425,8 +433,9 @@ def update_trailing_stops() -> int:
 
     # 수집한 갱신값 일괄 커밋 (연결 1회, commit 1회)
     if pending:
-        conn2 = db_schema.get_conn()
+        conn2 = None
         try:
+            conn2 = db_schema.get_conn()
             c2 = conn2.cursor()
             c2.executemany("""
                 UPDATE positions SET peak_price = ?, stop_loss = ?
@@ -437,7 +446,8 @@ def update_trailing_stops() -> int:
         except Exception as e:
             logger.warning(f"[position] Trailing Stop 일괄 커밋 실패: {e}")
         finally:
-            conn2.close()
+            if conn2:
+                conn2.close()
 
     logger.info(f"[position] Trailing Stop 일괄 갱신 완료 — {updated}종목")
     return updated
@@ -484,8 +494,9 @@ def close_position(pos_id: int, ticker: str, name: str,
     market_env     = ""
     buy_time       = ""
 
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
 
         # [v4.3] journal에 필요한 정보 먼저 조회 (DELETE 전)
@@ -510,7 +521,8 @@ def close_position(pos_id: int, ticker: str, name: str,
     except Exception as e:
         logger.error(f"[position] {ticker} DB 청산 기록 실패: {e}")
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     logger.info(
         f"[position] 포지션 청산 ✅  {name}({ticker})  {reason}  "
@@ -568,8 +580,9 @@ def force_close_all() -> list[dict]:
     if not config.AUTO_TRADE_ENABLED:
         return []
 
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
         c.execute("""
             SELECT id, trading_id, ticker, name, buy_price, qty, trigger_source,
@@ -581,7 +594,8 @@ def force_close_all() -> list[dict]:
         logger.warning(f"[position] force_close_all 조회 실패: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     if not rows:
         logger.info("[position] 강제 청산 대상 없음")
@@ -687,8 +701,9 @@ def final_close_all() -> list[dict]:
     closed = []
     for pos in deferred:
         # positions 테이블에 여전히 존재하는지 확인
-        conn = db_schema.get_conn()
+        conn = None
         try:
+            conn = db_schema.get_conn()
             c = conn.cursor()
             c.execute(
                 "SELECT id, buy_price, qty FROM positions WHERE ticker = ? AND mode = ?",
@@ -698,7 +713,8 @@ def final_close_all() -> list[dict]:
         except Exception:
             row = None
         finally:
-            conn.close()
+            if conn:
+                conn.close()
 
         if not row:
             continue  # 이미 청산됨 (폴링에서 TS/익절로 청산됐을 수 있음)
@@ -740,8 +756,9 @@ def get_open_positions() -> list[dict]:
     [v4.2] peak_price, stop_loss 필드 추가
     [v4.4] sector 필드 추가
     """
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
         c.execute("""
             SELECT ticker, name, buy_price, qty, buy_time, trigger_source,
@@ -763,7 +780,8 @@ def get_open_positions() -> list[dict]:
         logger.warning(f"[position] 포지션 목록 조회 실패: {e}")
         return []
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -857,8 +875,9 @@ def _check_single_exit(
 
 def _update_peak(pos_id: int, new_peak: int, new_stop: float) -> None:
     """positions 테이블의 peak_price / stop_loss 갱신 (상향만)."""
-    conn = db_schema.get_conn()
+    conn = None
     try:
+        conn = db_schema.get_conn()
         c = conn.cursor()
         c.execute("""
             UPDATE positions
@@ -869,7 +888,8 @@ def _update_peak(pos_id: int, new_peak: int, new_stop: float) -> None:
     except Exception as e:
         logger.warning(f"[position] peak_price 갱신 실패 (pos_id={pos_id}): {e}")
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def _calc_unrealized_pnl() -> int:
