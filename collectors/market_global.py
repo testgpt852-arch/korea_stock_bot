@@ -250,4 +250,5 @@ def _empty_result() -> dict:
     return {
         "us_market": ei,
         "commodities": {"copper": dict(ec), "silver": dict(ec), "gas": dict(ec)},
+        "forex":       {},
     }
