@@ -155,30 +155,82 @@ def _collect_newsapi_global_market() -> list[dict]:
 
 
 def _extract_english_stock(title: str) -> str:
+    """
+    영문 뉴스 제목에서 종목명 추출.
+
+    [버그수정] 기존 정규식이 "SK Hynix" → "SK" 만 추출하는 문제 수정.
+    - 원인: 패턴 뒤에 붙은 [^\\s,]* ?[A-Z][a-z]* 가 소문자로 이어지는 경우 매칭 실패
+    - 수정: 회사명 목록을 구체적인 것부터 순서대로 직접 매칭 (더 긴 이름 우선)
+    - 예: "SK Hynix"를 "SK"보다 먼저 검사해야 정확한 종목명 추출 가능
+    """
     import re
-    m = re.search(
-        r"\b(Samsung|SK Hynix|LG|Hyundai|POSCO|Kakao|Naver|Kia|Lotte)\b[^\s,]* ?[A-Z][a-z]*",
-        title,
-    )
-    if m:
-        return m.group(0).strip()
-    m = re.search(
-        r"\b([A-Z]{2,6})\b(?! ?(?:ETF|Index|KOSPI|KOSDAQ|FOMC|Fed|GDP|CPI|USD|EUR))",
-        title,
-    )
-    if m:
+
+    # 한국 주요 기업 영문명 — 구체적인 이름(긴 것)을 먼저, 짧은 것을 나중에
+    # 같은 그룹(SK, Samsung, LG...)은 세부 계열사를 상위에 배치
+    _KNOWN_STOCKS = [
+        # SK 그룹 — 세부 계열사 먼저
+        "SK Hynix", "SK Innovation", "SK Telecom", "SK Biopharmaceuticals",
+        "SK Networks", "SK E&S", "SK On",
+        # Samsung 그룹
+        "Samsung Electronics", "Samsung SDI", "Samsung Biologics",
+        "Samsung C&T", "Samsung SDS", "Samsung Life",
+        # LG 그룹
+        "LG Energy Solution", "LG Electronics", "LG Chem",
+        "LG Display", "LG Innotek", "LG Uplus",
+        # Hyundai 그룹
+        "Hyundai Motor", "Hyundai Steel", "Hyundai Mobis",
+        "Hyundai Glovis", "HD Hyundai", "HD Korea Shipbuilding",
+        # Hanwha 그룹
+        "Hanwha Aerospace", "Hanwha Solutions", "Hanwha Systems", "Hanwha Ocean",
+        # 기타 대형주
+        "POSCO Holdings", "POSCO",
+        "Kakao Corp", "Kakao Bank", "Kakao Games", "Kakao Pay",
+        "Naver Corp",
+        "Celltrion Healthcare", "Celltrion",
+        "LIG Nex1", "Korea Aerospace Industries",
+        "Lotte Chemical", "Lotte Shopping",
+        "KIA", "Kia",
+        # 그룹명 단독 — 반드시 마지막에
+        "SK", "Samsung", "LG", "Hyundai", "Kakao", "Naver", "Lotte",
+    ]
+
+    title_lower = title.lower()
+    for name in _KNOWN_STOCKS:
+        if name.lower() in title_lower:
+            return name  # 정확한 회사명 반환
+
+    # 알려진 회사명 없을 때 — 대문자 약어(티커) 탐색
+    # KOSPI, KOSDAQ, FOMC, Fed 등 시장/지표 약어는 제외
+    _EXCLUDE = {"ETF", "INDEX", "KOSPI", "KOSDAQ", "FOMC", "FED",
+                "GDP", "CPI", "USD", "EUR", "IPO", "IMF", "WTO"}
+    m = re.search(r"\b([A-Z]{2,6})\b", title)
+    if m and m.group(1) not in _EXCLUDE:
         return m.group(1)
+
     return "글로벌종목"
 
 
 def _extract_english_action(text: str) -> str:
+    """
+    영문 텍스트에서 투자 액션 추출.
+
+    [버그수정] "maintain buy rating" → "목표가상향" 오분류 수정.
+    - 원인: "buy rating" 키워드가 목표가상향 조건에 먼저 걸림
+    - 수정: 매수유지(maintain/reiterate) 를 목표가상향보다 먼저 검사
+    - 우선순위: 매수유지 > 목표가상향 > 신규매수 > 목표가하향 > 언급
+    """
     text_lower = text.lower()
-    if any(kw in text_lower for kw in ["upgrade", "raised target", "price target raise", "buy rating"]):
-        return "목표가상향"
-    if any(kw in text_lower for kw in ["initiate", "initiates coverage", "new buy", "outperform"]):
-        return "신규매수"
-    if any(kw in text_lower for kw in ["downgrade", "sell", "underperform", "lower target"]):
-        return "목표가하향"
-    if any(kw in text_lower for kw in ["maintain", "reiterate", "hold rating"]):
+
+    # 매수유지 — 먼저 체크 (maintain buy rating 오분류 방지)
+    if any(kw in text_lower for kw in ["maintain", "reiterate", "hold rating", "reaffirm"]):
         return "매수유지"
+    # 목표가상향 — buy rating 은 maintain 없을 때만
+    if any(kw in text_lower for kw in ["upgrade", "raised target", "price target raise", "buy rating", "raises target"]):
+        return "목표가상향"
+    # 신규매수
+    if any(kw in text_lower for kw in ["initiate", "initiates coverage", "new buy", "outperform", "overweight"]):
+        return "신규매수"
+    # 목표가하향
+    if any(kw in text_lower for kw in ["downgrade", "sell", "underperform", "lower target", "cuts target"]):
+        return "목표가하향"
     return "언급"

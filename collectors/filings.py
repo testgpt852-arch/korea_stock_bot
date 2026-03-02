@@ -408,12 +408,22 @@ def _parse_document_text(text: str, report_nm: str) -> str:
 
     # ─ 무상증자/유상증자 ─────────────────────────────────────
     elif any(kw in report_nm for kw in ["무상증자", "유상증자"]):
+        # 무상증자: "신주발행주식수 1,000,000주" 형태
         m = re.search(r"신주\s*발행\s*주식\s*수\s*[:\s]*([\d,]+)\s*주?", clean)
         if m:
             extracted.append(f"신주 {m.group(1)}주")
+        # 유상증자: "발행주식수 500,000주" 형태 (신주 없는 경우도 포함)
+        if not m:
+            m = re.search(r"발행\s*주식\s*수\s*[:\s]*([\d,]+)\s*주?", clean)
+            if m:
+                extracted.append(f"발행주식수 {m.group(1)}주")
         m2 = re.search(r"(증자\s*비율|무상\s*비율)\s*[:\s]*([\d.]+)\s*%?", clean)
         if m2:
             extracted.append(f"증자비율 {m2.group(2)}%")
+        # 유상증자: 발행가액
+        m3 = re.search(r"발행\s*가\s*액\s*[:\s]*([\d,]+)\s*원?", clean)
+        if m3:
+            extracted.append(f"발행가 {m3.group(1)}원")
 
     # ─ 기타 ──────────────────────────────────────────────────
     else:
